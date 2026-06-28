@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IoS — Internet of Swine</title>
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/charts.css" />
+</head>
+<body>
+
+  <!-- ── LOGIN ─────────────────────────────────────────── -->
+  <div id="login-screen">
+    <div class="login-wrap">
+      <div class="login-logo">
+        <span class="pig-icon">🐷</span>
+        <h1 class="logo-title">IoS</h1>
+        <p class="logo-sub">Internet of Swine · Admin Portal</p>
+      </div>
+      <div class="card login-card">
+        <div class="field-group">
+          <label class="field-label">Username</label>
+          <input id="inp-user" class="inp" type="text" placeholder="admin" />
+        </div>
+        <div class="field-group">
+          <label class="field-label">Password</label>
+          <input id="inp-pass" class="inp" type="password" placeholder="••••••••" />
+        </div>
+        <p id="login-err" class="login-err hidden"></p>
+        <button id="btn-login" class="btn btn-primary btn-full">Sign In</button>
+      </div>
+      <p class="login-note">Dual-mode: Online &amp; Offline (ESP32 local hosting)</p>
+    </div>
+  </div>
+
+  <!-- ── APP SHELL ─────────────────────────────────────── -->
+  <div id="app-shell" class="hidden">
+
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-logo">
+        <span class="pig-icon-sm">🐷</span>
+        <div>
+          <div class="sidebar-title">IoS System</div>
+          <div class="sidebar-sub">Internet of Swine</div>
+        </div>
+      </div>
+
+      <nav>
+        <ul class="nav-list">
+          <li><button class="nav-btn active" data-page="dashboard"><span>📊</span> Dashboard</button></li>
+          <li><button class="nav-btn" data-page="env"><span>🌡️</span> Environmental</button></li>
+          <li><button class="nav-btn" data-page="water"><span>💧</span> Water Mgmt</button></li>
+          <li><button class="nav-btn" data-page="bath"><span>🚿</span> Bathing Schedule</button></li>
+          <li><button class="nav-btn" data-page="clean"><span>🧹</span> Cleaning Schedule</button></li>
+          <li><button class="nav-btn" data-page="auto"><span>⚙️</span> Auto Systems</button></li>
+          <li><button class="nav-btn" data-page="reports"><span>📋</span> Reports</button></li>
+        </ul>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="conn-dot-wrap">
+          <span class="conn-dot"></span>
+          <span class="conn-label">Online · ESP32 Active</span>
+        </div>
+        <button id="btn-logout" class="btn-logout">Sign Out</button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <div class="main-wrap">
+
+      <!-- Topbar -->
+      <header id="topbar">
+        <span id="page-title" class="page-title">Dashboard</span>
+        <div class="topbar-right">
+          <span id="thi-chip" class="badge">THI — · —</span>
+          <span id="live-env" class="live-env">🌡 —°C · 💧 —%</span>
+          <span id="live-time" class="live-time"></span>
+        </div>
+      </header>
+
+      <!-- Pages -->
+      <main id="page-content">
+
+        <!-- DASHBOARD -->
+        <section id="page-dashboard" class="page active">
+          <div id="alert-banner" class="alert-banner hidden"></div>
+          <div class="grid-3 mb-20">
+            <div class="card stat-card">
+              <div class="stat-top">
+                <div>
+                  <div class="field-label">Temperature</div>
+                  <div class="stat-val" id="dash-temp">—</div>
+                </div>
+                <span class="stat-icon">🌡️</span>
+              </div>
+            </div>
+            <div class="card stat-card">
+              <div class="stat-top">
+                <div>
+                  <div class="field-label">Humidity</div>
+                  <div class="stat-val color-blue" id="dash-hum">—</div>
+                </div>
+                <span class="stat-icon">💧</span>
+              </div>
+            </div>
+            <div class="card stat-card">
+              <div class="stat-top">
+                <div>
+                  <div class="field-label">THI</div>
+                  <div class="stat-val" id="dash-thi">—</div>
+                  <span id="dash-thi-badge" class="badge mt-6">—</span>
+                </div>
+                <span class="stat-icon">📊</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid-2 mb-20">
+            <div class="card">
+              <div class="field-label mb-14">Automated Systems</div>
+              <div class="sys-list">
+                <div class="sys-row" id="sys-mist">
+                  <span class="sys-icon">🌫️</span>
+                  <div class="sys-info">
+                    <div class="sys-name">Misting System</div>
+                    <div class="sys-desc">Auto-triggers when THI ≥ threshold</div>
+                  </div>
+                  <span class="badge badge-muted sys-status">Standby</span>
+                </div>
+                <div class="sys-row" id="sys-bath">
+                  <span class="sys-icon">🚿</span>
+                  <div class="sys-info">
+                    <div class="sys-name">Bathing System</div>
+                    <div class="sys-desc">Scheduled twice daily</div>
+                  </div>
+                  <span class="badge badge-muted sys-status">Standby</span>
+                </div>
+                <div class="sys-row" id="sys-clean">
+                  <span class="sys-icon">🧹</span>
+                  <div class="sys-info">
+                    <div class="sys-name">Cleaning System</div>
+                    <div class="sys-desc">Scheduled waste flushing</div>
+                  </div>
+                  <span class="badge badge-muted sys-status">Standby</span>
+                </div>
+              </div>
+            </div>
+            <div class="card tank-card">
+              <div id="dash-tank-visual" class="tank-wrap"></div>
+              <div class="tank-info">
+                <div class="field-label">Water Tank</div>
+                <div id="dash-tank-pct" class="tank-pct">—%</div>
+                <div id="dash-tank-status" class="tank-status-txt muted">—</div>
+                <div class="mt-16">
+                  <div class="field-label">Today's Usage</div>
+                  <div id="dash-usage" class="usage-val">— <span class="muted small">L</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="field-label mb-14">24-Hour Environmental Trend</div>
+            <div class="chart-area" id="chart-dash"></div>
+          </div>
+        </section>
+
+        <!-- ENVIRONMENTAL -->
+        <section id="page-env" class="page ">
+          <div class="grid-3 mb-20">
+            <div class="card">
+              <div class="field-label">Temperature</div>
+              <div class="big-val" id="env-temp">—<span class="big-unit">°C</span></div>
+              <div class="sensor-note">DHT22 Sensor · Live</div>
+            </div>
+            <div class="card">
+              <div class="field-label">Humidity</div>
+              <div class="big-val color-blue" id="env-hum">—<span class="big-unit">%</span></div>
+              <div class="sensor-note">DHT22 Sensor · Live</div>
+            </div>
+            <div class="card">
+              <div class="field-label">THI</div>
+              <div class="big-val" id="env-thi">—</div>
+              <span id="env-thi-badge" class="badge mt-10">—</span>
+              <div class="sensor-note mt-8">= 0.8T + (RH×T − 14.4)/100 + 46.4</div>
+            </div>
+          </div>
+
+          <div class="card mb-20">
+            <div class="field-label mb-12">THI Stress Classification</div>
+            <div class="thi-scale-boxes" id="thi-boxes">
+              <div class="thi-box" data-min="0"  data-max="75" data-color="#3B82F6" data-label="Normal">       <div class="thi-box-range">&lt; 75</div><div class="thi-box-lbl">Normal</div></div>
+              <div class="thi-box" data-min="75" data-max="78" data-color="#F59E0B" data-label="Stressful">    <div class="thi-box-range">75–78</div> <div class="thi-box-lbl">Stressful</div></div>
+              <div class="thi-box" data-min="78" data-max="83" data-color="#F97316" data-label="Extreme Heat"> <div class="thi-box-range">78–83</div> <div class="thi-box-lbl">Extreme Heat</div></div>
+              <div class="thi-box" data-min="83" data-max="999" data-color="#EF4444" data-label="Danger Zone"> <div class="thi-box-range">≥ 83</div>  <div class="thi-box-lbl">Danger Zone</div></div>
+            </div>
+            <div class="thi-gradient-bar">
+              <div class="thi-needle" id="thi-needle"></div>
+            </div>
+            <div class="thi-bar-labels">
+              <span>60</span><span>75</span><span>78</span><span>83</span><span>100+</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="field-label mb-14">24-Hour History</div>
+            <div class="chart-area" id="chart-env"></div>
+          </div>
+        </section>
+
+        <!-- WATER -->
+        <section id="page-water" class="page ">
+          <div class="grid-3 mb-20">
+            <div class="card stat-card">
+              <div class="stat-top">
+                <div>
+                  <div class="field-label">Tank Level</div>
+                  <div class="stat-val" id="water-level-val">—</div>
+                </div>
+                <span class="stat-icon">💧</span>
+              </div>
+            </div>
+            <div class="card stat-card">
+              <div class="stat-top">
+                <div>
+                  <div class="field-label">Today's Usage</div>
+                  <div class="stat-val color-blue" id="water-used-val">—</div>
+                </div>
+                <span class="stat-icon">📏</span>
+              </div>
+            </div>
+            <div class="card stat-card">
+              <div class="stat-top">
+                <div>
+                  <div class="field-label">Flow Rate</div>
+                  <div class="stat-val" id="water-flow-val">—</div>
+                </div>
+                <span class="stat-icon">🚰</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="grid-2 mb-20">
+            <div class="card tank-card center-col">
+              <div id="water-tank-visual" class="tank-wrap"></div>
+              <div class="mt-10 text-center">
+                <div class="muted small">HC-SR04 Ultrasonic Sensor</div>
+                <div id="water-tank-note" class="muted smaller mt-4">—</div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="field-label mb-12">Consumption Breakdown (Today)</div>
+              <div class="breakdown-list" id="water-breakdown"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="field-label mb-14">Weekly Water Usage (L)</div>
+            <div class="chart-area" id="chart-water"></div>
+          </div>
+        </section>
+
+        <!-- BATHING SCHEDULE -->
+        <section id="page-bath" class="page">
+          <div class="sched-topbar mb-20">
+            <span id="bath-count" class="muted small">— schedules active</span>
+            <button class="btn btn-primary" id="btn-add-bath">+ Add Schedule</button>
+          </div>
+          <div class="sched-list" id="bath-list"></div>
+        </section>
+
+        <!-- CLEANING SCHEDULE -->
+        <section id="page-clean" class="page ">
+          <div class="sched-topbar mb-20">
+            <span id="clean-count" class="muted small">— schedules active</span>
+            <button class="btn btn-primary" id="btn-add-clean">+ Add Schedule</button>
+          </div>
+          <div class="sched-list" id="clean-list"></div>
+        </section>
+
+        <!-- AUTO SYSTEMS -->
+        <section id="page-auto" class="page ">
+          <div class="card info-card mb-20">
+            <span>ℹ</span>
+            <p>These systems activate automatically based on environmental thresholds and scheduled times. No manual trigger is required.</p>
+          </div>
+          <div class="card mb-20">
+            <div class="field-label mb-14">Mist Cooling Threshold</div>
+            <div class="threshold-row">
+              <p class="muted small flex-1">Misting activates when temp exceeds this value. Runs 5 min ON / 30 s OFF until temp normalises.</p>
+              <div class="threshold-ctrl">
+                <input type="range" id="threshold-slider" min="25" max="40" value="32" class="slider" />
+                <div class="threshold-val" id="threshold-val">32°C</div>
+              </div>
+            </div>
+          </div>
+          <div id="auto-sys-list"></div>
+        </section>
+
+        <!-- REPORTS -->
+        <section id="page-reports" class="page">
+          <div class="report-topbar mb-20">
+            <div class="range-tabs">
+              <button class="range-tab active" data-range="24h">24h</button>
+              <button class="range-tab" data-range="7d">7d</button>
+              <button class="range-tab" data-range="30d">30d</button>
+            </div>
+            <button class="btn btn-outline">⬇ Export CSV</button>
+          </div>
+          <div class="grid-2 mb-20">
+            <div class="card">
+              <div class="field-label mb-14">Temperature Log</div>
+              <div class="chart-area-sm" id="chart-rep-temp"></div>
+            </div>
+            <div class="card">
+              <div class="field-label mb-14">Humidity Log</div>
+              <div class="chart-area-sm" id="chart-rep-hum"></div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="field-label mb-14">System Activity Log</div>
+            <div class="activity-log" id="activity-log"></div>
+          </div>
+        </section>
+
+      </main>
+    </div><!-- /main-wrap -->
+  </div><!-- /app-shell -->
+
+  <!-- SCHEDULE MODAL -->
+  <div id="sched-modal" class="modal-overlay hidden">
+    <div class="modal-box card">
+      <div class="modal-head">
+        <span id="modal-title" class="modal-title">Add Schedule</span>
+        <button id="modal-close" class="modal-close">×</button>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Time</label>
+        <input id="modal-time" type="time" class="inp" value="06:00" />
+      </div>
+      <div class="field-group">
+        <label class="field-label">Duration (minutes)</label>
+        <input id="modal-dur" type="number" class="inp" value="15" min="1" max="60" />
+      </div>
+      <div class="field-group">
+        <label class="field-label">Days</label>
+        <div class="day-picker" id="day-picker"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="modal-cancel" class="btn btn-outline flex-1">Cancel</button>
+        <button id="modal-save"   class="btn btn-primary flex-1">Add Schedule</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts (order matters) -->
+  <script src="js/app.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/data.js"></script>
+  <script src="js/pages.js"></script>
+  <script src="js/schedule.js"></script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+/* ── Chart containers ────────────────────────────────────── */
+.chart-area {
+  width: 100%;
+  height: 220px;
+  position: relative;
+}
+.chart-area-sm {
+  width: 100%;
+  height: 160px;
+  position: relative;
+}
+
+/* ── SVG chart base ──────────────────────────────────────── */
+.ios-chart {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* ── Axes ────────────────────────────────────────────────── */
+.axis-line  { stroke: var(--border); stroke-width: 1; }
+.grid-line  { stroke: var(--border); stroke-width: 1; stroke-dasharray: 4 4; }
+.axis-label { fill: var(--muted); font-size: 10px; font-family: inherit; }
+
+/* ── Lines ───────────────────────────────────────────────── */
+.line-temp     { fill: none; stroke: #EF4444; stroke-width: 2; }
+.line-humidity { fill: none; stroke: #3B82F6; stroke-width: 2; }
+.line-thi      { fill: none; stroke: #F59E0B; stroke-width: 2; }
+
+/* ── Area fills ──────────────────────────────────────────── */
+.area-temp     { fill: url(#grad-temp);     opacity: .7; }
+.area-thi      { fill: url(#grad-thi);      opacity: .7; }
+
+/* ── Reference lines ─────────────────────────────────────── */
+.ref-warn   { stroke: #F59E0B; stroke-width: 1; stroke-dasharray: 5 4; }
+.ref-danger { stroke: #EF4444; stroke-width: 1; stroke-dasharray: 5 4; }
+.ref-label  { fill: var(--muted); font-size: 9px; font-family: inherit; }
+
+/* ── Bar chart ───────────────────────────────────────────── */
+.bar-mist  { fill: #22C55E; }
+.bar-bathe { fill: #3B82F6; }
+.bar-clean { fill: #F59E0B; }
+
+/* ── Tooltip ─────────────────────────────────────────────── */
+.chart-tooltip {
+  position: absolute;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 11px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .1s;
+  white-space: nowrap;
+  z-index: 10;
+}
+.chart-tooltip.visible { opacity: 1; }
+.tt-row { display: flex; justify-content: space-between; gap: 12px; }
+.tt-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+
+/* ── Legend ──────────────────────────────────────────────── */
+.chart-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  justify-content: center;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.legend-dot {
+  width: 10px; height: 3px;
+  border-radius: 2px;
+  display: inline-block;
+}
