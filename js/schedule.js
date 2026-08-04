@@ -1,23 +1,49 @@
 /* ============================================================
    schedule.js — Schedule management (CRUD) & modal logic
+   Now persisted server-side (Node/SQLite) instead of an
+   in-memory array, so schedules survive a page refresh and are
+   shared across anyone viewing the dashboard.
    ============================================================ */
 
 const SCHEDULE = (() => {
 
+  const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
   const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-
-  /* ── Default schedules ───────────────────────────────────── */
-  let bathSchedules = [
-    { id: 1, label: 'Morning Bath',   time: '06:00', duration: 15, days: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'], active: true  },
-    { id: 2, label: 'Afternoon Bath', time: '14:00', duration: 15, days: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'], active: true  },
-  ];
-  let cleanSchedules = [
-    { id: 1, label: 'Daily Flush',    time: '07:00', duration: 10, days: ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'], active: true  },
-    { id: 2, label: 'Evening Clean',  time: '18:00', duration: 10, days: ['Mon','Wed','Fri'],                         active: false },
-  ];
 
   let _modalType = 'bath';
   let _selectedDays = ['Mon','Wed','Fri'];
+
+  /* ── API helpers ─────────────────────────────────────────── */
+  async function fetchSchedules(type) {
+    const res = await fetch(`${API}/api/schedules?type=${type}`);
+    if (!res.ok) throw new Error(`Failed to load ${type} schedules`);
+    return res.json();
+  }
+
+  async function createSchedule(entry) {
+    const res = await fetch(`${API}/api/schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entry),
+    });
+    if (!res.ok) throw new Error('Failed to create schedule');
+    return res.json();
+  }
+
+  async function toggleScheduleActive(id, active) {
+    const res = await fetch(`${API}/api/schedules/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active }),
+    });
+    if (!res.ok) throw new Error('Failed to update schedule');
+    return res.json();
+  }
+
+  async function deleteScheduleById(id) {
+    const res = await fetch(`${API}/api/schedules/${id}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 204) throw new Error('Failed to delete schedule');
+  }
 
   /* ── Toggle button ───────────────────────────────────────── */
   function renderToggle(active) {
@@ -47,9 +73,11 @@ const SCHEDULE = (() => {
 
       /* toggle */
       const tog = renderToggle(s.active);
-      tog.addEventListener('click', () => {
-        s.active = !s.active;
-        renderList(listId, countId, schedules, type);
+      tog.addEventListener('click', async () => {
+        try {
+          await toggleScheduleActive(s.id, !s.active);
+          await reloadList(type);
+        } catch (err) { console.error(err); }
       });
 
       /* info */
@@ -68,10 +96,11 @@ const SCHEDULE = (() => {
       del.className = 'sched-del';
       del.textContent = '×';
       del.title = 'Delete';
-      del.addEventListener('click', () => {
-        if (type === 'bath')  bathSchedules  = bathSchedules.filter(x => x.id !== s.id);
-        else                  cleanSchedules = cleanSchedules.filter(x => x.id !== s.id);
-        renderList(listId, countId, type === 'bath' ? bathSchedules : cleanSchedules, type);
+      del.addEventListener('click', async () => {
+        try {
+          await deleteScheduleById(s.id);
+          await reloadList(type);
+        } catch (err) { console.error(err); }
       });
 
       row.appendChild(tog);
@@ -80,6 +109,16 @@ const SCHEDULE = (() => {
       row.appendChild(del);
       listEl.appendChild(row);
     });
+  }
+
+  async function reloadList(type) {
+    const [listId, countId] = type === 'bath' ? ['bath-list', 'bath-count'] : ['clean-list', 'clean-count'];
+    try {
+      const schedules = await fetchSchedules(type);
+      renderList(listId, countId, schedules, type);
+    } catch (err) {
+      console.warn(`Could not load ${type} schedules — is the backend running?`, err.message);
+    }
   }
 
   /* ── Day picker ──────────────────────────────────────────── */
@@ -119,26 +158,25 @@ const SCHEDULE = (() => {
   }
 
   /* ── Save ────────────────────────────────────────────────── */
-  function saveModal() {
+  async function saveModal() {
     const time  = document.getElementById('modal-time').value;
     const dur   = parseInt(document.getElementById('modal-dur').value) || 15;
     const label = `${_modalType === 'bath' ? 'Bath' : 'Clean'} ${time}`;
-    const entry = { id: Date.now(), label, time, duration: dur, days: [..._selectedDays], active: true };
+    const entry = { type: _modalType, label, time, duration: dur, days: [..._selectedDays] };
 
-    if (_modalType === 'bath') {
-      bathSchedules.push(entry);
-      renderList('bath-list', 'bath-count', bathSchedules, 'bath');
-    } else {
-      cleanSchedules.push(entry);
-      renderList('clean-list', 'clean-count', cleanSchedules, 'clean');
+    try {
+      await createSchedule(entry);
+      await reloadList(_modalType);
+    } catch (err) {
+      console.error(err);
     }
     closeModal();
   }
 
   /* ── Init ────────────────────────────────────────────────── */
   function init() {
-    renderList('bath-list',  'bath-count',  bathSchedules,  'bath');
-    renderList('clean-list', 'clean-count', cleanSchedules, 'clean');
+    reloadList('bath');
+    reloadList('clean');
 
     document.getElementById('btn-add-bath') .addEventListener('click', () => openModal('bath'));
     document.getElementById('btn-add-clean').addEventListener('click', () => openModal('clean'));

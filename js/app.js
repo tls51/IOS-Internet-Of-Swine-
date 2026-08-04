@@ -6,7 +6,6 @@
 
   /* ── State ───────────────────────────────────────────────── */
   let activePage = 'dashboard';
-  let threshold  = 32;
 
   /* ── Clock ───────────────────────────────────────────────── */
   function startClock() {
@@ -44,7 +43,7 @@
     document.getElementById('page-title').textContent = PAGE_TITLES[key] || key;
 
     /* render page immediately on switch */
-    PAGES.update(DATA.state, activePage, threshold);
+    PAGES.update(DATA.state, activePage);
   }
 
   function initNav() {
@@ -54,16 +53,15 @@
   }
 
   /* ── Threshold slider ────────────────────────────────────── */
+  /* This build is read-only: the mist threshold lives on the
+     ESP32 firmware / backend, not the browser. The slider is
+     disabled and kept in sync by PAGES.updateAuto() on every
+     poll instead of accepting user input here. */
   function initThresholdSlider() {
     const slider = document.getElementById('threshold-slider');
-    const valEl  = document.getElementById('threshold-val');
     if (!slider) return;
-    slider.addEventListener('input', () => {
-      threshold = parseInt(slider.value);
-      DATA.state.threshold = threshold;
-      valEl.textContent = threshold + '°C';
-      PAGES.updateAuto(DATA.state, threshold);
-    });
+    slider.disabled = true;
+    slider.title = 'Configured on the ESP32 firmware (read-only)';
   }
 
   /* ── Range tabs (reports) ────────────────────────────────── */
@@ -116,20 +114,22 @@
   /* ── Live data ticker ────────────────────────────────────── */
   function initTicker() {
     DATA.onTick(state => {
-      PAGES.update(state, activePage, threshold);
+      PAGES.update(state, activePage);
     });
     DATA.start();
   }
 
   /* ── Boot (called after login) ───────────────────────────── */
-  function boot() {
+  async function boot() {
     startClock();
     initNav();
     SCHEDULE.init();
     initThresholdSlider();
     initRangeTabs();
 
-    /* initial render */
+    /* fetch real data once before first paint, then start polling */
+    await DATA.refreshStatus();
+    await DATA.refreshHistory();
     showPage('dashboard');
     initTicker();
   }

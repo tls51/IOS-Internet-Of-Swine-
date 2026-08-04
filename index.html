@@ -62,8 +62,8 @@
 
       <div class="sidebar-footer">
         <div class="conn-dot-wrap">
-          <span class="conn-dot"></span>
-          <span class="conn-label">Online · ESP32 Active</span>
+          <span class="conn-dot" id="conn-dot"></span>
+          <span class="conn-label" id="conn-label">Connecting…</span>
         </div>
         <button id="btn-logout" class="btn-logout">Sign Out</button>
       </div>
@@ -186,7 +186,7 @@
               <div class="field-label">THI</div>
               <div class="big-val" id="env-thi">—</div>
               <span id="env-thi-badge" class="badge mt-10">—</span>
-              <div class="sensor-note mt-8">= 0.8T + (RH×T − 14.4)/100 + 46.4</div>
+              <div class="sensor-note mt-8">= (0.8T) + ((RH/100)×(T − 14.4))+ 46.4</div>
             </div>
           </div>
 
@@ -358,6 +358,7 @@
   </div>
 
   <!-- Scripts (order matters) -->
+  <script src="js/config.js"></script>
   <script src="js/app.js"></script>
   <script src="js/charts.js"></script>
   <script src="js/data.js"></script>

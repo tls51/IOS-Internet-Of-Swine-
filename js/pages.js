@@ -40,10 +40,24 @@ const PAGES = (() => {
   function updateTopbar(state) {
     const tl = DATA.thiLevel(state.thi);
     const chip = document.getElementById('thi-chip');
-    chip.textContent = `THI ${state.thi} · ${tl.label}`;
+    const thiTxt = state.thi != null ? `THI ${state.thi} · ${tl.label}` : 'THI — · —';
+    chip.textContent = thiTxt;
     chip.className   = `badge ${tl.cls}`;
-    document.getElementById('live-env').textContent = `🌡 ${state.temp}°C · 💧 ${state.humidity}%`;
+
+    const envTxt = (state.temp != null && state.humidity != null)
+      ? `🌡 ${state.temp}°C · 💧 ${state.humidity}%`
+      : '🌡 —°C · 💧 —%';
+    document.getElementById('live-env').textContent = envTxt;
     document.getElementById('live-time').textContent = new Date().toLocaleTimeString();
+
+    /* connection indicator */
+    const dot   = document.getElementById('conn-dot');
+    const label = document.getElementById('conn-label');
+    if (dot && label) {
+      dot.style.background   = state.connected ? 'var(--primary)' : 'var(--danger)';
+      dot.style.boxShadow    = state.connected ? '0 0 6px var(--primary)' : '0 0 6px var(--danger)';
+      label.textContent      = state.connected ? 'Online · ESP32 Active' : 'Offline · Backend unreachable';
+    }
   }
 
   /* ── Dashboard page ──────────────────────────────────────── */
@@ -52,13 +66,13 @@ const PAGES = (() => {
 
     /* stat cards */
     const tempEl = document.getElementById('dash-temp');
-    tempEl.textContent = state.temp + '°C';
+    tempEl.textContent = state.temp != null ? state.temp + '°C' : '—';
     tempEl.style.color = state.temp > 32 ? '#EF4444' : state.temp > 29 ? '#F59E0B' : 'var(--text)';
 
-    document.getElementById('dash-hum').textContent = state.humidity + '%';
+    document.getElementById('dash-hum').textContent = state.humidity != null ? state.humidity + '%' : '—';
 
     const thiEl = document.getElementById('dash-thi');
-    thiEl.textContent = state.thi;
+    thiEl.textContent = state.thi != null ? state.thi : '—';
     thiEl.style.color = tl.color;
 
     const thiBadge = document.getElementById('dash-thi-badge');
@@ -108,13 +122,13 @@ const PAGES = (() => {
     const tl = DATA.thiLevel(state.thi);
 
     const tempEl = document.getElementById('env-temp');
-    tempEl.innerHTML = `${state.temp}<span class="big-unit">°C</span>`;
+    tempEl.innerHTML = `${state.temp != null ? state.temp : '—'}<span class="big-unit">°C</span>`;
     tempEl.style.color = state.temp > 32 ? '#EF4444' : state.temp > 29 ? '#F59E0B' : '#22C55E';
 
-    document.getElementById('env-hum').innerHTML = `${state.humidity}<span class="big-unit">%</span>`;
+    document.getElementById('env-hum').innerHTML = `${state.humidity != null ? state.humidity : '—'}<span class="big-unit">%</span>`;
 
     const thiEl = document.getElementById('env-thi');
-    thiEl.textContent = state.thi;
+    thiEl.textContent = state.thi != null ? state.thi : '—';
     thiEl.style.color = tl.color;
 
     const badge = document.getElementById('env-thi-badge');
@@ -194,7 +208,17 @@ const PAGES = (() => {
   }
 
   /* ── Auto systems page ───────────────────────────────────── */
-  function updateAuto(state, threshold) {
+  function updateAuto(state) {
+    const threshold = state.threshold;
+
+    /* threshold is configured on the ESP32 firmware in this
+       read-only build — keep the slider in sync with reality
+       instead of letting the browser drive it */
+    const slider = document.getElementById('threshold-slider');
+    const valEl  = document.getElementById('threshold-val');
+    if (slider && document.activeElement !== slider) slider.value = threshold;
+    if (valEl) valEl.textContent = threshold + '°C';
+
     const systems = [
       { label: 'Shower / Bathing System',  icon: '🚿',  active: state.bathActive,  trigger: 'Schedule-based',       desc: 'Executes pre-set bathing schedules via relay-controlled pump.' },
       { label: 'Misting / Cooling System', icon: '🌫️', active: state.mistActive,  trigger: `Temp > ${threshold}°C`, desc: `Activates when temperature exceeds ${threshold}°C. Cycles: 5 min ON → 30 s pause.` },
@@ -228,31 +252,41 @@ const PAGES = (() => {
     ]);
 
     const log = document.getElementById('activity-log');
-    if (!log || log.dataset.populated) return;
-    log.dataset.populated = '1';
-    const entries = [
-      { time: '14:32', type: 'Mist',  cls: 'badge-warn',   msg: 'Misting activated — Temp 33.2°C exceeded threshold 32°C' },
-      { time: '14:27', type: 'Info',  cls: 'badge-blue',   msg: 'Temperature normalised — misting deactivated' },
-      { time: '14:00', type: 'Bath',  cls: 'badge-green',  msg: 'Afternoon bathing schedule executed (15 min)' },
-      { time: '07:05', type: 'Clean', cls: 'badge-green',  msg: 'Morning waste flush completed' },
-      { time: '06:00', type: 'Bath',  cls: 'badge-green',  msg: 'Morning bathing schedule executed (15 min)' },
-      { time: '03:15', type: 'Alert', cls: 'badge-danger', msg: 'Water tank level below 30% — refill recommended' },
-    ];
-    log.innerHTML = entries.map(e => `
-      <div class="activity-item">
-        <span class="activity-time">${e.time}</span>
-        <span class="badge ${e.cls}">${e.type}</span>
-        <span class="activity-msg">${e.msg}</span>
-      </div>`).join('');
+    if (!log) return;
+
+    const TYPE_CLS = { Mist: 'badge-warn', Bath: 'badge-green', Clean: 'badge-green', Alert: 'badge-danger', Info: 'badge-blue' };
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
+
+    fetch(`${API}/api/activity?limit=30`)
+      .then(r => r.json())
+      .then(entries => {
+        if (!entries.length) {
+          log.innerHTML = `<div class="activity-item"><span class="activity-msg muted">No activity logged yet.</span></div>`;
+          return;
+        }
+        log.innerHTML = entries.map(e => {
+          const time = new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const cls  = TYPE_CLS[e.type] || 'badge-muted';
+          return `
+            <div class="activity-item">
+              <span class="activity-time">${time}</span>
+              <span class="badge ${cls}">${e.type}</span>
+              <span class="activity-msg">${e.msg}</span>
+            </div>`;
+        }).join('');
+      })
+      .catch(() => {
+        log.innerHTML = `<div class="activity-item"><span class="activity-msg muted">Could not reach backend for activity log.</span></div>`;
+      });
   }
 
   /* ── Master update ───────────────────────────────────────── */
-  function update(state, activePage, threshold) {
+  function update(state, activePage) {
     updateTopbar(state);
     if (activePage === 'dashboard') updateDashboard(state);
     if (activePage === 'env')       updateEnv(state);
     if (activePage === 'water')     updateWater(state);
-    if (activePage === 'auto')      updateAuto(state, threshold);
+    if (activePage === 'auto')      updateAuto(state);
     if (activePage === 'reports')   updateReports(state);
   }
 

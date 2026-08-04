@@ -1,0 +1,15 @@
+{
+  "name": "ios-backend",
+  "version": "1.0.0",
+  "description": "Internet of Swine (IoS) backend — receives ESP32 sensor pushes, stores them in SQLite, serves the dashboard.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
