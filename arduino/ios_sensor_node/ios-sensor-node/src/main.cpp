@@ -82,11 +82,22 @@ int bathMinute = 32;   // 1:32 PM
 bool bathingDone = false;
 
 /* ===========================
-   RELAY (from RelayModule.ino)
-   Drives the misting system based on THI status instead of
-   the original fixed 3s on/3s off demo loop.
+   RELAY & BUZZER SETTINGS
+   ===========================
+   Note: Most single-channel relay modules use ACTIVE-LOW logic
+   (trigger on LOW signal). Set RELAY_ACTIVE_LOW to true for Active-LOW,
+   or false for Active-HIGH relays.
    =========================== */
-#define RELAY_PIN 7
+#define RELAY_PIN 7           // Relay control pin (use GPIO 18/19/27 if standard ESP32)
+#define RELAY_ACTIVE_LOW true // Set true if LOW turns relay ON (standard for relay modules)
+
+/* Set TEST_MODE to true to force relay/buzzer to pulse on every 10s sensor check.
+   Set to false for normal operation (relays trigger on heat stress or bath schedule). */
+#define TEST_MODE true 
+
+/* Optional Piezo Buzzer settings */
+#define HAS_BUZZER false      // Set to true if a dedicated Piezo Buzzer is wired up
+#define BUZZER_PIN 18         // GPIO pin for Piezo Buzzer
 
 /* ===========================
    OPTIONAL: HC-SR04 water tank sensor
@@ -116,6 +127,7 @@ void readAndPushDHT();
 void checkBathingSchedule(const DateTime& now);
 void readAndPushFlow();
 void setMistingRelay(bool on);
+void beepBuzzer(int count = 1, int delayMs = 150);
 #if HAS_WATER_SENSOR
 void readAndPushWater();
 #endif
@@ -151,9 +163,18 @@ void setup() {
     FALLING
   );
 
-  // Relay (from RelayModule.ino) — start OFF
+  // Relay & Buzzer initialization
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);
+  setMistingRelay(false); // start OFF
+
+#if HAS_BUZZER
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+#endif
+
+  // Startup audio/relay test pulse (3 quick clicks/beeps on boot)
+  Serial.println("Performing boot-up Relay & Buzzer test pulse...");
+  beepBuzzer(3, 200);
 
 #if HAS_WATER_SENSOR
   pinMode(TRIG_PIN, OUTPUT);
@@ -197,7 +218,9 @@ void loop() {
 void connectWiFi() {
   Serial.print("Connecting to WiFi: ");
   Serial.println(WIFI_SSID);
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP("IosSensor", "swine2026"); // WiFi Credentials SSID-Password
+  Serial.println(WiFi.softAPIP());
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   unsigned long start = millis();
@@ -216,18 +239,34 @@ void connectWiFi() {
   }
 }
 
-/* ── Relay (from RelayModule.ino, now event-driven instead of
-   a fixed on/off timer) ─────────────────────────────────────── */
+/* ── Relay & Audio Feedback ───────────────────────────────── */
 void setMistingRelay(bool on) {
-  digitalWrite(RELAY_PIN, on ? HIGH : LOW);
-  Serial.println(on ? "Relay -> HIGH (misting ON)" : "Relay -> LOW (misting OFF)");
+  // Handles Active-LOW vs Active-HIGH relay module logic
+  bool pinState = RELAY_ACTIVE_LOW ? !on : on;
+  digitalWrite(RELAY_PIN, pinState ? HIGH : LOW);
+  Serial.printf("Relay (GPIO %d) -> %s (Misting/Bathing %s)\n",
+                RELAY_PIN, pinState ? "HIGH" : "LOW", on ? "ON" : "OFF");
 }
 
-/* ── DHT22 + THI (THI/status logic straight from dht_copy v3) ─
-   THI is still computed here (for the Serial print + misting
-   decision, same as v3), but only raw temp/humidity get pushed
-   to /api/readings — the backend mirrors this same formula, so
-   there's a single source of truth for the stored value. ────── */
+void beepBuzzer(int count, int delayMs) {
+  for (int i = 0; i < count; i++) {
+    setMistingRelay(true);
+#if HAS_BUZZER
+    digitalWrite(BUZZER_PIN, HIGH);
+#endif
+    delay(delayMs);
+
+    setMistingRelay(false);
+#if HAS_BUZZER
+    digitalWrite(BUZZER_PIN, LOW);
+#endif
+    if (i < count - 1) {
+      delay(delayMs);
+    }
+  }
+}
+
+/* ── DHT22 + THI ──────────────────────────────────────────── */
 void readAndPushDHT() {
   float humidity    = dht.readHumidity();
   float temperature = dht.readTemperature();
@@ -241,11 +280,8 @@ void readAndPushDHT() {
   Serial.printf("[%02d:%02d:%02d] Temp=%.1fC Hum=%.1f%%\n",
                 now.hour(), now.minute(), now.second(), temperature, humidity);
 
-  // THI (same formula as v3)
-  float THI =
-    (1.8 * temperature + 32)
-    - ((0.55 - 0.0055 * humidity)
-    * ((1.8 * temperature + 32) - 58));
+  // Swine THI formula: THI = 0.8*T + (RH/100)*(T - 14.4) + 46.4
+  float THI = 0.8 * temperature + (humidity / 100.0) * (temperature - 14.4) + 46.4;
 
   String status;
   if (THI < 74)      status = "NORMAL";
@@ -258,9 +294,14 @@ void readAndPushDHT() {
   Serial.print("Status      : ");
   Serial.println(status);
 
-  if (status != "NORMAL") {
+  if (TEST_MODE) {
+    Serial.println(">>> TEST_MODE ACTIVE: Pulsing relay/buzzer for demonstration <<<");
+    beepBuzzer(2, 100);
+    setMistingRelay(true);
+  } else if (status != "NORMAL") {
     Serial.println(">>> MISTING SYSTEM SHOULD TURN ON <<<");
     setMistingRelay(true);
+    beepBuzzer(1, 300);
   } else {
     Serial.println("Misting System OFF");
     setMistingRelay(false);
@@ -273,7 +314,7 @@ void readAndPushDHT() {
   postJSON("/api/readings", body);
 }
 
-/* ── Scheduled bathing (from dht_copy v3, unchanged logic) ───── */
+/* ── Scheduled bathing ────────────────────────────────────── */
 void checkBathingSchedule(const DateTime& now) {
   if (now.hour() == bathHour &&
       now.minute() == bathMinute &&
@@ -282,10 +323,12 @@ void checkBathingSchedule(const DateTime& now) {
     Serial.println();
     Serial.println("==========================================");
     Serial.println(" SCHEDULED BATHING ACTIVATED ");
-    Serial.println(" Water Pump SHOULD TURN ON ");
+    Serial.println(" Water Pump Relay TURNING ON ");
     Serial.println("==========================================");
 
     bathingDone = true;
+    setMistingRelay(true);
+    beepBuzzer(3, 150);
   }
 
   if (now.minute() != bathMinute) {

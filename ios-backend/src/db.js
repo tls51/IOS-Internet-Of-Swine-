@@ -141,6 +141,20 @@ function setSetting(key, value) {
               ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, String(value));
 }
 
+function getTHIThresholds() {
+  const normalMax  = parseFloat(getSetting('thi_normal_max',  '74'));
+  const stressMax  = parseFloat(getSetting('thi_stress_max',  '78'));
+  const extremeMax = parseFloat(getSetting('thi_extreme_max', '83'));
+  return { normalMax, stressMax, extremeMax };
+}
+
+function setTHIThresholds({ normalMax, stressMax, extremeMax }) {
+  if (normalMax != null)  setSetting('thi_normal_max',  normalMax);
+  if (stressMax != null)  setSetting('thi_stress_max',  stressMax);
+  if (extremeMax != null) setSetting('thi_extreme_max', extremeMax);
+  return getTHIThresholds();
+}
+
 /* ── Activity log ───────────────────────────────────────── */
 function logActivity(type, msg, ts) {
   db.prepare(`INSERT INTO activity_log (ts,type,msg) VALUES (?,?,?)`).run(ts || Date.now(), type, msg);
@@ -155,6 +169,6 @@ module.exports = {
   insertReading, latestReading, readingsSince,
   insertWater, latestWater, weeklyWaterUsage,
   listSchedules, createSchedule, toggleSchedule, deleteSchedule,
-  getSetting, setSetting,
+  getSetting, setSetting, getTHIThresholds, setTHIThresholds,
   logActivity, recentActivity,
 };

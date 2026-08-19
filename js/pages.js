@@ -136,11 +136,27 @@ const PAGES = (() => {
     badge.className   = `badge ${tl.cls} mt-10`;
 
     /* THI classification boxes */
-    document.querySelectorAll('.thi-box').forEach(box => {
+    const { normalMax = 74, stressMax = 78, extremeMax = 83 } = state.thiThresholds || {};
+    const boxes = document.querySelectorAll('.thi-box');
+    if (boxes.length === 4) {
+      boxes[0].dataset.min = 0;                boxes[0].dataset.max = normalMax;
+      boxes[0].querySelector('.thi-box-range').textContent = `< ${normalMax}`;
+
+      boxes[1].dataset.min = normalMax;        boxes[1].dataset.max = stressMax + 0.1;
+      boxes[1].querySelector('.thi-box-range').textContent = `${normalMax}–${stressMax}`;
+
+      boxes[2].dataset.min = stressMax + 0.01; boxes[2].dataset.max = extremeMax + 0.1;
+      boxes[2].querySelector('.thi-box-range').textContent = `${stressMax + 1}–${extremeMax}`;
+
+      boxes[3].dataset.min = extremeMax + 0.01; boxes[3].dataset.max = 999;
+      boxes[3].querySelector('.thi-box-range').textContent = `≥ ${extremeMax + 1}`;
+    }
+
+    boxes.forEach(box => {
       const min   = parseFloat(box.dataset.min);
       const max   = parseFloat(box.dataset.max);
       const color = box.dataset.color;
-      const active = state.thi >= min && state.thi < max;
+      const active = state.thi != null && state.thi >= min && state.thi < max;
       box.style.background   = active ? `${color}22` : '';
       box.style.borderColor  = active ? color : 'var(--border)';
       box.querySelector('.thi-box-range').style.color = active ? color : 'var(--text)';

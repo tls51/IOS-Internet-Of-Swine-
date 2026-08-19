@@ -6,24 +6,31 @@
 
 const express = require('express');
 const cors = require('cors');
+const path = require('path');  
 const db = require('./db');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, '../..'))); // add this — serves index.html, css/, js/
 
 const PORT = process.env.PORT || 3000;
 
-/* ── THI classification (mirrors data.js on the frontend) ─── */
-function thiLevel(thi) {
-  if (thi < 75) return { label: 'Normal',       cls: 'badge-blue'   };
-  if (thi < 78) return { label: 'Stressful',    cls: 'badge-warn'   };
-  if (thi < 83) return { label: 'Extreme Heat', cls: 'badge-orange' };
-  return               { label: 'Danger Zone',  cls: 'badge-danger' };
+/* ── THI classification & calculation ───────────────────────── */
+function calcTHI(temp, humidity) {
+  if (temp == null || humidity == null) return null;
+  // Swine THI formula: THI = 0.8*T + (RH/100)*(T - 14.4) + 46.4
+  const thi = 0.8 * temp + (humidity / 100.0) * (temp - 14.4) + 46.4;
+  return parseFloat(thi.toFixed(1));
 }
 
-function calcTHI(temp, humidity) {
-  return parseFloat((0.8 * temp + (humidity * temp - 14.4) / 100 + 46.4));
+function thiLevel(thi, thresholds = db.getTHIThresholds()) {
+  if (thi == null) return { label: '—', cls: 'badge-muted', color: '#8B949E' };
+  const { normalMax, stressMax, extremeMax } = thresholds;
+  if (thi < normalMax)   return { label: 'Normal',       cls: 'badge-blue',   color: '#3B82F6' };
+  if (thi <= stressMax)  return { label: 'Stressful',    cls: 'badge-warn',   color: '#F59E0B' };
+  if (thi <= extremeMax) return { label: 'Extreme Heat', cls: 'badge-orange', color: '#F97316' };
+  return                        { label: 'Danger Zone',  cls: 'badge-danger', color: '#EF4444' };
 }
 
 /* ── Is a schedule active right now? ─────────────────────── */
@@ -57,12 +64,13 @@ app.post('/api/readings', (req, res) => {
 
   // auto-log threshold crossings for the Reports activity feed
   const threshold = parseFloat(db.getSetting('threshold', '32'));
+  const thiThresholds = db.getTHIThresholds();
   if (temp > threshold) {
     db.logActivity('Mist', `Misting condition met — Temp ${temp}°C exceeded threshold ${threshold}°C`);
   }
-  if (thi >= 83) {
+  if (thi > thiThresholds.extremeMax) {
     db.logActivity('Alert', `DANGER: THI ${thi} — immediate cooling required`);
-  } else if (thi >= 78) {
+  } else if (thi > thiThresholds.stressMax) {
     db.logActivity('Alert', `WARNING: Extreme heat stress detected (THI ${thi})`);
   }
 
@@ -92,6 +100,7 @@ app.get('/api/status', (req, res) => {
   const reading = db.latestReading();
   const water = db.latestWater();
   const threshold = parseFloat(db.getSetting('threshold', '32'));
+  const thiThresholds = db.getTHIThresholds();
   const bathSchedules = db.listSchedules('bath');
   const cleanSchedules = db.listSchedules('clean');
 
@@ -101,7 +110,8 @@ app.get('/api/status', (req, res) => {
 
   res.json({
     temp, humidity, thi,
-    thiStatus: thi != null ? thiLevel(thi) : null,
+    thiStatus: thi != null ? thiLevel(thi, thiThresholds) : null,
+    thiThresholds,
     waterLevel: water ? water.level_pct : null,
     waterUsed: water ? water.used_l : 0,
     flowRate: water ? water.flow_lpm : 0,
@@ -157,10 +167,25 @@ app.delete('/api/schedules/:id', (req, res) => {
   res.status(204).end();
 });
 
-// Threshold setting (read-only from the dashboard's perspective in this build —
-// exposed here in case a future admin panel needs it)
+// Threshold setting
 app.get('/api/settings/threshold', (req, res) => {
   res.json({ value: parseFloat(db.getSetting('threshold', '32')) });
+});
+
+// THI Level Thresholds settings (get and customize limits)
+app.get('/api/settings/thi', (req, res) => {
+  res.json(db.getTHIThresholds());
+});
+
+app.post('/api/settings/thi', (req, res) => {
+  const { normalMax, stressMax, extremeMax } = req.body;
+  const updated = db.setTHIThresholds({
+    normalMax: typeof normalMax === 'number' ? normalMax : undefined,
+    stressMax: typeof stressMax === 'number' ? stressMax : undefined,
+    extremeMax: typeof extremeMax === 'number' ? extremeMax : undefined,
+  });
+  db.logActivity('Alert', `THI thresholds updated: Normal<${updated.normalMax}, Stress<=${updated.stressMax}, Extreme<=${updated.extremeMax}`);
+  res.json(updated);
 });
 
 // Activity log for the Reports page

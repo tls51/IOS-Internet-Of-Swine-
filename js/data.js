@@ -12,19 +12,24 @@ const DATA = (() => {
   const POLL_MS         = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.pollMs        : 3000;
   const HISTORY_POLL_MS = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.historyPollMs : 30000;
 
-  /* ── THI classification (kept local so charts/needles/boxes
-     that color themselves off state.thi keep working exactly
-     as before) ────────────────────────────────────────────── */
-  function thiLevel(thi) {
-    if (thi == null)   return { label: '—',           cls: 'badge-muted',  color: '#8B949E' };
-    if (thi < 75) return { label: 'Normal',       cls: 'badge-blue',   color: '#3B82F6' };
-    if (thi < 78) return { label: 'Stressful',    cls: 'badge-warn',   color: '#F59E0B' };
-    if (thi < 83) return { label: 'Extreme Heat', cls: 'badge-orange', color: '#F97316' };
-    return               { label: 'Danger Zone',  cls: 'badge-danger', color: '#EF4444' };
+  /* ── THI classification & calculation ───────────────────────── */
+  function thiLevel(thi, thresholds = state.thiThresholds) {
+    if (thi == null) return { label: '—', cls: 'badge-muted', color: '#8B949E' };
+    const normalMax  = (thresholds && thresholds.normalMax != null)  ? thresholds.normalMax  : 74;
+    const stressMax  = (thresholds && thresholds.stressMax != null)  ? thresholds.stressMax  : 78;
+    const extremeMax = (thresholds && thresholds.extremeMax != null) ? thresholds.extremeMax : 83;
+
+    if (thi < normalMax)   return { label: 'Normal',       cls: 'badge-blue',   color: '#3B82F6' };
+    if (thi <= stressMax)  return { label: 'Stressful',    cls: 'badge-warn',   color: '#F59E0B' };
+    if (thi <= extremeMax) return { label: 'Extreme Heat', cls: 'badge-orange', color: '#F97316' };
+    return                        { label: 'Danger Zone',  cls: 'badge-danger', color: '#EF4444' };
   }
 
   function calcTHI(temp, humidity) {
-    return parseFloat((0.8 * temp + (humidity * temp - 14.4) / 100 + 46.4).toFixed(1));
+    if (temp == null || humidity == null) return null;
+    // Swine THI formula: THI = 0.8*T + (RH/100)*(T - 14.4) + 46.4
+    const thi = 0.8 * temp + (humidity / 100.0) * (temp - 14.4) + 46.4;
+    return parseFloat(thi.toFixed(1));
   }
 
   /* ── Live state (same shape pages.js already expects) ─────── */
@@ -35,6 +40,7 @@ const DATA = (() => {
     history: [],
     weeklyWater: [],
     threshold: 32,
+    thiThresholds: { normalMax: 74, stressMax: 78, extremeMax: 83 },
     connected: false,
   };
 
@@ -53,17 +59,20 @@ const DATA = (() => {
   async function refreshStatus() {
     try {
       const s = await getJSON('/api/status');
-      state.temp        = s.temp;
-      state.humidity     = s.humidity;
-      state.thi           = s.thi;
-      state.waterLevel   = s.waterLevel;
-      state.waterUsed     = s.waterUsed || 0;
-      state.flowRate      = s.flowRate || 0;
-      state.mistActive   = !!s.mistActive;
-      state.bathActive    = !!s.bathActive;
-      state.cleanActive   = !!s.cleanActive;
-      state.threshold     = s.threshold;
-      state.connected     = true;
+      state.temp          = s.temp;
+      state.humidity       = s.humidity;
+      state.thi             = s.thi;
+      state.waterLevel     = s.waterLevel;
+      state.waterUsed       = s.waterUsed || 0;
+      state.flowRate        = s.flowRate || 0;
+      state.mistActive     = !!s.mistActive;
+      state.bathActive      = !!s.bathActive;
+      state.cleanActive     = !!s.cleanActive;
+      state.threshold       = s.threshold;
+      if (s.thiThresholds) {
+        state.thiThresholds = s.thiThresholds;
+      }
+      state.connected       = true;
     } catch (err) {
       state.connected = false;
       console.warn('IoS backend unreachable — is `npm start` running in ios-backend/?', err.message);

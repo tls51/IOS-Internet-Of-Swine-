@@ -5,7 +5,7 @@
    ============================================================ */
 const IOS_CONFIG = {
   // Same machine as the browser during dev:
-  apiBase: 'http://localhost:3000',
+  apiBase: '',
 
   // On your local network, use the backend machine's LAN IP instead, e.g.:
   // apiBase: 'http://192.168.1.50:3000',
