@@ -202,7 +202,31 @@
               <div class="thi-needle" id="thi-needle"></div>
             </div>
             <div class="thi-bar-labels">
-              <span>60</span><span>75</span><span>78</span><span>83</span><span>100+</span>
+              <span>60</span><span id="thi-lbl-norm">74</span><span id="thi-lbl-stress">78</span><span id="thi-lbl-extreme">83</span><span>100+</span>
+            </div>
+
+            <!-- THI Thresholds Configuration Form -->
+            <div class="thi-config-wrap mt-20">
+              <div class="field-label mb-8">Customize THI Thresholds</div>
+              <p class="muted small mb-12">Adjust the temperature-humidity index boundaries so the environment is not in danger constantly.</p>
+              <div class="thi-config-grid">
+                <div class="field-group mb-0">
+                  <label class="field-label">Normal Max (&lt;)</label>
+                  <input id="inp-thi-normal" type="number" class="inp" min="50" max="90" step="0.5" value="74" />
+                </div>
+                <div class="field-group mb-0">
+                  <label class="field-label">Stress Max (≤)</label>
+                  <input id="inp-thi-stress" type="number" class="inp" min="50" max="95" step="0.5" value="78" />
+                </div>
+                <div class="field-group mb-0">
+                  <label class="field-label">Extreme Max / Danger Start (≤)</label>
+                  <input id="inp-thi-extreme" type="number" class="inp" min="50" max="100" step="0.5" value="83" />
+                </div>
+                <div class="thi-config-btn-wrap">
+                  <button id="btn-save-thi" class="btn btn-primary btn-full">Save Thresholds</button>
+                </div>
+              </div>
+              <p id="thi-save-status" class="muted smaller mt-8 hidden" style="color:var(--primary)">Thresholds saved successfully.</p>
             </div>
           </div>
 
@@ -289,15 +313,36 @@
             <p>These systems activate automatically based on environmental thresholds and scheduled times. No manual trigger is required.</p>
           </div>
           <div class="card mb-20">
-            <div class="field-label mb-14">Mist Cooling Threshold</div>
+            <div class="field-label mb-14">Mist Cooling Temperature Threshold</div>
             <div class="threshold-row">
-              <p class="muted small flex-1">Misting activates when temp exceeds this value. Runs 5 min ON / 30 s OFF until temp normalises.</p>
+              <p class="muted small flex-1">Misting activates automatically when temperature exceeds this threshold.</p>
               <div class="threshold-ctrl">
                 <input type="range" id="threshold-slider" min="25" max="40" value="32" class="slider" />
                 <div class="threshold-val" id="threshold-val">32°C</div>
               </div>
             </div>
           </div>
+
+          <!-- Operation Durations Config -->
+          <div class="card mb-20">
+            <div class="field-label mb-14">Misting Operation &amp; Cycle Durations</div>
+            <p class="muted small mb-14">Adjust the runtime and pause interval for the automated misting cycle when cooling is active.</p>
+            <div class="thi-config-grid">
+              <div class="field-group mb-0">
+                <label class="field-label">Active Mist Run (minutes)</label>
+                <input id="inp-mist-dur" type="number" class="inp" min="1" max="60" step="1" value="5" />
+              </div>
+              <div class="field-group mb-0">
+                <label class="field-label">Pause Interval (seconds)</label>
+                <input id="inp-mist-pause" type="number" class="inp" min="5" max="300" step="5" value="30" />
+              </div>
+              <div class="thi-config-btn-wrap">
+                <button id="btn-save-durations" class="btn btn-primary btn-full">Save Durations</button>
+              </div>
+            </div>
+            <p id="dur-save-status" class="muted smaller mt-8 hidden" style="color:var(--primary)">Operation durations saved successfully.</p>
+          </div>
+
           <div id="auto-sys-list"></div>
         </section>
 
@@ -309,7 +354,7 @@
               <button class="range-tab" data-range="7d">7d</button>
               <button class="range-tab" data-range="30d">30d</button>
             </div>
-            <button class="btn btn-outline">⬇ Export CSV</button>
+            <button class="btn btn-outline" id="btn-export-csv">⬇ Export CSV</button>
           </div>
           <div class="grid-2 mb-20">
             <div class="card">

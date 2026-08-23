@@ -20,13 +20,29 @@ const PAGES = (() => {
   /* ── Alert banner ────────────────────────────────────────── */
   function updateAlerts(state) {
     const el  = document.getElementById('alert-banner');
-    const tl  = DATA.thiLevel(state.thi);
     const msgs = [];
+    const { stressMax = 78, extremeMax = 83 } = state.thiThresholds || {};
 
-    if (state.thi >= 83)       msgs.push('DANGER: THI exceeds 83 — immediate cooling required!');
-    else if (state.thi >= 78)  msgs.push(`WARNING: Extreme heat stress detected (THI ${state.thi})`);
-    if (state.waterLevel < 20) msgs.push(`LOW WATER: Tank level critical (${state.waterLevel}%)`);
-    if (state.mistActive)      msgs.push('ℹ Misting system is currently active (auto-triggered)');
+    if (state.thi != null) {
+      if (state.thi > extremeMax) {
+        msgs.push(`DANGER: THI exceeds ${extremeMax} — immediate cooling required!`);
+      } else if (state.thi > stressMax) {
+        msgs.push(`WARNING: Extreme heat stress detected (THI ${state.thi})`);
+      }
+    }
+    if (state.waterLevel != null && state.waterLevel < 20) {
+      msgs.push(`LOW WATER: Tank level critical (${state.waterLevel}%) — refill immediately`);
+    }
+    if (state.mistActive) {
+      msgs.push('ℹ Misting system is currently active (auto-triggered)');
+    }
+
+    /* Malfunction diagnostics */
+    if (state.malfunctions && state.malfunctions.length) {
+      state.malfunctions.forEach(m => {
+        msgs.push(`SYSTEM MALFUNCTION: ${m.msg}`);
+      });
+    }
 
     if (msgs.length) {
       el.innerHTML = msgs.map(m => `<div class="alert-item"><span>⚠</span><span>${m}</span></div>`).join('');
@@ -38,7 +54,7 @@ const PAGES = (() => {
 
   /* ── Topbar live ─────────────────────────────────────────── */
   function updateTopbar(state) {
-    const tl = DATA.thiLevel(state.thi);
+    const tl = DATA.thiLevel(state.thi, state.thiThresholds);
     const chip = document.getElementById('thi-chip');
     const thiTxt = state.thi != null ? `THI ${state.thi} · ${tl.label}` : 'THI — · —';
     chip.textContent = thiTxt;
@@ -62,7 +78,7 @@ const PAGES = (() => {
 
   /* ── Dashboard page ──────────────────────────────────────── */
   function updateDashboard(state) {
-    const tl = DATA.thiLevel(state.thi);
+    const tl = DATA.thiLevel(state.thi, state.thiThresholds);
 
     /* stat cards */
     const tempEl = document.getElementById('dash-temp');
@@ -95,31 +111,33 @@ const PAGES = (() => {
     renderTank('dash-tank-visual', state.waterLevel);
     const pctEl    = document.getElementById('dash-tank-pct');
     const noteEl   = document.getElementById('dash-tank-status');
-    pctEl.textContent  = state.waterLevel + '%';
-    pctEl.style.color  = state.waterLevel > 30 ? '#22C55E' : '#EF4444';
-    noteEl.textContent = state.waterLevel > 60 ? 'Sufficient supply'
+    pctEl.textContent  = state.waterLevel != null ? state.waterLevel + '%' : '—%';
+    pctEl.style.color  = (state.waterLevel != null && state.waterLevel > 30) ? '#22C55E' : '#EF4444';
+    noteEl.textContent = state.waterLevel == null ? '—'
+                       : state.waterLevel > 60 ? 'Sufficient supply'
                        : state.waterLevel > 30 ? 'Refill soon'
                        : '⚠ Critical — refill now';
-    document.getElementById('dash-usage').innerHTML = `${state.waterUsed.toFixed(0)} <span class="muted small">L</span>`;
+    document.getElementById('dash-usage').innerHTML = `${(state.waterUsed || 0).toFixed(0)} <span class="muted small">L</span>`;
 
     /* alerts */
     updateAlerts(state);
 
     /* chart */
+    const { stressMax = 78, extremeMax = 83 } = state.thiThresholds || {};
     CHARTS.drawLineChart('chart-dash', state.history, [
       { key: 'thi',  label: 'THI',      color: '#F59E0B', area: true, unit: '' },
       { key: 'temp', label: 'Temp °C',  color: '#EF4444', area: true, unit: '°C' },
     ], {
       refLines: [
-        { value: 78, cls: 'ref-warn',   label: 'Stress' },
-        { value: 83, cls: 'ref-danger', label: 'Danger' },
+        { value: stressMax, cls: 'ref-warn',   label: 'Stress' },
+        { value: extremeMax, cls: 'ref-danger', label: 'Danger' },
       ]
     });
   }
 
   /* ── Environmental page ──────────────────────────────────── */
   function updateEnv(state) {
-    const tl = DATA.thiLevel(state.thi);
+    const tl = DATA.thiLevel(state.thi, state.thiThresholds);
 
     const tempEl = document.getElementById('env-temp');
     tempEl.innerHTML = `${state.temp != null ? state.temp : '—'}<span class="big-unit">°C</span>`;
@@ -142,14 +160,14 @@ const PAGES = (() => {
       boxes[0].dataset.min = 0;                boxes[0].dataset.max = normalMax;
       boxes[0].querySelector('.thi-box-range').textContent = `< ${normalMax}`;
 
-      boxes[1].dataset.min = normalMax;        boxes[1].dataset.max = stressMax + 0.1;
+      boxes[1].dataset.min = normalMax;        boxes[1].dataset.max = stressMax + 0.001;
       boxes[1].querySelector('.thi-box-range').textContent = `${normalMax}–${stressMax}`;
 
-      boxes[2].dataset.min = stressMax + 0.01; boxes[2].dataset.max = extremeMax + 0.1;
-      boxes[2].querySelector('.thi-box-range').textContent = `${stressMax + 1}–${extremeMax}`;
+      boxes[2].dataset.min = stressMax + 0.001; boxes[2].dataset.max = extremeMax + 0.001;
+      boxes[2].querySelector('.thi-box-range').textContent = `${stressMax}–${extremeMax}`;
 
-      boxes[3].dataset.min = extremeMax + 0.01; boxes[3].dataset.max = 999;
-      boxes[3].querySelector('.thi-box-range').textContent = `≥ ${extremeMax + 1}`;
+      boxes[3].dataset.min = extremeMax + 0.001; boxes[3].dataset.max = 999;
+      boxes[3].querySelector('.thi-box-range').textContent = `> ${extremeMax}`;
     }
 
     boxes.forEach(box => {
@@ -161,6 +179,22 @@ const PAGES = (() => {
       box.style.borderColor  = active ? color : 'var(--border)';
       box.querySelector('.thi-box-range').style.color = active ? color : 'var(--text)';
     });
+
+    /* update THI bar labels */
+    const lblNorm = document.getElementById('thi-lbl-norm');
+    const lblStress = document.getElementById('thi-lbl-stress');
+    const lblExtreme = document.getElementById('thi-lbl-extreme');
+    if (lblNorm) lblNorm.textContent = normalMax;
+    if (lblStress) lblStress.textContent = stressMax;
+    if (lblExtreme) lblExtreme.textContent = extremeMax;
+
+    /* update input values if not currently focused by user */
+    const inpNorm = document.getElementById('inp-thi-normal');
+    const inpStress = document.getElementById('inp-thi-stress');
+    const inpExtreme = document.getElementById('inp-thi-extreme');
+    if (inpNorm && document.activeElement !== inpNorm) inpNorm.value = normalMax;
+    if (inpStress && document.activeElement !== inpStress) inpStress.value = stressMax;
+    if (inpExtreme && document.activeElement !== inpExtreme) inpExtreme.value = extremeMax;
 
     /* needle */
     const needle = document.getElementById('thi-needle');
@@ -226,18 +260,22 @@ const PAGES = (() => {
   /* ── Auto systems page ───────────────────────────────────── */
   function updateAuto(state) {
     const threshold = state.threshold;
+    const { mistDurationMin = 5, mistPauseSec = 30 } = state.operationDurations || {};
 
-    /* threshold is configured on the ESP32 firmware in this
-       read-only build — keep the slider in sync with reality
-       instead of letting the browser drive it */
     const slider = document.getElementById('threshold-slider');
     const valEl  = document.getElementById('threshold-val');
     if (slider && document.activeElement !== slider) slider.value = threshold;
     if (valEl) valEl.textContent = threshold + '°C';
 
+    /* Update operation duration input fields if not currently focused */
+    const inpDur = document.getElementById('inp-mist-dur');
+    const inpPause = document.getElementById('inp-mist-pause');
+    if (inpDur && document.activeElement !== inpDur) inpDur.value = mistDurationMin;
+    if (inpPause && document.activeElement !== inpPause) inpPause.value = mistPauseSec;
+
     const systems = [
       { label: 'Shower / Bathing System',  icon: '🚿',  active: state.bathActive,  trigger: 'Schedule-based',       desc: 'Executes pre-set bathing schedules via relay-controlled pump.' },
-      { label: 'Misting / Cooling System', icon: '🌫️', active: state.mistActive,  trigger: `Temp > ${threshold}°C`, desc: `Activates when temperature exceeds ${threshold}°C. Cycles: 5 min ON → 30 s pause.` },
+      { label: 'Misting / Cooling System', icon: '🌫️', active: state.mistActive,  trigger: `Temp > ${threshold}°C`, desc: `Activates when temperature exceeds ${threshold}°C. Cycles: ${mistDurationMin} min ON → ${mistPauseSec} s pause.` },
       { label: 'Waste Cleaning System',    icon: '🧹',  active: state.cleanActive, trigger: 'Schedule-based',       desc: 'Water-based flushing mechanism on admin-defined schedule.' },
     ];
 

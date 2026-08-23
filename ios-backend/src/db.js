@@ -141,6 +141,18 @@ function setSetting(key, value) {
               ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, String(value));
 }
 
+function getOperationDurations() {
+  const mistDurationMin = parseFloat(getSetting('mist_duration_min', '5'));
+  const mistPauseSec    = parseFloat(getSetting('mist_pause_sec', '30'));
+  return { mistDurationMin, mistPauseSec };
+}
+
+function setOperationDurations({ mistDurationMin, mistPauseSec }) {
+  if (mistDurationMin != null) setSetting('mist_duration_min', mistDurationMin);
+  if (mistPauseSec != null)    setSetting('mist_pause_sec', mistPauseSec);
+  return getOperationDurations();
+}
+
 function getTHIThresholds() {
   const normalMax  = parseFloat(getSetting('thi_normal_max',  '74'));
   const stressMax  = parseFloat(getSetting('thi_stress_max',  '78'));
@@ -170,5 +182,6 @@ module.exports = {
   insertWater, latestWater, weeklyWaterUsage,
   listSchedules, createSchedule, toggleSchedule, deleteSchedule,
   getSetting, setSetting, getTHIThresholds, setTHIThresholds,
+  getOperationDurations, setOperationDurations,
   logActivity, recentActivity,
 };

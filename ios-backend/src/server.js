@@ -101,6 +101,7 @@ app.get('/api/status', (req, res) => {
   const water = db.latestWater();
   const threshold = parseFloat(db.getSetting('threshold', '32'));
   const thiThresholds = db.getTHIThresholds();
+  const operationDurations = db.getOperationDurations();
   const bathSchedules = db.listSchedules('bath');
   const cleanSchedules = db.listSchedules('clean');
 
@@ -108,10 +109,31 @@ app.get('/api/status', (req, res) => {
   const humidity = reading ? reading.humidity : null;
   const thi = reading ? reading.thi : null;
 
+  // Real-time system malfunction diagnostics
+  const malfunctions = [];
+  const now = Date.now();
+  if (reading && reading.ts && (now - reading.ts > 60000)) {
+    malfunctions.push({ code: 'DHT_TIMEOUT', msg: 'DHT22 Sensor communication timeout (>60s no data received)' });
+  }
+  if (temp != null && (temp < 0 || temp > 60)) {
+    malfunctions.push({ code: 'TEMP_OUT_OF_RANGE', msg: `DHT22 Temperature reading abnormal (${temp}°C)` });
+  }
+  if (humidity != null && (humidity < 1 || humidity > 100)) {
+    malfunctions.push({ code: 'HUM_OUT_OF_RANGE', msg: `DHT22 Humidity reading abnormal (${humidity}%)` });
+  }
+  if (water && water.ts && (now - water.ts > 120000)) {
+    malfunctions.push({ code: 'WATER_TIMEOUT', msg: 'Ultrasonic Tank Sensor communication timeout (>120s)' });
+  }
+  if (water && (water.level_pct < 0 || water.level_pct > 100)) {
+    malfunctions.push({ code: 'WATER_OUT_OF_RANGE', msg: `Water tank sensor returned invalid level (${water.level_pct}%)` });
+  }
+
   res.json({
     temp, humidity, thi,
     thiStatus: thi != null ? thiLevel(thi, thiThresholds) : null,
     thiThresholds,
+    operationDurations,
+    malfunctions,
     waterLevel: water ? water.level_pct : null,
     waterUsed: water ? water.used_l : 0,
     flowRate: water ? water.flow_lpm : 0,
@@ -172,6 +194,31 @@ app.get('/api/settings/threshold', (req, res) => {
   res.json({ value: parseFloat(db.getSetting('threshold', '32')) });
 });
 
+app.post('/api/settings/threshold', (req, res) => {
+  const { value } = req.body;
+  if (typeof value !== 'number' || value < 20 || value > 50) {
+    return res.status(400).json({ error: 'value must be a number between 20 and 50' });
+  }
+  db.setSetting('threshold', value);
+  db.logActivity('Info', `Mist cooling threshold updated to ${value}°C`);
+  res.json({ value });
+});
+
+// Operation Durations settings (get and customize misting run/pause duration)
+app.get('/api/settings/durations', (req, res) => {
+  res.json(db.getOperationDurations());
+});
+
+app.post('/api/settings/durations', (req, res) => {
+  const { mistDurationMin, mistPauseSec } = req.body;
+  const updated = db.setOperationDurations({
+    mistDurationMin: typeof mistDurationMin === 'number' ? mistDurationMin : undefined,
+    mistPauseSec: typeof mistPauseSec === 'number' ? mistPauseSec : undefined,
+  });
+  db.logActivity('Info', `Operation durations updated: Misting ${updated.mistDurationMin} min ON / ${updated.mistPauseSec} s pause`);
+  res.json(updated);
+});
+
 // THI Level Thresholds settings (get and customize limits)
 app.get('/api/settings/thi', (req, res) => {
   res.json(db.getTHIThresholds());
@@ -186,6 +233,25 @@ app.post('/api/settings/thi', (req, res) => {
   });
   db.logActivity('Alert', `THI thresholds updated: Normal<${updated.normalMax}, Stress<=${updated.stressMax}, Extreme<=${updated.extremeMax}`);
   res.json(updated);
+});
+
+// System Report CSV Export
+app.get('/api/reports/export', (req, res) => {
+  const range = req.query.range || '24h';
+  const ms = { '24h': 24 * 3600e3, '7d': 7 * 24 * 3600e3, '30d': 30 * 24 * 3600e3 }[range] || 24 * 3600e3;
+  const rows = db.readingsSince(Date.now() - ms);
+  const thiThresholds = db.getTHIThresholds();
+
+  let csv = 'Timestamp,DateTime,Temperature_C,Humidity_Pct,THI,THI_Status\r\n';
+  rows.forEach(r => {
+    const dt = new Date(r.ts).toISOString();
+    const status = thiLevel(r.thi, thiThresholds).label;
+    csv += `${r.ts},"${dt}",${r.temp},${r.humidity},${r.thi},"${status}"\r\n`;
+  });
+
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="ios_system_report_${range}_${Date.now()}.csv"`);
+  res.send(csv);
 });
 
 // Activity log for the Reports page

@@ -41,6 +41,8 @@ const DATA = (() => {
     weeklyWater: [],
     threshold: 32,
     thiThresholds: { normalMax: 74, stressMax: 78, extremeMax: 83 },
+    operationDurations: { mistDurationMin: 5, mistPauseSec: 30 },
+    malfunctions: [],
     connected: false,
   };
 
@@ -72,6 +74,10 @@ const DATA = (() => {
       if (s.thiThresholds) {
         state.thiThresholds = s.thiThresholds;
       }
+      if (s.operationDurations) {
+        state.operationDurations = s.operationDurations;
+      }
+      state.malfunctions    = s.malfunctions || [];
       state.connected       = true;
     } catch (err) {
       state.connected = false;

@@ -46,7 +46,7 @@ const char* WIFI_PASSWORD = "Khe5ME92";
 
 // IP/hostname of the machine running `npm start` inside ios-backend/
 // Find it with `ipconfig` (Windows) or `ifconfig`/`ip a` (Mac/Linux).
-const char* SERVER_HOST = "192.168.1.52";
+const char* SERVER_HOST = "192.168.1.61";
 const int   SERVER_PORT = 3000;
 
 /* ===========================

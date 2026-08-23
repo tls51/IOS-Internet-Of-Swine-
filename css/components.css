@@ -200,6 +200,26 @@
   margin-top: 4px;
 }
 
+.thi-config-wrap {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.thi-config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)) 160px;
+  gap: 12px;
+  align-items: flex-end;
+}
+.thi-config-btn-wrap {
+  display: flex;
+  align-items: flex-end;
+}
+@media (max-width: 768px) {
+  .thi-config-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ── Info card ───────────────────────────────────────────── */
 .info-card {
   display: flex;

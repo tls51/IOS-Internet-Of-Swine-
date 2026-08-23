@@ -1,27 +1,50 @@
-# Internet of Swine (IoS) — Dashboard + Backend + ESP32
+# Internet of Swine (IoS) — Smart Swine Barn Environmental & Water Management System
 
-This connects three previously-disconnected pieces:
+An automated Internet of Things (IoT) system designed for swine barns to optimize climate control, water usage, and sanitation.
+
+## 🎯 Project Objectives & Implementation
+
+1. **Monitor Heat Temperature and Humidity Level**:
+   - Collects high-precision environmental data via DHT22 sensor and real-time DS3231 RTC clock.
+   - Computes the Swine **Temperature-Humidity Index (THI)** dynamically: `THI = 0.8·T + (RH/100)·(T - 14.4) + 46.4`.
+   - Displays live telemetry, gauges, 24-hour trends, and heat stress classification (*Normal*, *Stressful*, *Extreme Heat*, *Danger Zone*).
+
+2. **Develop a Water Monitoring System**:
+   - Monitors water reservoir / tank level in real time using an HC-SR04 ultrasonic sensor.
+   - Renders visual tank fill graphics and status indicators (*Sufficient supply*, *Refill soon*, *Critical*).
+
+3. **Develop a Water Usage System**:
+   - Tracks total daily consumption in Liters (L) and instantaneous flow rate in Liters/min (LPM).
+   - Categorizes water consumption breakdown (*Misting*, *Bathing*, *Cleaning*) and visualizes weekly historical usage trends.
+
+4. **Create a Web-Based Admin Dashboard**:
+   - **User Authentication**: Secure admin login (`admin` / `ios2024`) with automatic session preservation across page refreshes.
+   - **Bathing & Cleaning Scheduling**: Full schedule management (CRUD) allowing custom trigger times, run durations (minutes), day selections, and instant toggle pause/resume.
+   - **Adjust Temperature Thresholds & Operation Durations**:
+     - *Mist Cooling Temperature Threshold*: Interactive slider to adjust cooling activation temperature (°C).
+     - *THI Stress Thresholds*: Customizable boundary inputs for Normal, Stressful, and Extreme heat stress levels.
+     - *Operation Durations*: Configurable misting active cycle duration (min) and pause interval (sec).
+   - **Environmental & Water Telemetry**: Single-pane-of-glass dashboard for live temperature, humidity, THI, water tank level %, and flow metrics.
+   - **Notify & Alert System**: Real-time diagnostic alert banner delivering alerts for:
+     - Critical THI levels and severe heat stress warnings.
+     - Low water tank supply levels (< 20%).
+     - System malfunctions (sensor timeouts, abnormal out-of-range sensor readings, hardware communication dropouts).
+   - **Generate System Reports**: Generates environmental and activity logs with one-click **CSV report export** for 24-hour, 7-day, and 30-day timeframes.
+   - **Operate With or Without Internet Connectivity (ESP32 Local Hosting / Dual-Mode)**: Functions on local offline Wi-Fi / LAN networks without relying on external cloud dependencies.
+
+---
+
+## 🏗 System Architecture
 
 ```
-ESP32 (DHT22 + RTC + HC-SR04)
-        │  HTTP POST (pushes readings every 10s)
+ESP32 (DHT22 + RTC + HC-SR04 + YF-S201B)
+        │  HTTP POST (pushes telemetry every 10s)
         ▼
 ios-backend/  (Node.js + Express + SQLite)
-        │  HTTP GET (dashboard polls every 3s)
+        │  HTTP GET / POST / PATCH (dashboard polls status every 3s)
         ▼
-index.html + css/ + js/   (your browser dashboard)
+Web Dashboard (HTML5 + CSS3 + Vanilla JS)
 ```
-
-The dashboard no longer simulates data in `js/data.js` — it fetches real
-readings from the backend, which stores everything permanently in a
-SQLite file (`ios-backend/ios.db`). The ESP32 pushes new readings to the
-backend instead of only printing to Serial.
-
-This build is **read-only**: the dashboard displays sensor data and
-schedules, but does not send commands back to the ESP32 to trigger
-relays. Misting/bathing/cleaning "Active" badges are inferred from the
-latest temperature reading and the schedule times, not a live relay
-signal.
 
 ## 1. Run the backend
 
@@ -95,12 +118,16 @@ Wiring is unchanged from the original sketches, plus optional pins:
 - `POST /api/readings` — `{ temp, humidity, device_id }`
 - `POST /api/water` — `{ level_pct, used_l, flow_lpm, device_id }`
 
-**Read (called by the dashboard):**
-- `GET /api/status` — current temp/humidity/THI/water/system state
-- `GET /api/readings/history?range=24h|7d|30d` — chart data
+**Read & Control (called by the dashboard):**
+- `GET /api/status` — current temp/humidity/THI/water/system state, operation durations, & diagnostics
+- `GET /api/readings/history?range=24h|7d|30d` — chart telemetry data
 - `GET /api/water/weekly` — weekly usage bar chart
 - `GET /api/schedules?type=bath|clean` — schedule list
-- `POST /api/schedules`, `PATCH /api/schedules/:id`, `DELETE /api/schedules/:id`
+- `POST /api/schedules`, `PATCH /api/schedules/:id`, `DELETE /api/schedules/:id` — schedule management
+- `GET /api/settings/threshold`, `POST /api/settings/threshold` — mist cooling temperature threshold
+- `GET /api/settings/durations`, `POST /api/settings/durations` — misting run duration & pause interval
+- `GET /api/settings/thi`, `POST /api/settings/thi` — customize THI stress classification boundaries
+- `GET /api/reports/export?range=24h|7d|30d` — CSV system report export download
 - `GET /api/activity?limit=30` — activity log for the Reports page
 
 ## Notes / known limitations
