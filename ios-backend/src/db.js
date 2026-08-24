@@ -53,6 +53,17 @@ CREATE TABLE IF NOT EXISTS activity_log (
   type TEXT NOT NULL,                  -- Mist | Bath | Clean | Alert | Info
   msg  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sensor_diagnostics (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts       INTEGER NOT NULL,
+  dht_ok   INTEGER,
+  rtc_ok   INTEGER,
+  tank_ok  INTEGER,
+  flow_ok  INTEGER,
+  relay_ok INTEGER,
+  details  TEXT
+);
 `);
 
 /* ── Seed defaults (only if empty) ─────────────────────────── */
@@ -167,13 +178,26 @@ function setTHIThresholds({ normalMax, stressMax, extremeMax }) {
   return getTHIThresholds();
 }
 
-/* ── Activity log ───────────────────────────────────────── */
-function logActivity(type, msg, ts) {
-  db.prepare(`INSERT INTO activity_log (ts,type,msg) VALUES (?,?,?)`).run(ts || Date.now(), type, msg);
+/* ── Diagnostics ────────────────────────────────────────── */
+function saveDiagnostics({ dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, details, ts }) {
+  const stmt = db.prepare(`INSERT INTO sensor_diagnostics (ts, dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, details) VALUES (?,?,?,?,?,?,?)`);
+  return stmt.run(ts || Date.now(), dht_ok ? 1 : 0, rtc_ok ? 1 : 0, tank_ok ? 1 : 0, flow_ok ? 1 : 0, relay_ok ? 1 : 0, typeof details === 'object' ? JSON.stringify(details) : String(details || ''));
 }
 
-function recentActivity(limit = 30) {
-  return db.prepare(`SELECT * FROM activity_log ORDER BY ts DESC LIMIT ?`).all(limit);
+function latestDiagnostics() {
+  const row = db.prepare(`SELECT * FROM sensor_diagnostics ORDER BY ts DESC LIMIT 1`).get();
+  if (!row) return null;
+  let parsedDetails = {};
+  try { parsedDetails = JSON.parse(row.details); } catch (e) { parsedDetails = { raw: row.details }; }
+  return {
+    ...row,
+    dht_ok: !!row.dht_ok,
+    rtc_ok: !!row.rtc_ok,
+    tank_ok: !!row.tank_ok,
+    flow_ok: !!row.flow_ok,
+    relay_ok: !!row.relay_ok,
+    details: parsedDetails
+  };
 }
 
 module.exports = {
@@ -184,4 +208,5 @@ module.exports = {
   getSetting, setSetting, getTHIThresholds, setTHIThresholds,
   getOperationDurations, setOperationDurations,
   logActivity, recentActivity,
+  saveDiagnostics, latestDiagnostics,
 };

@@ -77,18 +77,37 @@ app.post('/api/readings', (req, res) => {
   res.status(201).json({ ok: true, thi });
 });
 
-// ESP32 / ultrasonic node pushes a water tank reading
+// ESP32 / ultrasonic node pushes a water tank reading or flow rate
 app.post('/api/water', (req, res) => {
   const { level_pct, used_l, flow_lpm, device_id } = req.body;
-  if (typeof level_pct !== 'number') {
-    return res.status(400).json({ error: 'level_pct (number) is required' });
-  }
-  db.insertWater({ level_pct, used_l: used_l || 0, flow_lpm: flow_lpm || 0, device_id });
+  const prev = db.latestWater();
 
-  if (level_pct < 20) {
-    db.logActivity('Alert', `LOW WATER: Tank level critical (${level_pct}%)`);
+  // Merge with previous known reading so flow and tank sensor don't overwrite each other with null/0
+  const hasLevel = typeof level_pct === 'number' && !isNaN(level_pct);
+  const finalLevel = hasLevel ? level_pct : (prev ? prev.level_pct : null);
+
+  const hasUsed = typeof used_l === 'number' && !isNaN(used_l);
+  const finalUsed = hasUsed ? used_l : (prev ? prev.used_l : 0);
+
+  const hasFlow = typeof flow_lpm === 'number' && !isNaN(flow_lpm);
+  const finalFlow = hasFlow ? flow_lpm : (prev ? prev.flow_lpm : 0);
+
+  if (finalLevel == null && !hasUsed && !hasFlow) {
+    return res.status(400).json({ error: 'Valid level_pct, used_l, or flow_lpm is required' });
   }
-  res.status(201).json({ ok: true });
+
+  db.insertWater({
+    level_pct: finalLevel != null ? finalLevel : 0,
+    used_l: finalUsed,
+    flow_lpm: finalFlow,
+    device_id: device_id || 'esp32'
+  });
+
+  if (finalLevel != null && finalLevel < 20 && (!prev || prev.level_pct >= 20)) {
+    db.logActivity('Alert', `LOW WATER: Tank level critical (${Math.round(finalLevel)}%)`);
+  }
+
+  res.status(201).json({ ok: true, level_pct: finalLevel, used_l: finalUsed, flow_lpm: finalFlow });
 });
 
 /* ============================================================
@@ -128,12 +147,15 @@ app.get('/api/status', (req, res) => {
     malfunctions.push({ code: 'WATER_OUT_OF_RANGE', msg: `Water tank sensor returned invalid level (${water.level_pct}%)` });
   }
 
+  const diagnostics = db.latestDiagnostics();
+
   res.json({
     temp, humidity, thi,
     thiStatus: thi != null ? thiLevel(thi, thiThresholds) : null,
     thiThresholds,
     operationDurations,
     malfunctions,
+    diagnostics,
     waterLevel: water ? water.level_pct : null,
     waterUsed: water ? water.used_l : 0,
     flowRate: water ? water.flow_lpm : 0,
@@ -258,6 +280,18 @@ app.get('/api/reports/export', (req, res) => {
 app.get('/api/activity', (req, res) => {
   const limit = parseInt(req.query.limit) || 30;
   res.json(db.recentActivity(limit));
+});
+
+// Sensor Hardware Diagnostics (pushed by ESP32 self-test or queried by web dashboard)
+app.post('/api/diagnostics', (req, res) => {
+  const { dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, details } = req.body;
+  db.saveDiagnostics({ dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, details });
+  db.logActivity('Info', `ESP32 completed hardware self-test: DHT:${dht_ok ? 'PASS' : 'FAIL'}, RTC:${rtc_ok ? 'PASS' : 'FAIL'}, Tank:${tank_ok ? 'PASS' : 'FAIL'}, Flow:${flow_ok ? 'PASS' : 'FAIL'}, Relay:${relay_ok ? 'PASS' : 'FAIL'}`);
+  res.status(201).json({ ok: true, diagnostics: db.latestDiagnostics() });
+});
+
+app.get('/api/diagnostics', (req, res) => {
+  res.json(db.latestDiagnostics() || { ok: false, msg: 'No diagnostics recorded yet' });
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true, time: Date.now() }));
