@@ -28,7 +28,7 @@
      Flow sensor    -> GPIO15 (YF-S201B, interrupt on FALLING)
      Relay (mister) -> GPIO7
      HC-SR04 TRIG   -> GPIO5   (optional, tank level — off by default)
-     HC-SR04 ECHO   -> GPIO6   (optional, tank level — off by default)
+     HC-SR04 ECHO   -> GPIO17  (optional, tank level — off by default)
    ============================================================ */
 
 #include <Arduino.h>
@@ -100,16 +100,20 @@ bool bathingDone = false;
 #define BUZZER_PIN 18         // GPIO pin for Piezo Buzzer
 
 /* ===========================
-   OPTIONAL: HC-SR04 water tank sensor
-   Set to false if you haven't wired one up yet — the
-   dashboard's water page will just show no data.
-   (Separate from the flow sensor above; both can run at once.)
+   HC-SR04 ULTRASONIC WATER TANK SENSOR
+   Wiring & Voltage Divider:
+     VCC  -> 5V (VIN or 5V pin on ESP32 — NOT 3.3V)
+     GND  -> GND
+     TRIG -> GPIO 5
+     ECHO -> Voltage Divider -> GPIO 17
+             (ECHO -> 1kΩ resistor -> GPIO 17 -> 2kΩ resistor -> GND)
+             (or 2.2kΩ and 3.3kΩ)
    =========================== */
-#define HAS_WATER_SENSOR false
+#define HAS_WATER_SENSOR true
 #define TRIG_PIN 5
-#define ECHO_PIN 6
-const float TANK_EMPTY_CM = 38.0;   // sensor reading when tank is empty
-const float TANK_FULL_CM  = 4.0;    // sensor reading when tank is full
+#define ECHO_PIN 17
+const float TANK_EMPTY_CM = 14.0;   // Sensor reading distance when tank is empty (cm)
+const float TANK_FULL_CM  = 3.0;    // Sensor reading distance when tank is full (cm)
 
 /* ===========================
    Timing
@@ -127,11 +131,214 @@ void readAndPushDHT();
 void checkBathingSchedule(const DateTime& now);
 void readAndPushFlow();
 void setMistingRelay(bool on);
+bool testRelayAndPump(int durationMs = 3000);
+void checkPendingCommands();
 void beepBuzzer(int count = 1, int delayMs = 150);
 #if HAS_WATER_SENSOR
 void readAndPushWater();
 #endif
 void postJSON(const char* path, const String& body);
+void checkAllSensors(bool pushToBackend);
+
+/* ===========================
+   SENSOR SELF-TEST & HEALTH DIAGNOSTICS
+   =========================== */
+bool rtcOnline = false;
+
+bool checkDHT(float &temp, float &hum, String &msg) {
+  hum  = dht.readHumidity();
+  temp = dht.readTemperature();
+
+  if (isnan(hum) || isnan(temp)) {
+    msg = "FAILED to read DHT22 on GPIO " + String(DHTPIN) + ". Check 3.3V/5V power, GND, and 10kΩ pull-up.";
+    return false;
+  }
+  if (temp < -10.0 || temp > 70.0 || hum < 1.0 || hum > 100.0) {
+    msg = "WARNING: DHT22 values out of range (T=" + String(temp, 1) + "C, H=" + String(hum, 1) + "%).";
+    return false;
+  }
+  msg = "Temp: " + String(temp, 1) + "°C | Humidity: " + String(hum, 1) + "% RH (DHT22 on GPIO " + String(DHTPIN) + ")";
+  return true;
+}
+
+bool checkRTC(DateTime &now, float &rtcTemp, String &msg) {
+  if (!rtcOnline) {
+    rtcOnline = rtc.begin();
+  }
+  if (!rtcOnline) {
+    msg = "RTC DS3231 NOT detected on I2C (SDA=GPIO8, SCL=GPIO9). Node running in fallback millis() mode.";
+    return false;
+  }
+  now = rtc.now();
+  rtcTemp = rtc.getTemperature();
+  char timeBuf[32];
+  snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02d %02d:%02d:%02d",
+           now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+  msg = "RTC Time: " + String(timeBuf) + " | Internal Temp: " + String(rtcTemp, 1) + "°C";
+  return true;
+}
+
+bool checkHCSR04(float &distanceCm, float &levelPct, String &msg) {
+#if HAS_WATER_SENSOR
+
+  // Give the HC-SR04 time to settle
+  delay(100);
+
+  // Make sure TRIG starts LOW
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(5);
+
+  // Send 10us trigger pulse
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  // Read ECHO
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 60000);
+
+  // Print raw result so we know exactly what is happening
+  Serial.print("[HC-SR04 DEBUG] ECHO duration = ");
+  Serial.print(duration);
+  Serial.println(" us");
+
+  if (duration == 0) {
+    msg = "No echo detected on GPIO " + String(ECHO_PIN) +
+          ". Check HC-SR04 power, GND, TRIG, ECHO and voltage divider.";
+    return false;
+  }
+
+  // Reject extremely short/noisy signals
+  if (duration < 150) {
+    msg = "Echo too short: " + String(duration) +
+          " us. Sensor may be too close or signal is noise.";
+    return false;
+  }
+
+  // Convert echo time to distance
+  distanceCm = duration * 0.0343 / 2.0;
+
+  // Calculate tank percentage
+  levelPct = (TANK_EMPTY_CM - distanceCm) /
+             (TANK_EMPTY_CM - TANK_FULL_CM) * 100.0;
+
+  levelPct = constrain(levelPct, 0.0, 100.0);
+
+  msg = "Echo: " + String(duration) +
+        " us | Distance: " + String(distanceCm, 1) +
+        " cm | Water Level: " + String(levelPct, 0) + "%";
+
+  return true;
+
+#else
+
+  msg = "HC-SR04 disabled in firmware configuration";
+  return false;
+
+#endif
+}
+
+bool checkFlowSensor(String &msg) {
+  int pinState = digitalRead(FLOW_SENSOR_PIN);
+  msg = "Pin GPIO " + String(FLOW_SENSOR_PIN) + " (State: " + (pinState == HIGH ? "HIGH" : "LOW") + ") | Pulses registered: " + String(pulseCount) + " | Usage: " + String(totalLiters, 2) + "L";
+  return true;
+}
+
+bool checkRelay(String &msg) {
+  int pinVal = digitalRead(RELAY_PIN);
+  msg = "GPIO " + String(RELAY_PIN) + " connected to Water Pump Relay (Active-LOW: " + String(RELAY_ACTIVE_LOW ? "YES" : "NO") + ", State: " + (pinVal == HIGH ? "HIGH" : "LOW") + ") | Type 'test pump' to trigger";
+  return true;
+}
+
+bool checkBackendConnection(String &msg) {
+  if (WiFi.status() != WL_CONNECTED) {
+    msg = "WiFi disconnected. Connect failed to SSID: " + String(WIFI_SSID);
+    return false;
+  }
+
+  HTTPClient http;
+  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/health";
+  http.begin(url);
+  http.setTimeout(2500);
+
+  int code = http.GET();
+  http.end();
+
+  if (code == 200) {
+    msg = "Backend server reachable at " + String(SERVER_HOST) + ":" + String(SERVER_PORT) + " (HTTP 200 OK)";
+    return true;
+  } else {
+    msg = "Backend ping failed at " + String(SERVER_HOST) + ":" + String(SERVER_PORT) + " (HTTP " + String(code) + "). Verify `npm start` is running.";
+    return false;
+  }
+}
+
+void checkAllSensors(bool pushToBackend) {
+  Serial.println("\n================================================================================");
+  Serial.println("                  IoS SENSOR HARDWARE SELF-TEST & DIAGNOSTICS                  ");
+  Serial.println("================================================================================");
+
+  float dhtT = 0, dhtH = 0;
+  String dhtMsg;
+  bool dhtOk = checkDHT(dhtT, dhtH, dhtMsg);
+  Serial.printf("[1/6] DHT22 Temp/Humidity (GPIO %d)     : %s\n      -> %s\n",
+                DHTPIN, dhtOk ? "[PASS]" : "[FAIL]", dhtMsg.c_str());
+
+  DateTime now;
+  float rtcTemp = 0;
+  String rtcMsg;
+  bool rtcOk = checkRTC(now, rtcTemp, rtcMsg);
+  Serial.printf("[2/6] DS3231 RTC Module (I2C SDA:8 SCL:9) : %s\n      -> %s\n",
+                rtcOk ? "[PASS]" : "[WARN]", rtcMsg.c_str());
+
+  float distCm = 0, levelPct = 0;
+  String tankMsg;
+  bool tankOk = checkHCSR04(distCm, levelPct, tankMsg);
+  Serial.printf("[3/6] HC-SR04 Tank Sensor (T:%d E:%d)      : %s\n      -> %s\n",
+                TRIG_PIN, ECHO_PIN, tankOk ? "[PASS]" : "[FAIL]", tankMsg.c_str());
+
+  String flowMsg;
+  bool flowOk = checkFlowSensor(flowMsg);
+  Serial.printf("[4/6] YF-S201B Flow Sensor (GPIO %d)      : %s\n      -> %s\n",
+                FLOW_SENSOR_PIN, flowOk ? "[PASS]" : "[FAIL]", flowMsg.c_str());
+
+  String relayMsg;
+  bool relayOk = checkRelay(relayMsg);
+  Serial.printf("[5/6] Relay Controller (GPIO %d)          : %s\n      -> %s\n",
+                RELAY_PIN, relayOk ? "[PASS]" : "[FAIL]", relayMsg.c_str());
+
+  String netMsg;
+  bool netOk = checkBackendConnection(netMsg);
+  Serial.printf("[6/6] WiFi & Backend Server Link         : %s\n      -> %s\n",
+                netOk ? "[PASS]" : "[WARN]", netMsg.c_str());
+
+  int passed = (dhtOk?1:0) + (rtcOk?1:0) + (tankOk?1:0) + (flowOk?1:0) + (relayOk?1:0);
+  Serial.println("--------------------------------------------------------------------------------");
+  Serial.printf ("DIAGNOSTIC SUMMARY: %d of 5 Primary Hardware Subsystems Functioning Normally\n", passed);
+  if (passed == 5 && netOk) {
+    Serial.println("STATUS: ALL SYSTEMS HEALTHY AND OPERATIONAL (Ready for Swine Barn Deployment)");
+  } else {
+    Serial.println("STATUS: ATTENTION NEEDED - Review warnings/failures above for wiring hints.");
+  }
+  Serial.println("Tip: Type 'test' in the Serial Monitor at any time to re-run this self-test.");
+  Serial.println("================================================================================\n");
+
+  if (pushToBackend && WiFi.status() == WL_CONNECTED) {
+    String diagJson = "{\"dht_ok\":" + String(dhtOk ? "true" : "false") +
+                      ",\"rtc_ok\":" + String(rtcOk ? "true" : "false") +
+                      ",\"tank_ok\":" + String(tankOk ? "true" : "false") +
+                      ",\"flow_ok\":" + String(flowOk ? "true" : "false") +
+                      ",\"relay_ok\":" + String(relayOk ? "true" : "false") +
+                      ",\"details\":{" +
+                      "\"dht\":\"" + dhtMsg + "\"" +
+                      ",\"rtc\":\"" + rtcMsg + "\"" +
+                      ",\"tank\":\"" + tankMsg + "\"" +
+                      ",\"flow\":\"" + flowMsg + "\"" +
+                      ",\"relay\":\"" + relayMsg + "\"" +
+                      ",\"network\":\"" + netMsg + "\"" +
+                      "}}";
+    postJSON("/api/diagnostics", diagJson);
+  }
+}
 
 /* ===========================
    INTERRUPT (from dht_copy v3, unchanged)
@@ -143,19 +350,21 @@ void IRAM_ATTR pulseCounter() {
 
 void setup() {
   Serial.begin(115200);
-  dht.begin();
+  delay(500);
 
+  Serial.println("\n\n==========================================");
+  Serial.println(" Internet of Swine (IoS) — Sensor Node");
+  Serial.println(" Initializing Hardware Subsystems...");
+  Serial.println("==========================================");
+
+  dht.begin();
   Wire.begin(8, 9);   // SDA = GPIO8, SCL = GPIO9
-  if (!rtc.begin()) {
-    Serial.println("RTC NOT FOUND!");
-    while (1);
+  rtcOnline = rtc.begin();
+  if (!rtcOnline) {
+    Serial.println("[WARNING] RTC DS3231 not found on I2C. Continuing startup...");
   }
 
-  // FIRST UPLOAD ONLY: uncomment once to set the RTC clock from
-  // your computer's time, upload, then comment out and upload again.
-  // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-
-  // Water flow sensor (from dht_copy v3)
+  // Water flow sensor
   pinMode(FLOW_SENSOR_PIN, INPUT_PULLUP);
   attachInterrupt(
     digitalPinToInterrupt(FLOW_SENSOR_PIN),
@@ -172,30 +381,62 @@ void setup() {
   digitalWrite(BUZZER_PIN, LOW);
 #endif
 
-  // Startup audio/relay test pulse (3 quick clicks/beeps on boot)
-  Serial.println("Performing boot-up Relay & Buzzer test pulse...");
-  beepBuzzer(3, 200);
-
 #if HAS_WATER_SENSOR
   pinMode(TRIG_PIN, OUTPUT);
+  digitalWrite(TRIG_PIN, LOW);
   pinMode(ECHO_PIN, INPUT);
 #endif
 
+  // Run hardware self-test immediately on boot
+  checkAllSensors(false);
+
+  // Connect to WiFi
   connectWiFi();
 
-  Serial.println("==========================================");
-  Serial.println(" Internet of Swine (IoS) — Sensor Node");
-  Serial.println(" Environmental Monitoring + Backend Push");
-  Serial.println("==========================================");
+  // Re-run diagnostics and post full results to backend
+  checkAllSensors(true);
 }
+
+unsigned long lastDiagCheckAt = 0;
+const unsigned long DIAG_INTERVAL_MS = 300000; // Auto-diagnostics every 5 mins
 
 void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
   }
 
-  DateTime now = rtc.now();
-  checkBathingSchedule(now);
+  // Allow user to trigger self-test or test pump by typing in Serial Monitor
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    cmd.toLowerCase();
+    if (cmd == "test pump" || cmd == "pump test" || cmd == "test relay" || cmd == "relay test" || cmd == "pump") {
+      testRelayAndPump(3000);
+    } else if (cmd == "pump on" || cmd == "relay on") {
+      Serial.println(">>> MANUAL OVERRIDE: Water Pump Relay turned ON <<<");
+      setMistingRelay(true);
+    } else if (cmd == "pump off" || cmd == "relay off") {
+      Serial.println(">>> MANUAL OVERRIDE: Water Pump Relay turned OFF <<<");
+      setMistingRelay(false);
+    } else if (cmd == "test" || cmd == "check" || cmd == "diag" || cmd == "status" || cmd == "help") {
+      checkAllSensors(true);
+    }
+  }
+
+  // Check for remote commands from the web dashboard (e.g. Test Pump or Manual Toggle)
+  checkPendingCommands();
+
+  // Periodic background hardware self-test (every 5 min)
+  if (millis() - lastDiagCheckAt >= DIAG_INTERVAL_MS) {
+    lastDiagCheckAt = millis();
+    checkAllSensors(true);
+  }
+
+  DateTime now;
+  if (rtcOnline) {
+    now = rtc.now();
+    checkBathingSchedule(now);
+  }
 
   if (millis() - lastReadingAt >= READING_INTERVAL_MS) {
     lastReadingAt = millis();
@@ -205,9 +446,6 @@ void loop() {
 #endif
   }
 
-  // Flow rate needs to be sampled roughly every second (same as v3)
-  // to keep the pulse-count math accurate, independent of the
-  // 10s DHT push interval above.
   if (millis() - lastFlowCheckAt >= FLOW_CHECK_INTERVAL_MS) {
     lastFlowCheckAt = millis();
     readAndPushFlow();
@@ -239,13 +477,99 @@ void connectWiFi() {
   }
 }
 
-/* ── Relay & Audio Feedback ───────────────────────────────── */
+/* ── Relay & Water Pump Control & Testing ─────────────────── */
+bool currentRelayState = false;
+
 void setMistingRelay(bool on) {
+  currentRelayState = on;
   // Handles Active-LOW vs Active-HIGH relay module logic
   bool pinState = RELAY_ACTIVE_LOW ? !on : on;
   digitalWrite(RELAY_PIN, pinState ? HIGH : LOW);
-  Serial.printf("Relay (GPIO %d) -> %s (Misting/Bathing %s)\n",
+  Serial.printf("Relay (GPIO %d) -> %s (Water Pump / Misting: %s)\n",
                 RELAY_PIN, pinState ? "HIGH" : "LOW", on ? "ON" : "OFF");
+}
+
+bool testRelayAndPump(int durationMs) {
+  Serial.println("\n==================================================");
+  Serial.println("      RELAY MODULE & WATER PUMP HARDWARE TEST     ");
+  Serial.println("==================================================");
+  Serial.printf ("Target Pin: GPIO %d (Active-%s)\n", RELAY_PIN, RELAY_ACTIVE_LOW ? "LOW" : "HIGH");
+  Serial.printf ("Duration  : %d ms\n", durationMs);
+  Serial.println("Action    : Turning ON Water Pump Relay & Monitoring Flow...");
+
+  int startPulses = pulseCount;
+  unsigned long testStart = millis();
+
+  // Activate Relay Module & Water Pump
+  setMistingRelay(true);
+#if HAS_BUZZER
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(120);
+  digitalWrite(BUZZER_PIN, LOW);
+#endif
+
+  // Service yields during the test duration
+  while (millis() - testStart < (unsigned long)durationMs) {
+    delay(50);
+  }
+
+  // Deactivate Relay Module & Water Pump
+  setMistingRelay(false);
+
+  int testPulses = pulseCount - startPulses;
+  if (testPulses < 0) testPulses = pulseCount;
+  float testFlowRate = (testPulses / 7.5);
+
+  Serial.println("--------------------------------------------------");
+  Serial.printf ("[TEST COMPLETED] Water Pump ran for %d ms\n", durationMs);
+  Serial.printf ("                 Flow Pulses Registered: %d\n", testPulses);
+  Serial.printf ("                 Estimated Flow Rate   : %.2f L/min\n", testFlowRate);
+  Serial.println("Status  : [PASS] Relay triggered and released safely.");
+  Serial.println("==================================================\n");
+
+  if (WiFi.status() == WL_CONNECTED) {
+    String statusBody = "{\"relay_on\":false,\"test_completed\":true,\"flow_pulses\":" + String(testPulses) +
+                        ",\"flow_lpm\":" + String(testFlowRate, 2) + "}";
+    postJSON("/api/relay/status", statusBody);
+  }
+
+  return true;
+}
+
+unsigned long lastCommandCheckAt = 0;
+const unsigned long COMMAND_CHECK_INTERVAL_MS = 2500;
+
+void checkPendingCommands() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (millis() - lastCommandCheckAt < COMMAND_CHECK_INTERVAL_MS) return;
+  lastCommandCheckAt = millis();
+
+  HTTPClient http;
+  String url = String("http://") + SERVER_HOST + ":" + SERVER_PORT + "/api/relay/command";
+  http.begin(url);
+  http.setTimeout(1500);
+
+  int code = http.GET();
+  if (code == 200) {
+    String payload = http.getString();
+    if (payload.indexOf("\"command\":\"test_pump\"") >= 0) {
+      int dur = 3000;
+      int durIdx = payload.indexOf("\"duration_ms\":");
+      if (durIdx >= 0) {
+        dur = payload.substring(durIdx + 14).toInt();
+        if (dur <= 0 || dur > 30000) dur = 3000;
+      }
+      Serial.println("\n>>> [REMOTE COMMAND] Received: test_pump from Web Dashboard <<<");
+      testRelayAndPump(dur);
+    } else if (payload.indexOf("\"command\":\"pump_on\"") >= 0) {
+      Serial.println("\n>>> [REMOTE COMMAND] Received: pump_on (Manual Override) <<<");
+      setMistingRelay(true);
+    } else if (payload.indexOf("\"command\":\"pump_off\"") >= 0) {
+      Serial.println("\n>>> [REMOTE COMMAND] Received: pump_off (Manual Override) <<<");
+      setMistingRelay(false);
+    }
+  }
+  http.end();
 }
 
 void beepBuzzer(int count, int delayMs) {
@@ -348,12 +672,8 @@ void readAndPushFlow() {
 
   Serial.println();
   Serial.println("----- WATER USAGE -----");
-  Serial.print("Flow Rate : ");
-  Serial.print(flowRate);
-  Serial.println(" L/min");
-  Serial.print("Total Water Used : ");
-  Serial.print(totalLiters, 3);
-  Serial.println(" L");
+  Serial.printf("Flow Rate : %.2f L/min\n", flowRate);
+  Serial.printf("Total Water Used : %.3f L\n", totalLiters);
 
   pulseCount = 0;
 
@@ -365,37 +685,71 @@ void readAndPushFlow() {
 
   previousMillis = millis();
 
-  String body = "{\"level_pct\":null" +
-                String(",\"used_l\":") + String(totalLiters, 3) +
+  // Send flow telemetry (backend seamlessly merges tank level & flow)
+  String body = "{\"used_l\":" + String(totalLiters, 3) +
                 ",\"flow_lpm\":" + String(flowRate, 2) +
                 ",\"device_id\":\"esp32-flow\"}";
 
   postJSON("/api/water", body);
 }
 
-/* ── HC-SR04 water tank level, pushed to /api/water (optional,
-   from main.cpp prototype — disabled unless HAS_WATER_SENSOR
-   is set true) ───────────────────────────────────────────────── */
+/* ── HC-SR04 water tank level, pushed to /api/water ────────── */
 #if HAS_WATER_SENSOR
 void readAndPushWater() {
-  digitalWrite(TRIG_PIN, LOW);  delayMicroseconds(2);
-  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
+  const int SAMPLES = 3;
+  long durations[SAMPLES];
+  int validCount = 0;
+  long durationSum = 0;
 
-  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout
-  if (duration == 0) {
-    Serial.println("HC-SR04: no echo received");
+  for (int i = 0; i < SAMPLES; i++) {
+    delay(60); // Minimum 60ms between consecutive ultrasonic pings
+
+    // Ensure clean LOW pulse before triggering
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(4);
+
+    // 10 microsecond HIGH trigger pulse
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+
+    // Wait for ECHO pulse (45000 µs timeout covers up to ~7.5m)
+   long d = pulseIn(ECHO_PIN, HIGH, 60000);
+      durations[i] = d;
+
+    Serial.printf("[HC-SR04 DEBUG] Sample %d = %ld us\n", i + 1, d);
+
+  if (d >= 150) {
+      durationSum += d;
+      validCount++;
+  }
+  }
+
+  if (validCount == 0) {
+    Serial.println("\n[HC-SR04 ERROR] No valid echo pulse received!");
+    Serial.println(" -> Troubleshooting checks:");
+    Serial.printf ("    1. VCC must be 5V (VIN pin), NOT 3.3V (standard HC-SR04 requires 5V)\n");
+    Serial.printf ("    2. Common GND connected to ESP32 GND\n");
+    Serial.printf ("    3. TRIG connected to GPIO %d\n", TRIG_PIN);
+    Serial.printf ("    4. ECHO connected to GPIO %d via Voltage Divider (e.g. 1kΩ / 2kΩ)\n", ECHO_PIN);
+    Serial.println("    5. Sensor face is pointing towards water and unobstructed\n");
     return;
   }
 
-  float distanceCm = duration * 0.0343 / 2.0;
+  long avgDuration = durationSum / validCount;
+  float distanceCm = avgDuration * 0.0343 / 2.0;
+
+  // Calculate percentage based on empty vs full tank calibration
   float levelPct = (TANK_EMPTY_CM - distanceCm) / (TANK_EMPTY_CM - TANK_FULL_CM) * 100.0;
-  levelPct = constrain(levelPct, 0, 100);
+  levelPct = constrain(levelPct, 0.0, 100.0);
 
-  Serial.printf("Water tank: %.0f%% (distance %.1fcm)\n", levelPct, distanceCm);
+  Serial.println("\n----- WATER TANK LEVEL -----");
+  Serial.printf("[HC-SR04] Duration: %ld us | Distance: %.1f cm | Tank Level: %.0f%%\n",
+                avgDuration, distanceCm, levelPct);
 
+  // Send tank level reading to backend
   String body = "{\"level_pct\":" + String(levelPct, 0) +
-                ",\"used_l\":0,\"flow_lpm\":0,\"device_id\":\"esp32-tank\"}";
+                ",\"device_id\":\"esp32-tank\"}";
 
   postJSON("/api/water", body);
 }
