@@ -38,6 +38,9 @@
   <!-- ── APP SHELL ─────────────────────────────────────── -->
   <div id="app-shell" class="hidden">
 
+    <!-- Sidebar Backdrop for Mobile -->
+    <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+
     <!-- Sidebar -->
     <aside id="sidebar">
       <div class="sidebar-logo">
@@ -74,7 +77,14 @@
 
       <!-- Topbar -->
       <header id="topbar">
-        <span id="page-title" class="page-title">Dashboard</span>
+        <div class="topbar-left">
+          <button id="btn-sidebar-toggle" class="sidebar-toggle" aria-label="Toggle navigation">
+            <span></span>
+            <span></span>
+            <span></span>
+          </button>
+          <span id="page-title" class="page-title">Dashboard</span>
+        </div>
         <div class="topbar-right">
           <span id="thi-chip" class="badge">THI — · —</span>
           <span id="live-env" class="live-env">🌡 —°C · 💧 —%</span>
@@ -343,6 +353,86 @@
             <p id="dur-save-status" class="muted smaller mt-8 hidden" style="color:var(--primary)">Operation durations saved successfully.</p>
           </div>
 
+          <!-- Relay Module & Water Pump Test & Manual Control -->
+          <div class="card mb-20">
+            <div class="field-label mb-14">Relay Module &amp; Water Pump Hardware Testing &amp; Manual Control</div>
+            <p class="muted small mb-14">Test the single-channel relay module to verify that the water pump triggers properly, pumps water through the misting/bathing line, and registers flow pulses.</p>
+            <div class="pump-test-box">
+              <div class="pump-status-row">
+                <div class="pump-status-left">
+                  <div class="pump-indicator-icon" id="pump-indicator-icon">⚡</div>
+                  <div>
+                    <div class="pump-title" id="pump-current-title">Relay / Pump Status: <span id="pump-relay-text" class="color-blue">Standby (OFF)</span></div>
+                    <div class="pump-meta muted small" id="pump-relay-meta">GPIO 7 (Active-LOW) · Controls Barn Misting &amp; Bathing Water Pump</div>
+                  </div>
+                </div>
+                <div class="pump-badge-wrap">
+                  <span id="pump-live-badge" class="badge badge-muted">Relay Standby</span>
+                </div>
+              </div>
+
+              <div class="pump-actions-grid mt-16">
+                <button id="btn-test-pump" class="btn btn-primary">
+                  <span>🧪</span> Test Water Pump (3s Pulse)
+                </button>
+                <button id="btn-toggle-pump" class="btn btn-outline">
+                  <span>💧</span> <span id="btn-toggle-pump-text">Manual Pump ON</span>
+                </button>
+              </div>
+
+              <div id="pump-test-result" class="pump-test-feedback hidden mt-14">
+                <div class="pump-test-msg" id="pump-test-msg"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sensor Hardware Diagnostics -->
+          <div class="card mb-20">
+            <div class="field-label mb-14">Connected Sensor Hardware Diagnostics</div>
+            <div id="sensor-diag-grid" class="sensor-diag-grid">
+              <div class="sensor-diag-item" id="diag-dht">
+                <div class="sensor-diag-icon">🌡️</div>
+                <div class="sensor-diag-info">
+                  <div class="sensor-diag-name">DHT22 Sensor (GPIO 4)</div>
+                  <div class="sensor-diag-desc muted small">Temp &amp; Humidity</div>
+                </div>
+                <span class="badge badge-muted diag-badge">Checking…</span>
+              </div>
+              <div class="sensor-diag-item" id="diag-rtc">
+                <div class="sensor-diag-icon">⏰</div>
+                <div class="sensor-diag-info">
+                  <div class="sensor-diag-name">DS3231 RTC (I2C 8,9)</div>
+                  <div class="sensor-diag-desc muted small">Real-Time Clock</div>
+                </div>
+                <span class="badge badge-muted diag-badge">Checking…</span>
+              </div>
+              <div class="sensor-diag-item" id="diag-tank">
+                <div class="sensor-diag-icon">📏</div>
+                <div class="sensor-diag-info">
+                  <div class="sensor-diag-name">HC-SR04 Sensor (T:5, E:6)</div>
+                  <div class="sensor-diag-desc muted small">Ultrasonic Water Tank</div>
+                </div>
+                <span class="badge badge-muted diag-badge">Checking…</span>
+              </div>
+              <div class="sensor-diag-item" id="diag-flow">
+                <div class="sensor-diag-icon">🚰</div>
+                <div class="sensor-diag-info">
+                  <div class="sensor-diag-name">YF-S201B Flow (GPIO 15)</div>
+                  <div class="sensor-diag-desc muted small">Water Pulse Counter</div>
+                </div>
+                <span class="badge badge-muted diag-badge">Checking…</span>
+              </div>
+              <div class="sensor-diag-item" id="diag-relay">
+                <div class="sensor-diag-icon">⚡</div>
+                <div class="sensor-diag-info">
+                  <div class="sensor-diag-name">Relay &amp; Water Pump (GPIO 7)</div>
+                  <div class="sensor-diag-desc muted small">Misting &amp; Pump Switch</div>
+                </div>
+                <span class="badge badge-muted diag-badge">Checking…</span>
+              </div>
+            </div>
+          </div>
+
           <div id="auto-sys-list"></div>
         </section>
 
@@ -401,6 +491,9 @@
       </div>
     </div>
   </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
   <!-- Scripts (order matters) -->
   <script src="js/config.js"></script>

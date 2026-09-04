@@ -105,11 +105,15 @@ Wiring is unchanged from the original sketches, plus optional pins:
 | HC-SR04 TRIG       | GPIO5 (optional)                      | Water tank level |
 | HC-SR04 ECHO       | GPIO6 (optional)                      | Water tank level |
 
-### Relay Module & Buzzer Configuration Notes:
+### Relay Module & Water Pump Testing:
 
+- **Web Dashboard Testing**: Navigate to **Automatic Systems** (`Auto Systems` in the sidebar). Use the **"🧪 Test Water Pump (3s Pulse)"** button or toggle **"💧 Manual Pump ON/OFF"** for live testing with real-time status and diagnostics.
+- **Serial Monitor Commands**: Open the Serial Monitor at `115200 baud` and type:
+  - `test pump` or `pump test` — Triggers a 3-second water pump relay test, monitors flow sensor pulses in real time, and logs results.
+  - `pump on` / `relay on` — Manually turns ON the relay / water pump.
+  - `pump off` / `relay off` — Manually turns OFF the relay / water pump.
+  - `test` / `diag` / `status` — Runs full hardware self-test across all 5 subsystems (DHT22, RTC, HC-SR04, Flow Sensor, Relay).
 - **Active-LOW Relays**: Most 1-channel relay modules use Active-LOW logic (trigger when signal is `LOW`). Keep `#define RELAY_ACTIVE_LOW true` in `main.cpp`. If your relay module triggers on `HIGH`, change it to `false`.
-- **Boot Self-Test**: The node now pulses the relay/buzzer 3 times on boot to verify wiring.
-- **TEST_MODE**: Set `#define TEST_MODE true` near top of `main.cpp` to pulse the relay on every 10s sensor check during testing, even if room temperature is normal (< 74 THI). Set to `false` for production operation.
 - **Standard ESP32 vs ESP32-S3**: On classic ESP32 (WROOM-32), pins 6-11 are reserved for flash memory. If using classic ESP32, change `#define RELAY_PIN 18` or `19`. On ESP32-S3, pin 7 works directly.
 
 ## API reference (backend)
@@ -117,9 +121,14 @@ Wiring is unchanged from the original sketches, plus optional pins:
 **Ingest (called by the ESP32):**
 - `POST /api/readings` — `{ temp, humidity, device_id }`
 - `POST /api/water` — `{ level_pct, used_l, flow_lpm, device_id }`
+- `POST /api/diagnostics` — `{ dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, details }`
+- `POST /api/relay/status` — `{ relay_on, test_completed, flow_pulses, flow_lpm }`
 
-**Read & Control (called by the dashboard):**
-- `GET /api/status` — current temp/humidity/THI/water/system state, operation durations, & diagnostics
+**Read & Control (called by the dashboard & ESP32):**
+- `GET /api/status` — current temp/humidity/THI/water/system state, operation durations, relay state, & diagnostics
+- `POST /api/relay/test` — `{ duration_ms }` triggers timed water pump test
+- `POST /api/relay/control` — `{ active: true/false }` toggles manual water pump override
+- `GET /api/relay/command` — polled by ESP32 to receive test and toggle commands from dashboard
 - `GET /api/readings/history?range=24h|7d|30d` — chart telemetry data
 - `GET /api/water/weekly` — weekly usage bar chart
 - `GET /api/schedules?type=bath|clean` — schedule list

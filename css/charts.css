@@ -62,19 +62,33 @@
 /* ── Legend ──────────────────────────────────────────────── */
 .chart-legend {
   display: flex;
-  gap: 16px;
+  gap: 12px;
   margin-top: 8px;
   font-size: 11px;
   color: var(--muted);
   justify-content: center;
+  flex-wrap: wrap;
 }
 .legend-item {
   display: flex;
   align-items: center;
   gap: 5px;
+  white-space: nowrap;
 }
 .legend-dot {
   width: 10px; height: 3px;
   border-radius: 2px;
   display: inline-block;
+}
+
+@media (max-width: 600px) {
+  .chart-area {
+    height: 190px;
+  }
+  .chart-area-sm {
+    height: 150px;
+  }
+  .axis-label {
+    font-size: 9px;
+  }
 }

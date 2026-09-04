@@ -62,9 +62,13 @@ app.post('/api/readings', (req, res) => {
   const thi = calcTHI(temp, humidity);
   db.insertReading({ temp, humidity, thi, device_id });
 
+  // Log every DHT22 reading to the activity feed for the Reports page
+  const thiThresholds = db.getTHIThresholds();
+  const status = thiLevel(thi, thiThresholds);
+  db.logActivity('Mist', `DHT22 reading — Temp ${temp}°C, Humidity ${humidity}%, THI ${thi} (${status.label})`);
+
   // auto-log threshold crossings for the Reports activity feed
   const threshold = parseFloat(db.getSetting('threshold', '32'));
-  const thiThresholds = db.getTHIThresholds();
   if (temp > threshold) {
     db.logActivity('Mist', `Misting condition met — Temp ${temp}°C exceeded threshold ${threshold}°C`);
   }
@@ -148,6 +152,10 @@ app.get('/api/status', (req, res) => {
   }
 
   const diagnostics = db.latestDiagnostics();
+  const mistActive = temp != null ? temp > threshold : false;
+  const bathActive = bathSchedules.some(isScheduleActiveNow);
+  const cleanActive = cleanSchedules.some(isScheduleActiveNow);
+  const pumpActive = relayState || manualPumpActive || mistActive || bathActive || cleanActive;
 
   res.json({
     temp, humidity, thi,
@@ -159,9 +167,13 @@ app.get('/api/status', (req, res) => {
     waterLevel: water ? water.level_pct : null,
     waterUsed: water ? water.used_l : 0,
     flowRate: water ? water.flow_lpm : 0,
-    mistActive: temp != null ? temp > threshold : false,
-    bathActive: bathSchedules.some(isScheduleActiveNow),
-    cleanActive: cleanSchedules.some(isScheduleActiveNow),
+    mistActive,
+    bathActive,
+    cleanActive,
+    pumpActive,
+    relayState,
+    manualPumpActive,
+    lastPumpTest,
     threshold,
     lastReadingTs: reading ? reading.ts : null,
     lastWaterTs: water ? water.ts : null,
@@ -280,6 +292,77 @@ app.get('/api/reports/export', (req, res) => {
 app.get('/api/activity', (req, res) => {
   const limit = parseInt(req.query.limit) || 30;
   res.json(db.recentActivity(limit));
+});
+
+/* ── Relay & Water Pump Control State ──────────────────────── */
+let relayState = false;
+let manualPumpActive = false;
+let lastPumpTest = null;
+let pendingRelayCommand = null;
+
+// Relay & Water Pump Test endpoint
+app.post('/api/relay/test', (req, res) => {
+  const duration_ms = parseInt(req.body.duration_ms) || 3000;
+  pendingRelayCommand = {
+    command: 'test_pump',
+    duration_ms,
+    ts: Date.now()
+  };
+  lastPumpTest = {
+    ts: Date.now(),
+    duration_ms,
+    status: 'Testing'
+  };
+  relayState = true;
+  db.logActivity('Mist', `Relay module & water pump test triggered (${(duration_ms / 1000).toFixed(0)}s pulse)`);
+
+  // Auto-reset relay state in backend after duration + buffer
+  setTimeout(() => {
+    relayState = false;
+    if (lastPumpTest && lastPumpTest.status === 'Testing') {
+      lastPumpTest.status = 'Completed';
+    }
+  }, duration_ms + 1000);
+
+  res.json({ ok: true, message: `Pump test command queued for ${duration_ms}ms`, lastPumpTest });
+});
+
+// Manual Relay / Pump Toggle endpoint
+app.post('/api/relay/control', (req, res) => {
+  const active = !!req.body.active;
+  manualPumpActive = active;
+  relayState = active;
+  pendingRelayCommand = {
+    command: active ? 'pump_on' : 'pump_off',
+    ts: Date.now()
+  };
+  db.logActivity('Mist', `Water pump manual override switched ${active ? 'ON' : 'OFF'}`);
+  res.json({ ok: true, manualPumpActive, relayState });
+});
+
+// ESP32 checks for pending commands
+app.get('/api/relay/command', (req, res) => {
+  const cmd = pendingRelayCommand;
+  pendingRelayCommand = null; // consume once delivered
+  res.json({ command: cmd || null, manualPumpActive });
+});
+
+// ESP32 posts relay status and test completion reports
+app.post('/api/relay/status', (req, res) => {
+  const { relay_on, test_completed, flow_pulses, flow_lpm } = req.body;
+  if (typeof relay_on === 'boolean') {
+    relayState = relay_on;
+  }
+  if (test_completed) {
+    lastPumpTest = {
+      ts: Date.now(),
+      status: 'Passed',
+      flow_pulses: flow_pulses || 0,
+      flow_lpm: flow_lpm || 0
+    };
+    db.logActivity('Info', `Pump test completed successfully. Flow: ${flow_lpm || 0} L/min (${flow_pulses || 0} pulses)`);
+  }
+  res.json({ ok: true, relayState, lastPumpTest });
 });
 
 // Sensor Hardware Diagnostics (pushed by ESP32 self-test or queried by web dashboard)

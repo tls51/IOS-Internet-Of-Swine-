@@ -37,12 +37,15 @@ const DATA = (() => {
     temp: null, humidity: null, thi: null,
     waterLevel: null, waterUsed: 0, flowRate: 0,
     mistActive: false, bathActive: false, cleanActive: false,
+    pumpActive: false, relayState: false, manualPumpActive: false,
+    lastPumpTest: null,
     history: [],
     weeklyWater: [],
     threshold: 32,
     thiThresholds: { normalMax: 74, stressMax: 78, extremeMax: 83 },
     operationDurations: { mistDurationMin: 5, mistPauseSec: 30 },
     malfunctions: [],
+    diagnostics: null,   // latest ESP32 hardware self-test results
     connected: false,
   };
 
@@ -53,6 +56,16 @@ const DATA = (() => {
   /* ── Fetch helpers ──────────────────────────────────────── */
   async function getJSON(path) {
     const res = await fetch(API + path);
+    if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async function postJSON(path, data) {
+    const res = await fetch(API + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
     if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
     return res.json();
   }
@@ -70,6 +83,10 @@ const DATA = (() => {
       state.mistActive     = !!s.mistActive;
       state.bathActive      = !!s.bathActive;
       state.cleanActive     = !!s.cleanActive;
+      state.pumpActive      = !!s.pumpActive;
+      state.relayState      = !!s.relayState;
+      state.manualPumpActive = !!s.manualPumpActive;
+      state.lastPumpTest    = s.lastPumpTest || null;
       state.threshold       = s.threshold;
       if (s.thiThresholds) {
         state.thiThresholds = s.thiThresholds;
@@ -78,12 +95,46 @@ const DATA = (() => {
         state.operationDurations = s.operationDurations;
       }
       state.malfunctions    = s.malfunctions || [];
+      // Diagnostics embedded in status response
+      if (s.diagnostics) state.diagnostics = s.diagnostics;
       state.connected       = true;
     } catch (err) {
       state.connected = false;
       console.warn('IoS backend unreachable — is `npm start` running in ios-backend/?', err.message);
     }
     notify();
+  }
+
+  /* ── Poll /api/diagnostics: ESP32 sensor self-test results ── */
+  async function refreshDiagnostics() {
+    try {
+      const d = await getJSON('/api/diagnostics');
+      state.diagnostics = d;
+    } catch (err) {
+      // Diagnostics are non-critical — keep last known values
+      if (!state.diagnostics) state.diagnostics = null;
+    }
+    notify();
+  }
+
+  /* ── Water Pump & Relay Control & Testing ─────────────────── */
+  async function testPump(durationMs = 3000) {
+    state.relayState = true;
+    state.pumpActive = true;
+    notify();
+    const res = await postJSON('/api/relay/test', { duration_ms: durationMs });
+    await refreshStatus();
+    return res;
+  }
+
+  async function controlPump(active) {
+    state.manualPumpActive = !!active;
+    state.relayState = !!active;
+    state.pumpActive = !!active;
+    notify();
+    const res = await postJSON('/api/relay/control', { active: !!active });
+    await refreshStatus();
+    return res;
   }
 
   /* ── Poll /api/readings/history: chart line data ──────────── */
@@ -104,18 +155,34 @@ const DATA = (() => {
   /* ── Intervals ──────────────────────────────────────────── */
   let _statusTimer = null;
   let _historyTimer = null;
+  let _diagTimer = null;
 
   function start() {
     refreshStatus();
     refreshHistory();
+    refreshDiagnostics();
     _statusTimer  = setInterval(refreshStatus, POLL_MS);
     _historyTimer = setInterval(refreshHistory, HISTORY_POLL_MS);
+    _diagTimer    = setInterval(refreshDiagnostics, 60000); // refresh diagnostics every 60s
   }
 
   function stop() {
     clearInterval(_statusTimer);
     clearInterval(_historyTimer);
+    clearInterval(_diagTimer);
   }
 
-  return { state, thiLevel, onTick, start, stop, calcTHI, refreshStatus, refreshHistory };
+  return {
+    state,
+    thiLevel,
+    onTick,
+    start,
+    stop,
+    calcTHI,
+    refreshStatus,
+    refreshHistory,
+    refreshDiagnostics,
+    testPump,
+    controlPump
+  };
 })();

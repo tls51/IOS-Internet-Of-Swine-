@@ -200,6 +200,27 @@ function latestDiagnostics() {
   };
 }
 
+function logActivity(type, msg, ts) {
+  const stmt = db.prepare(`
+    INSERT INTO activity_log (ts, type, msg)
+    VALUES (?, ?, ?)
+  `);
+
+  return stmt.run(
+    ts || Date.now(),
+    type,
+    msg
+  );
+}
+
+function recentActivity(limit = 50) {
+  return db.prepare(`
+    SELECT * FROM activity_log
+    ORDER BY ts DESC
+    LIMIT ?
+  `).all(limit);
+}
+
 module.exports = {
   db,
   insertReading, latestReading, readingsSince,

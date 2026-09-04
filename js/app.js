@@ -29,6 +29,81 @@
   /* ── State ───────────────────────────────────────────────── */
   let activePage = 'dashboard';
 
+  /* ── Notification System ─────────────────────────────────── */
+  const NOTIFY = (() => {
+    function getContainer() {
+      let container = document.getElementById('toast-container');
+      if (!container) {
+        container = document.createElement('div');
+        container.id = 'toast-container';
+        container.className = 'toast-container';
+        document.body.appendChild(container);
+      }
+      return container;
+    }
+
+    const DEFAULT_ICONS = {
+      success: '✅',
+      info:    'ℹ️',
+      warning: '⚠️',
+      error:   '❌'
+    };
+
+    function show({ title, message, type = 'success', duration = 4500, icon }) {
+      const container = getContainer();
+      const toast = document.createElement('div');
+      toast.className = `toast toast-${type}`;
+
+      const iconEmoji = icon || DEFAULT_ICONS[type] || '🔔';
+
+      toast.innerHTML = `
+        <span class="toast-icon">${iconEmoji}</span>
+        <div class="toast-content">
+          ${title ? `<div class="toast-title">${title}</div>` : ''}
+          ${message ? `<div class="toast-message">${message}</div>` : ''}
+        </div>
+        <button class="toast-close" aria-label="Close notification">×</button>
+        <div class="toast-progress" style="animation-duration: ${duration}ms"></div>
+      `;
+
+      let dismissTimeout = null;
+
+      function dismiss() {
+        if (dismissTimeout) clearTimeout(dismissTimeout);
+        toast.classList.add('toast-leave');
+        toast.addEventListener('animationend', () => {
+          if (toast.parentNode) toast.parentNode.removeChild(toast);
+        }, { once: true });
+      }
+
+      toast.querySelector('.toast-close').addEventListener('click', dismiss);
+      dismissTimeout = setTimeout(dismiss, duration);
+
+      container.appendChild(toast);
+
+      /* Native browser notification fallback/enhancement if supported and permitted */
+      if (typeof window !== 'undefined' && 'Notification' in window) {
+        if (Notification.permission === 'granted') {
+          try {
+            new Notification(title || 'IoS System', {
+              body: message || '',
+              icon: 'pig-icon.png'
+            });
+          } catch (e) { /* ignore */ }
+        } else if (Notification.permission === 'default') {
+          Notification.requestPermission().catch(() => {});
+        }
+      }
+
+      return toast;
+    }
+
+    return { show };
+  })();
+
+  /* Expose globally for schedule.js and other components */
+  window.NOTIFY = NOTIFY;
+
   /* ── Clock ───────────────────────────────────────────────── */
   function startClock() {
     const el = document.getElementById('live-time');
@@ -64,6 +139,12 @@
       b.classList.toggle('active', b.dataset.page === key);
     });
 
+    /* close mobile drawer */
+    const sidebar  = document.getElementById('sidebar');
+    const backdrop = document.getElementById('sidebar-backdrop');
+    if (sidebar)  sidebar.classList.remove('open');
+    if (backdrop) backdrop.classList.remove('active');
+
     /* update title */
     document.getElementById('page-title').textContent = PAGE_TITLES[key] || key;
 
@@ -74,6 +155,33 @@
   function initNav() {
     document.querySelectorAll('.nav-btn').forEach(btn => {
       btn.addEventListener('click', () => showPage(btn.dataset.page));
+    });
+
+    /* Mobile drawer toggle */
+    const toggleBtn = document.getElementById('btn-sidebar-toggle');
+    const sidebar   = document.getElementById('sidebar');
+    const backdrop  = document.getElementById('sidebar-backdrop');
+
+    if (toggleBtn && sidebar && backdrop) {
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        sidebar.classList.toggle('open');
+        backdrop.classList.toggle('active');
+      });
+
+      backdrop.addEventListener('click', () => {
+        sidebar.classList.remove('open');
+        backdrop.classList.remove('active');
+      });
+    }
+
+    /* Window resize listener to dynamically adapt charts */
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        PAGES.update(DATA.state, activePage);
+      }, 150);
     });
   }
 
@@ -285,6 +393,73 @@
     DATA.start();
   }
 
+  /* ── Relay & Water Pump Controls ────────────────────────── */
+  function initPumpControls() {
+    const btnTest = document.getElementById('btn-test-pump');
+    const btnToggle = document.getElementById('btn-toggle-pump');
+    const resultBox = document.getElementById('pump-test-result');
+    const resultMsg = document.getElementById('pump-test-msg');
+
+    if (btnTest) {
+      btnTest.addEventListener('click', async () => {
+        btnTest.disabled = true;
+        btnTest.innerHTML = `<span>⏳</span> Testing Pump (3s)...`;
+        if (resultBox && resultMsg) {
+          resultMsg.innerHTML = `<strong>Status:</strong> <span class="color-blue">Testing in progress...</span> Relay switched ON (Water Pump running)`;
+          resultBox.classList.remove('hidden');
+        }
+
+        try {
+          await DATA.testPump(3000);
+          NOTIFY.show({
+            title: 'Water Pump Test Triggered',
+            message: 'Relay module activated for 3 seconds to test water pump flow.',
+            type: 'info',
+            icon: '🧪'
+          });
+        } catch (err) {
+          console.error('Error triggering pump test:', err);
+          NOTIFY.show({
+            title: 'Pump Test Error',
+            message: 'Failed to contact backend: ' + err.message,
+            type: 'error'
+          });
+        } finally {
+          setTimeout(() => {
+            btnTest.disabled = false;
+            btnTest.innerHTML = `<span>🧪</span> Test Water Pump (3s Pulse)`;
+          }, 3500);
+        }
+      });
+    }
+
+    if (btnToggle) {
+      btnToggle.addEventListener('click', async () => {
+        const nextState = !DATA.state.manualPumpActive;
+        btnToggle.disabled = true;
+
+        try {
+          await DATA.controlPump(nextState);
+          NOTIFY.show({
+            title: nextState ? 'Water Pump Activated' : 'Water Pump Stopped',
+            message: nextState ? 'Relay switched ON manually.' : 'Relay switched OFF.',
+            type: nextState ? 'success' : 'info',
+            icon: nextState ? '💧' : '⏹️'
+          });
+        } catch (err) {
+          console.error('Error toggling water pump:', err);
+          NOTIFY.show({
+            title: 'Pump Override Error',
+            message: 'Failed to update pump state: ' + err.message,
+            type: 'error'
+          });
+        } finally {
+          btnToggle.disabled = false;
+        }
+      });
+    }
+  }
+
   /* ── Boot (called after login) ───────────────────────────── */
   async function boot() {
     startClock();
@@ -293,6 +468,7 @@
     initThresholdSlider();
     initTHIThresholdControls();
     initOperationDurationControls();
+    initPumpControls();
     initRangeTabs();
     initCSVExport();
 

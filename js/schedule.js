@@ -75,9 +75,28 @@ const SCHEDULE = (() => {
       const tog = renderToggle(s.active);
       tog.addEventListener('click', async () => {
         try {
-          await toggleScheduleActive(s.id, !s.active);
+          const nextActive = !s.active;
+          await toggleScheduleActive(s.id, nextActive);
           await reloadList(type);
-        } catch (err) { console.error(err); }
+          if (typeof NOTIFY !== 'undefined') {
+            NOTIFY.show({
+              title: nextActive ? 'Schedule Activated' : 'Schedule Paused',
+              message: `${s.label} (${s.days.join(', ')}) is now ${nextActive ? 'active' : 'paused'}.`,
+              type: nextActive ? 'success' : 'warning',
+              icon: nextActive ? '▶️' : '⏸️',
+              duration: 3500
+            });
+          }
+        } catch (err) {
+          console.error(err);
+          if (typeof NOTIFY !== 'undefined') {
+            NOTIFY.show({
+              title: 'Update Failed',
+              message: err.message || 'Could not update schedule status',
+              type: 'error'
+            });
+          }
+        }
       });
 
       /* info */
@@ -100,7 +119,25 @@ const SCHEDULE = (() => {
         try {
           await deleteScheduleById(s.id);
           await reloadList(type);
-        } catch (err) { console.error(err); }
+          if (typeof NOTIFY !== 'undefined') {
+            NOTIFY.show({
+              title: 'Schedule Deleted',
+              message: `${s.label} was removed.`,
+              type: 'info',
+              icon: '🗑️',
+              duration: 3500
+            });
+          }
+        } catch (err) {
+          console.error(err);
+          if (typeof NOTIFY !== 'undefined') {
+            NOTIFY.show({
+              title: 'Deletion Failed',
+              message: err.message || 'Could not delete schedule',
+              type: 'error'
+            });
+          }
+        }
       });
 
       row.appendChild(tog);
@@ -161,14 +198,63 @@ const SCHEDULE = (() => {
   async function saveModal() {
     const time  = document.getElementById('modal-time').value;
     const dur   = parseInt(document.getElementById('modal-dur').value) || 15;
+
+    if (!_selectedDays.length) {
+      if (typeof NOTIFY !== 'undefined') {
+        NOTIFY.show({
+          title: 'Select Days',
+          message: 'Please pick at least one day of the week.',
+          type: 'warning',
+          icon: '📅'
+        });
+      } else {
+        alert('Please pick at least one day of the week.');
+      }
+      return;
+    }
+
+    if (!time) {
+      if (typeof NOTIFY !== 'undefined') {
+        NOTIFY.show({
+          title: 'Select Time',
+          message: 'Please provide a valid time for the schedule.',
+          type: 'warning',
+          icon: '⏰'
+        });
+      } else {
+        alert('Please provide a valid time.');
+      }
+      return;
+    }
+
+    const typeLabel = _modalType === 'bath' ? 'Bathing' : 'Cleaning';
     const label = `${_modalType === 'bath' ? 'Bath' : 'Clean'} ${time}`;
     const entry = { type: _modalType, label, time, duration: dur, days: [..._selectedDays] };
 
     try {
       await createSchedule(entry);
       await reloadList(_modalType);
+
+      if (typeof NOTIFY !== 'undefined') {
+        const icon = _modalType === 'bath' ? '🚿' : '🧹';
+        NOTIFY.show({
+          title: `${typeLabel} Schedule Scheduled!`,
+          message: `${label} (${entry.days.join(', ')}) set for ${dur} minutes.`,
+          type: 'success',
+          icon: icon,
+          duration: 5000
+        });
+      }
     } catch (err) {
       console.error(err);
+      if (typeof NOTIFY !== 'undefined') {
+        NOTIFY.show({
+          title: 'Scheduling Failed',
+          message: err.message || 'Could not save schedule. Is backend active?',
+          type: 'error',
+          icon: '❌'
+        });
+      }
     }
     closeModal();
   }

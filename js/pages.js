@@ -280,21 +280,119 @@ const PAGES = (() => {
     ];
 
     const list = document.getElementById('auto-sys-list');
-    if (!list) return;
-    list.innerHTML = systems.map(s => `
-      <div class="card auto-card">
-        <div class="auto-icon-box${s.active ? ' on' : ''}">${s.icon}</div>
-        <div class="auto-body">
-          <div class="auto-name">${s.label}</div>
-          <div class="auto-desc">${s.desc}</div>
-          <div class="auto-trigger">Trigger: <span>${s.trigger}</span></div>
-        </div>
-        <span class="badge ${s.active ? 'badge-green' : 'badge-muted'}">
-          <span class="status-dot" style="background:${s.active ? '#22C55E' : '#8B949E'};${s.active ? 'box-shadow:0 0 6px #22C55E' : ''}"></span>
-          ${s.active ? 'Active' : 'Standby'}
-        </span>
-      </div>`).join('');
+    if (list) {
+      list.innerHTML = systems.map(s => `
+        <div class="card auto-card">
+          <div class="auto-icon-box${s.active ? ' on' : ''}">${s.icon}</div>
+          <div class="auto-body">
+            <div class="auto-name">${s.label}</div>
+            <div class="auto-desc">${s.desc}</div>
+            <div class="auto-trigger">Trigger: <span>${s.trigger}</span></div>
+          </div>
+          <span class="badge ${s.active ? 'badge-green' : 'badge-muted'}">
+            <span class="status-dot" style="background:${s.active ? '#22C55E' : '#8B949E'};${s.active ? 'box-shadow:0 0 6px #22C55E' : ''}"></span>
+            ${s.active ? 'Active' : 'Standby'}
+          </span>
+        </div>`).join('');
+    }
+
+    /* Update Relay Module & Water Pump Test Box */
+    const isPumpOn = state.relayState || state.manualPumpActive || state.mistActive || state.bathActive || state.cleanActive;
+    const pumpIcon = document.getElementById('pump-indicator-icon');
+    const pumpText = document.getElementById('pump-relay-text');
+    const pumpBadge = document.getElementById('pump-live-badge');
+    const toggleBtnTxt = document.getElementById('btn-toggle-pump-text');
+    const resultBox = document.getElementById('pump-test-result');
+    const resultMsg = document.getElementById('pump-test-msg');
+
+    if (pumpIcon) {
+      pumpIcon.classList.toggle('active', isPumpOn);
+      pumpIcon.textContent = isPumpOn ? '💧' : '⚡';
+    }
+    if (pumpText) {
+      pumpText.textContent = isPumpOn ? 'Active (Water Pump Running)' : 'Standby (OFF)';
+      pumpText.style.color = isPumpOn ? 'var(--primary)' : 'var(--blue)';
+    }
+    if (pumpBadge) {
+      pumpBadge.className = `badge ${isPumpOn ? 'badge-green' : 'badge-muted'}`;
+      pumpBadge.textContent = isPumpOn ? '✓ Pump ON' : 'Relay Standby';
+    }
+    if (toggleBtnTxt) {
+      toggleBtnTxt.textContent = state.manualPumpActive ? 'Manual Pump OFF' : 'Manual Pump ON';
+    }
+    if (resultBox && resultMsg && state.lastPumpTest) {
+      const pt = state.lastPumpTest;
+      const statusCls = pt.status === 'Passed' ? 'color-green' : (pt.status === 'Testing' ? 'color-blue' : '');
+      const timeStr = pt.ts ? new Date(pt.ts).toLocaleTimeString() : '';
+      resultMsg.innerHTML = `<strong>Status:</strong> <span class="${statusCls}">${pt.status}</span> · <em>${timeStr}</em>` +
+        (pt.flow_lpm != null ? ` · Flow: <strong>${pt.flow_lpm} L/min</strong> (${pt.flow_pulses || 0} pulses)` : ` (Pulse: ${(pt.duration_ms || 3000)/1000}s)`);
+      resultBox.classList.remove('hidden');
+    }
+
+    updateDiagnostics(state);
   }
+
+  /* ── Sensor hardware diagnostics badges ──────────────────── */
+  function updateDiagnostics(state) {
+    const d = state.diagnostics;
+    const sensors = [
+      { id: 'diag-dht',   key: 'dht_ok',   detailKey: 'dht',     label: 'DHT22 Sensor (GPIO 4)'       },
+      { id: 'diag-rtc',   key: 'rtc_ok',   detailKey: 'rtc',     label: 'DS3231 RTC (I2C 8,9)'        },
+      { id: 'diag-tank',  key: 'tank_ok',  detailKey: 'tank',    label: 'HC-SR04 Tank (T:5, E:6)'     },
+      { id: 'diag-flow',  key: 'flow_ok',  detailKey: 'flow',    label: 'YF-S201B Flow (GPIO 15)'     },
+      { id: 'diag-relay', key: 'relay_ok', detailKey: 'relay',   label: 'Relay Driver (GPIO 7)'       },
+    ];
+
+    sensors.forEach(({ id, key, detailKey }) => {
+      const row = document.getElementById(id);
+      if (!row) return;
+      const badge = row.querySelector('.diag-badge');
+      const descEl = row.querySelector('.sensor-diag-desc');
+      if (!badge) return;
+
+      if (!d) {
+        // No diagnostics yet — show waiting state
+        badge.className = 'badge badge-muted diag-badge';
+        badge.textContent = 'Awaiting ESP32…';
+        row.style.borderColor = '';
+        return;
+      }
+
+      const ok = d[key];
+      const detail = (d.details && d.details[detailKey]) ? d.details[detailKey] : '';
+      const ago = d.ts ? _timeAgo(d.ts) : '';
+
+      badge.className = `badge ${ok ? 'badge-green' : 'badge-danger'} diag-badge`;
+      badge.textContent = ok ? '✓ Online' : '✗ Offline';
+      row.style.borderColor = ok ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)';
+      if (descEl && detail) {
+        descEl.textContent = detail.length > 60 ? detail.slice(0, 57) + '…' : detail;
+        descEl.title = detail + (ago ? ` [Tested ${ago}]` : '');
+      }
+    });
+
+    // Show last tested timestamp below the grid
+    const grid = document.getElementById('sensor-diag-grid');
+    if (grid && d && d.ts) {
+      let tsEl = document.getElementById('diag-last-tested');
+      if (!tsEl) {
+        tsEl = document.createElement('p');
+        tsEl.id = 'diag-last-tested';
+        tsEl.className = 'muted smaller mt-8';
+        grid.parentNode.appendChild(tsEl);
+      }
+      tsEl.textContent = `Last self-test: ${_timeAgo(d.ts)} · Type "test" in Serial Monitor to re-run`;
+    }
+  }
+
+  function _timeAgo(ts) {
+    const diff = Math.floor((Date.now() - ts) / 1000);
+    if (diff < 60)   return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    return `${Math.floor(diff / 3600)}h ago`;
+  }
+
+
 
   /* ── Reports page ────────────────────────────────────────── */
   function updateReports(state) {
@@ -308,7 +406,7 @@ const PAGES = (() => {
     const log = document.getElementById('activity-log');
     if (!log) return;
 
-    const TYPE_CLS = { Mist: 'badge-warn', Bath: 'badge-green', Clean: 'badge-green', Alert: 'badge-danger', Info: 'badge-blue' };
+    const TYPE_CLS = { Sensor: 'badge-blue', Mist: 'badge-warn', Bath: 'badge-green', Clean: 'badge-green', Alert: 'badge-danger', Info: 'badge-blue' };
     const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
 
     fetch(`${API}/api/activity?limit=30`)

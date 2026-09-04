@@ -26,9 +26,9 @@
      DHT22 data     -> GPIO4
      RTC DS3231     -> SDA GPIO8, SCL GPIO9 (I2C)
      Flow sensor    -> GPIO15 (YF-S201B, interrupt on FALLING)
-     Relay (mister) -> GPIO7
-     HC-SR04 TRIG   -> GPIO5   (optional, tank level — off by default)
-     HC-SR04 ECHO   -> GPIO17  (optional, tank level — off by default)
+     Relay (mister) -> GPIO18
+     HC-SR04 TRIG   -> GPIO16  (tank level)
+     HC-SR04 ECHO   -> GPIO17  (tank level via voltage divider)
    ============================================================ */
 
 #include <Arduino.h>
@@ -85,10 +85,9 @@ bool bathingDone = false;
    RELAY & BUZZER SETTINGS
    ===========================
    Note: Most single-channel relay modules use ACTIVE-LOW logic
-   (trigger on LOW signal). Set RELAY_ACTIVE_LOW to true for Active-LOW,
-   or false for Active-HIGH relays.
+   (trigger on LOW signal: LOW = ON, HIGH = OFF).
    =========================== */
-#define RELAY_PIN 7           // Relay control pin (use GPIO 18/19/27 if standard ESP32)
+#define RELAY_PIN 18          // Relay control pin (Active-LOW: LOW=ON, HIGH=OFF)
 #define RELAY_ACTIVE_LOW true // Set true if LOW turns relay ON (standard for relay modules)
 
 /* Set TEST_MODE to true to force relay/buzzer to pulse on every 10s sensor check.
@@ -97,20 +96,19 @@ bool bathingDone = false;
 
 /* Optional Piezo Buzzer settings */
 #define HAS_BUZZER false      // Set to true if a dedicated Piezo Buzzer is wired up
-#define BUZZER_PIN 18         // GPIO pin for Piezo Buzzer
+#define BUZZER_PIN 19         // Moved to GPIO 19 to prevent conflict with RELAY_PIN 18
 
 /* ===========================
    HC-SR04 ULTRASONIC WATER TANK SENSOR
    Wiring & Voltage Divider:
      VCC  -> 5V (VIN or 5V pin on ESP32 — NOT 3.3V)
      GND  -> GND
-     TRIG -> GPIO 5
+     TRIG -> GPIO 16
      ECHO -> Voltage Divider -> GPIO 17
              (ECHO -> 1kΩ resistor -> GPIO 17 -> 2kΩ resistor -> GND)
-             (or 2.2kΩ and 3.3kΩ)
    =========================== */
 #define HAS_WATER_SENSOR true
-#define TRIG_PIN 5
+#define TRIG_PIN 16
 #define ECHO_PIN 17
 const float TANK_EMPTY_CM = 14.0;   // Sensor reading distance when tank is empty (cm)
 const float TANK_FULL_CM  = 3.0;    // Sensor reading distance when tank is full (cm)
@@ -131,7 +129,7 @@ void readAndPushDHT();
 void checkBathingSchedule(const DateTime& now);
 void readAndPushFlow();
 void setMistingRelay(bool on);
-bool testRelayAndPump(int durationMs = 3000);
+bool testRelayAndPump(int durationMs = 30000);
 void checkPendingCommands();
 void beepBuzzer(int count = 1, int delayMs = 150);
 #if HAS_WATER_SENSOR
@@ -411,7 +409,7 @@ void loop() {
     cmd.trim();
     cmd.toLowerCase();
     if (cmd == "test pump" || cmd == "pump test" || cmd == "test relay" || cmd == "relay test" || cmd == "pump") {
-      testRelayAndPump(3000);
+      testRelayAndPump(30000);
     } else if (cmd == "pump on" || cmd == "relay on") {
       Serial.println(">>> MANUAL OVERRIDE: Water Pump Relay turned ON <<<");
       setMistingRelay(true);
@@ -553,11 +551,11 @@ void checkPendingCommands() {
   if (code == 200) {
     String payload = http.getString();
     if (payload.indexOf("\"command\":\"test_pump\"") >= 0) {
-      int dur = 3000;
+      int dur = 30000;
       int durIdx = payload.indexOf("\"duration_ms\":");
       if (durIdx >= 0) {
         dur = payload.substring(durIdx + 14).toInt();
-        if (dur <= 0 || dur > 30000) dur = 3000;
+        if (dur <= 0 || dur > 60000) dur = 30000;
       }
       Serial.println("\n>>> [REMOTE COMMAND] Received: test_pump from Web Dashboard <<<");
       testRelayAndPump(dur);
@@ -704,25 +702,23 @@ void readAndPushWater() {
   for (int i = 0; i < SAMPLES; i++) {
     delay(60); // Minimum 60ms between consecutive ultrasonic pings
 
-    // Ensure clean LOW pulse before triggering
+    // Send clean 10us pulse exactly matching reference code
     digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(4);
-
-    // 10 microsecond HIGH trigger pulse
+    delayMicroseconds(2);
     digitalWrite(TRIG_PIN, HIGH);
     delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
 
-    // Wait for ECHO pulse (45000 µs timeout covers up to ~7.5m)
-   long d = pulseIn(ECHO_PIN, HIGH, 60000);
-      durations[i] = d;
+    // Wait for ECHO pulse (35000 µs timeout covers up to ~6m)
+    long d = pulseIn(ECHO_PIN, HIGH, 35000);
+    durations[i] = d;
 
     Serial.printf("[HC-SR04 DEBUG] Sample %d = %ld us\n", i + 1, d);
 
-  if (d >= 150) {
+    if (d >= 120) {
       durationSum += d;
       validCount++;
-  }
+    }
   }
 
   if (validCount == 0) {
@@ -747,8 +743,9 @@ void readAndPushWater() {
   Serial.printf("[HC-SR04] Duration: %ld us | Distance: %.1f cm | Tank Level: %.0f%%\n",
                 avgDuration, distanceCm, levelPct);
 
-  // Send tank level reading to backend
+  // Send tank level reading to backend (including raw distance_cm)
   String body = "{\"level_pct\":" + String(levelPct, 0) +
+                ",\"distance_cm\":" + String(distanceCm, 1) +
                 ",\"device_id\":\"esp32-tank\"}";
 
   postJSON("/api/water", body);

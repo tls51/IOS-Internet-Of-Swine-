@@ -156,12 +156,12 @@
 
 /* ── THI scale boxes ─────────────────────────────────────── */
 .thi-scale-boxes {
-  display: flex;
-  gap: 4px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
   margin-bottom: 12px;
 }
 .thi-box {
-  flex: 1;
   background: var(--bg);
   border: 2px solid var(--border);
   border-radius: 10px;
@@ -174,6 +174,19 @@
 }
 .thi-box-range { font-weight: 700; font-size: 16px; }
 .thi-box-lbl   { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+@media (max-width: 600px) {
+  .thi-scale-boxes {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+  .thi-box {
+    padding: 10px 8px;
+  }
+  .thi-box-range {
+    font-size: 15px;
+  }
+}
 
 .thi-gradient-bar {
   position: relative;
@@ -237,12 +250,14 @@
   display: flex;
   align-items: center;
   gap: 20px;
+  flex-wrap: wrap;
 }
 .threshold-ctrl {
   display: flex;
   align-items: center;
   gap: 14px;
   min-width: 220px;
+  flex: 1;
 }
 .threshold-val {
   font-size: 24px;
@@ -275,7 +290,7 @@
   background: rgba(34,197,94,.15);
   border-color: var(--primary);
 }
-.auto-body { flex: 1; }
+.auto-body { flex: 1; min-width: 0; }
 .auto-name  { font-weight: 600; }
 .auto-desc  { font-size: 12px; color: var(--muted); margin-top: 3px; }
 .auto-trigger { font-size: 11px; color: var(--muted); margin-top: 3px; }
@@ -287,11 +302,119 @@
   margin-right: 5px;
 }
 
+@media (max-width: 600px) {
+  .auto-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+}
+
+/* ── Relay & Water Pump Test Box ─────────────────────────── */
+.pump-test-box {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 16px 18px;
+}
+.pump-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.pump-status-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.pump-indicator-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  border: 2px solid var(--border);
+  background: var(--card);
+  transition: all 0.3s ease;
+}
+.pump-indicator-icon.active {
+  background: rgba(34, 197, 94, 0.18);
+  border-color: var(--primary);
+  color: var(--primary);
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.3);
+  animation: pumpPulse 1.2s infinite alternate;
+}
+@keyframes pumpPulse {
+  from { transform: scale(1); }
+  to { transform: scale(1.08); }
+}
+.pump-title {
+  font-weight: 700;
+  font-size: 14px;
+}
+.pump-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.pump-test-feedback {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+/* ── Sensor Diagnostics Grid ─────────────────────────────── */
+.sensor-diag-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+.sensor-diag-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color 0.2s;
+}
+.sensor-diag-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+.sensor-diag-info {
+  flex: 1;
+  min-width: 0;
+}
+.sensor-diag-name {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sensor-diag-desc {
+  font-size: 11px;
+}
+.diag-badge {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 /* ── Schedule list ───────────────────────────────────────── */
 .sched-topbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 .sched-list { display: flex; flex-direction: column; gap: 10px; }
 .sched-row {
@@ -302,21 +425,44 @@
   background: var(--bg);
   border-radius: 10px;
   border: 1px solid var(--border);
+  transition: border-color .15s;
 }
-.sched-info { flex: 1; }
-.sched-name { font-weight: 600; }
+.sched-info { flex: 1; min-width: 0; }
+.sched-name { font-weight: 600; font-size: 14px; }
 .sched-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .sched-del {
   background: transparent;
   border: none;
   color: var(--danger);
-  font-size: 20px;
+  font-size: 22px;
   line-height: 1;
-  padding: 0 4px;
+  padding: 4px 8px;
   opacity: .6;
-  transition: opacity .15s;
+  transition: opacity .15s, transform .1s;
 }
-.sched-del:hover { opacity: 1; }
+.sched-del:hover { opacity: 1; transform: scale(1.1); }
+
+@media (max-width: 540px) {
+  .sched-row {
+    padding: 12px 14px;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .sched-info {
+    order: 1;
+    width: calc(100% - 60px);
+  }
+  .toggle-btn {
+    order: 0;
+  }
+  .sched-row .badge {
+    order: 2;
+    margin-left: auto;
+  }
+  .sched-del {
+    order: 3;
+  }
+}
 
 /* Toggle button */
 .toggle-btn {
@@ -327,6 +473,7 @@
   cursor: pointer;
   transition: background .2s;
   flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
 }
 .toggle-knob {
   position: absolute;
@@ -340,33 +487,42 @@
 /* ── Day picker ──────────────────────────────────────────── */
 .day-picker { display: flex; gap: 6px; flex-wrap: wrap; }
 .day-btn {
-  padding: 5px 10px;
+  padding: 7px 12px;
   border-radius: 6px;
   font-size: 12px;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--muted);
   transition: all .15s;
+  -webkit-tap-highlight-color: transparent;
 }
 .day-btn.selected {
   background: rgba(34,197,94,.15);
   color: var(--primary);
   border-color: var(--primary);
+  font-weight: 600;
 }
 
 /* ── Modal ───────────────────────────────────────────────── */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0,0,0,.6);
+  background: rgba(0,0,0,.7);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 200;
+  padding: 16px;
 }
 .modal-box {
-  width: 420px;
-  box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  width: 100%;
+  max-width: 440px;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0,0,0,.6);
+  border: 1px solid var(--border);
 }
 .modal-head {
   display: flex;
@@ -375,17 +531,19 @@
   margin-bottom: 20px;
 }
 .modal-title  { font-size: 16px; font-weight: 700; }
-.modal-close  { background: none; border: none; color: var(--muted); font-size: 22px; line-height: 1; }
+.modal-close  { background: none; border: none; color: var(--muted); font-size: 22px; line-height: 1; padding: 4px; }
 .modal-close:hover { color: var(--text); }
-.modal-footer { display: flex; gap: 10px; margin-top: 6px; }
+.modal-footer { display: flex; gap: 10px; margin-top: 10px; }
 
 /* ── Reports ─────────────────────────────────────────────── */
 .report-topbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
-.range-tabs  { display: flex; gap: 6px; flex: 1; }
+.range-tabs  { display: flex; gap: 6px; flex-wrap: wrap; }
 .range-tab {
   padding: 7px 18px;
   border-radius: var(--radius-sm);
@@ -414,3 +572,161 @@
 }
 .activity-time { font-size: 11px; color: var(--muted); white-space: nowrap; padding-top: 2px; }
 .activity-msg  { font-size: 12px; color: var(--muted); }
+
+/* ── Toast Notifications ─────────────────────────────────── */
+.toast-container {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+  width: calc(100% - 40px);
+  max-width: 380px;
+}
+
+@media (max-width: 600px) {
+  .toast-container {
+    top: 14px;
+    right: 14px;
+    left: 14px;
+    width: auto;
+    max-width: none;
+  }
+}
+
+.toast {
+  pointer-events: auto;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--primary);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  padding: 12px 14px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  position: relative;
+  overflow: hidden;
+  animation: toastIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.toast.toast-leave {
+  animation: toastOut 0.25s ease forwards;
+}
+
+.toast-icon {
+  font-size: 20px;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.toast-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.toast-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 2px;
+}
+
+.toast-message {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.toast-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  opacity: 0.7;
+  transition: opacity 0.15s, color 0.15s;
+}
+.toast-close:hover {
+  opacity: 1;
+  color: var(--text);
+}
+
+.toast-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  height: 3px;
+  background: var(--primary);
+  width: 100%;
+  animation: toastProgress linear forwards;
+}
+
+/* Toast variants */
+.toast-success {
+  border-left-color: var(--primary);
+}
+.toast-success .toast-progress {
+  background: var(--primary);
+}
+
+.toast-info {
+  border-left-color: var(--blue);
+}
+.toast-info .toast-progress {
+  background: var(--blue);
+}
+
+.toast-warning {
+  border-left-color: var(--warn);
+}
+.toast-warning .toast-progress {
+  background: var(--warn);
+}
+
+.toast-error {
+  border-left-color: var(--danger);
+}
+.toast-error .toast-progress {
+  background: var(--danger);
+}
+
+@keyframes toastIn {
+  from {
+    transform: translateY(-16px) scale(0.96);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes toastOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.96);
+  }
+}
+
+@keyframes toastProgress {
+  from {
+    width: 100%;
+  }
+  to {
+    width: 0%;
+  }
+}
+
