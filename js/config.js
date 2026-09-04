@@ -5,10 +5,10 @@
    ============================================================ */
 // Dynamically resolve API host:
 // 1. If accessed in browser (e.g. from mobile or PC), use current window hostname.
-// 2. If opened from file://, fallback to the backend host IP: 192.168.1.61
+// 2. If opened from file://, fallback to the backend host IP: 192.168.1.46
 const detectedHost = (typeof window !== 'undefined' && window.location && window.location.hostname && window.location.hostname !== '' && window.location.protocol.startsWith('http'))
   ? window.location.hostname
-  : '192.168.1.61';
+  : '192.168.1.46';
 
 const IOS_CONFIG = {
   apiBase: `http://${detectedHost}:3000`,

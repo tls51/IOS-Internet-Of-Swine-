@@ -46,7 +46,7 @@ const char* WIFI_PASSWORD = "Khe5ME92";
 
 // IP/hostname of the machine running `npm start` inside ios-backend/
 // Find it with `ipconfig` (Windows) or `ifconfig`/`ip a` (Mac/Linux).
-const char* SERVER_HOST = "192.168.1.61";
+const char* SERVER_HOST = "192.168.1.46";
 const int   SERVER_PORT = 3000;
 
 /* ===========================
@@ -90,9 +90,22 @@ bool bathingDone = false;
 #define RELAY_PIN 18          // Relay control pin (Active-LOW: LOW=ON, HIGH=OFF)
 #define RELAY_ACTIVE_LOW true // Set true if LOW turns relay ON (standard for relay modules)
 
-/* Set TEST_MODE to true to force relay/buzzer to pulse on every 10s sensor check.
-   Set to false for normal operation (relays trigger on heat stress or bath schedule). */
-#define TEST_MODE true 
+/* Set TEST_MODE to true to test the misting cycle immediately regardless of THI/heat stress.
+   Set to false for normal operation (relays trigger in Danger Zone THI > thiExtremeMax). */
+#define TEST_MODE false
+
+/* Configured THI thresholds (matching backend default / dynamic sync) */
+float thiNormalMax  = 74.0;
+float thiStressMax  = 79.0;
+float thiExtremeMax = 84.0; // Danger Zone threshold: THI > thiExtremeMax
+
+/* Misting Cycle Timings (15s ON, 5s OFF interval in a continuous loop) */
+unsigned long mistOnDurationMs  = 15000; // 15 seconds ON
+unsigned long mistPauseDurationMs = 5000; // 5 seconds OFF (interval)
+
+bool mistingActive = false;      // True if misting condition is active (Danger Zone or TEST_MODE)
+bool mistingCycleState = false;  // True = pump ON phase, False = pump OFF phase
+unsigned long mistCycleTimer = 0;// Timestamp of last state switch
 
 /* Optional Piezo Buzzer settings */
 #define HAS_BUZZER false      // Set to true if a dedicated Piezo Buzzer is wired up
@@ -127,6 +140,7 @@ unsigned long lastFlowCheckAt = 0;
 void connectWiFi();
 void readAndPushDHT();
 void checkBathingSchedule(const DateTime& now);
+void updateMistingLoop();
 void readAndPushFlow();
 void setMistingRelay(bool on);
 bool testRelayAndPump(int durationMs = 30000);
@@ -436,6 +450,7 @@ void loop() {
     checkBathingSchedule(now);
   }
 
+  // Periodic DHT environmental sensor sampling
   if (millis() - lastReadingAt >= READING_INTERVAL_MS) {
     lastReadingAt = millis();
     readAndPushDHT();
@@ -444,9 +459,58 @@ void loop() {
 #endif
   }
 
+  // Active misting duty-cycle state machine (15s ON, 5s OFF interval in a loop)
+  updateMistingLoop();
+
   if (millis() - lastFlowCheckAt >= FLOW_CHECK_INTERVAL_MS) {
     lastFlowCheckAt = millis();
     readAndPushFlow();
+  }
+}
+
+/* ── Misting Duty Cycle Loop (15s ON / 5s OFF) ────────────── */
+void updateMistingLoop() {
+  // If scheduled bathing is currently active, don't interrupt it with misting cycling
+  if (bathingDone) return;
+
+  if (mistingActive) {
+    unsigned long currentMillis = millis();
+
+    // If starting a fresh misting cycle
+    if (mistCycleTimer == 0) {
+      mistCycleTimer = currentMillis;
+      mistingCycleState = true;
+      Serial.println("\n[MISTING CYCLE] >>> Phase: PUMP ON (15s run) <<<");
+      setMistingRelay(true);
+      beepBuzzer(1, 150);
+      return;
+    }
+
+    if (mistingCycleState) {
+      // Currently ON: check if 15 seconds have elapsed
+      if (currentMillis - mistCycleTimer >= MIST_ON_DURATION_MS) {
+        mistingCycleState = false;
+        mistCycleTimer = currentMillis;
+        Serial.println("\n[MISTING CYCLE] >>> Phase: PUMP OFF (5s interval pause) <<<");
+        setMistingRelay(false);
+      }
+    } else {
+      // Currently OFF: check if 5 seconds interval has elapsed
+      if (currentMillis - mistCycleTimer >= MIST_OFF_DURATION_MS) {
+        mistingCycleState = true;
+        mistCycleTimer = currentMillis;
+        Serial.println("\n[MISTING CYCLE] >>> Phase: PUMP ON (15s run) <<<");
+        setMistingRelay(true);
+      }
+    }
+  } else {
+    // Misting condition is inactive: ensure pump is OFF and timer reset
+    if (mistCycleTimer != 0 || mistingCycleState) {
+      mistCycleTimer = 0;
+      mistingCycleState = false;
+      Serial.println("[MISTING CYCLE] Misting condition cleared -> Pump OFF");
+      setMistingRelay(false);
+    }
   }
 }
 
@@ -571,21 +635,19 @@ void checkPendingCommands() {
 }
 
 void beepBuzzer(int count, int delayMs) {
+#if HAS_BUZZER
   for (int i = 0; i < count; i++) {
-    setMistingRelay(true);
-#if HAS_BUZZER
     digitalWrite(BUZZER_PIN, HIGH);
-#endif
     delay(delayMs);
-
-    setMistingRelay(false);
-#if HAS_BUZZER
     digitalWrite(BUZZER_PIN, LOW);
-#endif
     if (i < count - 1) {
       delay(delayMs);
     }
   }
+#else
+  (void)count;
+  (void)delayMs;
+#endif
 }
 
 /* ── DHT22 + THI ──────────────────────────────────────────── */
@@ -617,16 +679,14 @@ void readAndPushDHT() {
   Serial.println(status);
 
   if (TEST_MODE) {
-    Serial.println(">>> TEST_MODE ACTIVE: Pulsing relay/buzzer for demonstration <<<");
-    beepBuzzer(2, 100);
-    setMistingRelay(true);
+    Serial.println(">>> TEST_MODE ACTIVE: Continuous 15s ON / 5s OFF misting cycle triggered <<<");
+    mistingActive = true;
   } else if (status != "NORMAL") {
-    Serial.println(">>> MISTING SYSTEM SHOULD TURN ON <<<");
-    setMistingRelay(true);
-    beepBuzzer(1, 300);
+    Serial.println(">>> HEAT STRESS DETECTED: Activating Misting Cycle (15s ON / 5s OFF) <<<");
+    mistingActive = true;
   } else {
-    Serial.println("Misting System OFF");
-    setMistingRelay(false);
+    Serial.println(">>> Climate Normal: Misting System Idle <<<");
+    mistingActive = false;
   }
 
   String body = "{\"temp\":" + String(temperature, 1) +
