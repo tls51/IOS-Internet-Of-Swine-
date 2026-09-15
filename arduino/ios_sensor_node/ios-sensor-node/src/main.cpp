@@ -10,11 +10,11 @@
 // ============================================================
 
 // STA Wi-Fi
-const char* WIFI_SSID = "Converge_2.4GHz_51BD";
-const char* WIFI_PASSWORD = "Khe5ME92";
+const char* WIFI_SSID = "TECNO POVA 2";
+const char* WIFI_PASSWORD = "redrum123";
 
 // Backend computer IP
-const char* SERVER_HOST = "192.168.1.61";
+const char* SERVER_HOST = "10.19.188.162";
 const int SERVER_PORT = 3000;
 
 // AP Wi-Fi
@@ -70,6 +70,26 @@ const float MIN_WATER_LEVEL = 0;
 #define RELAY_OFF HIGH
 
 // ============================================================
+// YF-S201 WATER FLOW SENSOR
+// ============================================================
+
+#define FLOW_SENSOR_PIN 5
+
+// Common YF-S201 calibration:
+// approximately 450 pulses = 1 liter
+const float FLOW_PULSES_PER_LITER = 450.0;
+
+// Pulse counter
+volatile unsigned long flowPulseCount = 0;
+
+// Flow calculation
+unsigned long lastFlowCalculation = 0;
+unsigned long lastFlowPulseCount = 0;
+
+float flowRateLPM = 0.0;
+float totalWaterUsedL = 0.0;
+
+// ============================================================
 // THI
 // ============================================================
 
@@ -81,7 +101,16 @@ const float THI_DANGER = 85.0;
 
 unsigned long lastSensorRead = 0;
 
-const unsigned long SENSOR_INTERVAL = 10000;
+const unsigned long SENSOR_INTERVAL = 3000;
+
+// ============================================================
+// YF-S201 INTERRUPT
+// ============================================================
+
+void IRAM_ATTR flowPulseISR()
+{
+    flowPulseCount++;
+}
 
 // ============================================================
 // PUMP FUNCTIONS
@@ -195,6 +224,48 @@ float calculateWaterLevel(float distance)
 }
 
 // ============================================================
+// CALCULATE YF-S201 FLOW
+// ============================================================
+
+void calculateWaterFlow()
+{
+    unsigned long currentTime = millis();
+
+    // Calculate every 1 second
+    if (currentTime - lastFlowCalculation < 1000)
+    {
+        return;
+    }
+
+    unsigned long elapsedTime =
+        currentTime - lastFlowCalculation;
+
+    // Safely copy pulse count
+    noInterrupts();
+    unsigned long currentPulseCount = flowPulseCount;
+    interrupts();
+
+    // Number of pulses since previous calculation
+    unsigned long pulsesSinceLast =
+        currentPulseCount - lastFlowPulseCount;
+
+    // Calculate liters during this period
+    float litersUsed =
+        pulsesSinceLast / FLOW_PULSES_PER_LITER;
+
+    // Calculate flow rate in liters per minute
+    flowRateLPM =
+        litersUsed * (60000.0 / elapsedTime);
+
+    // Add water usage to total
+    totalWaterUsedL += litersUsed;
+
+    // Save current values
+    lastFlowPulseCount = currentPulseCount;
+    lastFlowCalculation = currentTime;
+}
+
+// ============================================================
 // SEND DHT DATA TO BACKEND
 // ============================================================
 
@@ -261,8 +332,8 @@ void sendWaterToBackend(float waterLevel)
 
     String json = "{";
     json += "\"level_pct\":" + String(waterLevel, 1) + ",";
-    json += "\"used_l\":0,";
-    json += "\"flow_lpm\":0,";
+    json += "\"used_l\":" + String(totalWaterUsedL, 3) + ",";
+    json += "\"flow_lpm\":" + String(flowRateLPM, 2) + ",";
     json += "\"device_id\":\"" + String(DEVICE_ID) + "\"";
     json += "}";
 
@@ -310,12 +381,27 @@ void setup()
     pumpOff();
 
     // --------------------------------------------------------
+    // YF-S201
+    // --------------------------------------------------------
+
+    pinMode(FLOW_SENSOR_PIN, INPUT_PULLUP);
+
+    attachInterrupt(
+        digitalPinToInterrupt(FLOW_SENSOR_PIN),
+        flowPulseISR,
+        RISING
+    );
+
+    lastFlowCalculation = millis();
+
+    // --------------------------------------------------------
     // WIFI
     // --------------------------------------------------------
 
     setupWiFi();
 
     Serial.println("System started.");
+    Serial.println("YF-S201 flow sensor initialized.");
 }
 
 // ============================================================
@@ -329,6 +415,12 @@ void loop()
     // --------------------------------------------------------
 
     reconnectWiFi();
+
+    // --------------------------------------------------------
+    // CALCULATE WATER FLOW
+    // --------------------------------------------------------
+
+    calculateWaterFlow();
 
     // --------------------------------------------------------
     // WAIT FOR NEXT SENSOR READING
@@ -388,7 +480,7 @@ void loop()
     //
     // THI >= 85
     // AND
-    // water level >= 20%
+    // water level >= MIN_WATER_LEVEL
     //
     // Otherwise pump OFF.
     //
@@ -450,6 +542,22 @@ void loop()
         Serial.println("Water Level: SENSOR ERROR");
     }
 
+    // --------------------------------------------------------
+    // YF-S201 OUTPUT
+    // --------------------------------------------------------
+
+    Serial.print("Flow Rate: ");
+    Serial.print(flowRateLPM, 2);
+    Serial.println(" L/min");
+
+    Serial.print("Total Water Used: ");
+    Serial.print(totalWaterUsedL, 3);
+    Serial.println(" L");
+
+    // --------------------------------------------------------
+    // RTC OUTPUT
+    // --------------------------------------------------------
+
     Serial.print("RTC: ");
     Serial.print(now.year());
     Serial.print("-");
@@ -463,6 +571,10 @@ void loop()
     Serial.print(now.minute());
     Serial.print(":");
     Serial.println(now.second());
+
+    // --------------------------------------------------------
+    // PUMP OUTPUT
+    // --------------------------------------------------------
 
     if (thi >= THI_DANGER &&
         waterLevel >= MIN_WATER_LEVEL)
