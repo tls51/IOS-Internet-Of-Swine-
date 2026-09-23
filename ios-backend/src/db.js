@@ -132,6 +132,28 @@ function createSchedule({ type, label, time, duration, days }) {
   return db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(info.lastInsertRowid);
 }
 
+// Full update — supports editing label/time/duration/days/active,
+// not just toggling active like the old toggleSchedule-only flow did.
+function updateSchedule(id, { label, time, duration, days, active }) {
+  const existing = db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(id);
+  if (!existing) return null;
+
+  db.prepare(`
+    UPDATE schedules
+    SET label = ?, time = ?, duration = ?, days = ?, active = ?
+    WHERE id = ?
+  `).run(
+    label !== undefined ? label : existing.label,
+    time !== undefined ? time : existing.time,
+    duration !== undefined ? duration : existing.duration,
+    days !== undefined ? JSON.stringify(days) : existing.days,
+    active !== undefined ? (active ? 1 : 0) : existing.active,
+    id
+  );
+
+  return db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(id);
+}
+
 function toggleSchedule(id, active) {
   db.prepare(`UPDATE schedules SET active = ? WHERE id = ?`).run(active ? 1 : 0, id);
   return db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(id);
@@ -225,7 +247,7 @@ module.exports = {
   db,
   insertReading, latestReading, readingsSince,
   insertWater, latestWater, weeklyWaterUsage,
-  listSchedules, createSchedule, toggleSchedule, deleteSchedule,
+  listSchedules, createSchedule, updateSchedule, toggleSchedule, deleteSchedule,
   getSetting, setSetting, getTHIThresholds, setTHIThresholds,
   getOperationDurations, setOperationDurations,
   logActivity, recentActivity,

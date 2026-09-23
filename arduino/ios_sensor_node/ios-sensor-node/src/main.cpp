@@ -10,11 +10,16 @@
 // ============================================================
 
 // STA Wi-Fi
-const char* WIFI_SSID = "TECNO POVA 2";
-const char* WIFI_PASSWORD = "redrum123";
+
+const char* WIFI_SSID =
+    "Converge_2.4GHz_51BD";
+
+const char* WIFI_PASSWORD =
+    "Khe5ME92";
+
 
 // Backend computer IP
-const char* SERVER_HOST = "10.19.188.162";
+const char* SERVER_HOST = "192.168.1.33";
 const int SERVER_PORT = 3000;
 
 // AP Wi-Fi
@@ -44,6 +49,8 @@ RTC_DS3231 rtc;
 
 // SDA = GPIO 8
 // SCL = GPIO 9
+#define SDA_PIN 8
+#define SCL_PIN 9
 
 // ============================================================
 // HC-SR04
@@ -60,7 +67,7 @@ const float TANK_FULL_CM = 3.0;
 const float MIN_WATER_LEVEL = 0;
 
 // ============================================================
-// RELAY
+// MISTING RELAY
 // ============================================================
 
 #define RELAY_PIN 18
@@ -68,6 +75,28 @@ const float MIN_WATER_LEVEL = 0;
 // Active LOW relay
 #define RELAY_ON LOW
 #define RELAY_OFF HIGH
+
+// ============================================================
+// BATHING RELAY (separate relay/channel from misting)
+// ============================================================
+// Relay IN2 -> GPIO7
+#define BATH_RELAY_PIN 7
+// Reuses the same RELAY_ON / RELAY_OFF levels defined above
+
+// ============================================================
+// SERVER-DRIVEN BATH / CLEAN SCHEDULE STATE
+// ============================================================
+// The backend decides whether a bath or clean schedule is
+// active right now (based on day + time + duration stored in
+// SQLite).  The ESP32 polls /api/status periodically and reads
+// the bathActive / cleanActive flags.
+
+bool serverBathActive  = false;
+bool serverCleanActive = false;
+
+// How often to poll the backend for schedule status (ms)
+const unsigned long SCHEDULE_POLL_INTERVAL = 5000;
+unsigned long lastSchedulePoll = 0;
 
 // ============================================================
 // YF-S201 WATER FLOW SENSOR
@@ -113,7 +142,7 @@ void IRAM_ATTR flowPulseISR()
 }
 
 // ============================================================
-// PUMP FUNCTIONS
+// MISTING PUMP FUNCTIONS
 // ============================================================
 
 void pumpOn()
@@ -125,6 +154,9 @@ void pumpOff()
 {
     digitalWrite(RELAY_PIN, RELAY_OFF);
 }
+
+// (Bath relay functions removed — bath/clean schedules now
+// drive the misting pump relay via server-polled state.)
 
 // ============================================================
 // WIFI SETUP
@@ -266,6 +298,114 @@ void calculateWaterFlow()
 }
 
 // ============================================================
+// POLL BACKEND FOR BATH / CLEAN SCHEDULE STATUS
+// ============================================================
+// Every SCHEDULE_POLL_INTERVAL ms, the ESP32 asks the backend
+// whether a bathing or cleaning schedule window is currently
+// active.  The backend already evaluates day + time + duration,
+// so the ESP32 just reads the boolean flags.
+
+void pollScheduleStatus()
+{
+    if (millis() - lastSchedulePoll < SCHEDULE_POLL_INTERVAL)
+    {
+        return;
+    }
+
+    lastSchedulePoll = millis();
+
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        return;
+    }
+
+    HTTPClient http;
+
+    String url =
+        String("http://") +
+        SERVER_HOST +
+        ":" +
+        String(SERVER_PORT) +
+        "/api/status";
+
+    http.begin(url);
+    http.setTimeout(3000);
+
+    int code = http.GET();
+
+    if (code == 200)
+    {
+        String payload = http.getString();
+
+        // ------------------------------------------------
+        // Lightweight JSON parsing for bathActive flag
+        // ------------------------------------------------
+        int bathIdx = payload.indexOf("\"bathActive\"");
+        if (bathIdx >= 0)
+        {
+            int commaIdx = payload.indexOf(",", bathIdx);
+            if (commaIdx == -1) commaIdx = payload.indexOf("}", bathIdx);
+
+            String valStr = payload.substring(bathIdx, commaIdx);
+            bool isActive = valStr.indexOf("true") >= 0;
+
+            bool prev = serverBathActive;
+            serverBathActive = isActive;
+
+            if (serverBathActive && !prev)
+            {
+                Serial.println();
+                Serial.println("====================================");
+                Serial.println(" BATH SCHEDULE ACTIVE (server)");
+                Serial.println(" Misting pump -> ON");
+                Serial.println("====================================");
+            }
+            else if (!serverBathActive && prev)
+            {
+                Serial.println();
+                Serial.println("====================================");
+                Serial.println(" BATH SCHEDULE ENDED (server)");
+                Serial.println("====================================");
+            }
+        }
+
+        // ------------------------------------------------
+        // Lightweight JSON parsing for cleanActive flag
+        // ------------------------------------------------
+        int cleanIdx = payload.indexOf("\"cleanActive\"");
+        if (cleanIdx >= 0)
+        {
+            int commaIdx = payload.indexOf(",", cleanIdx);
+            if (commaIdx == -1) commaIdx = payload.indexOf("}", cleanIdx);
+
+            String valStr = payload.substring(cleanIdx, commaIdx);
+            bool isActive = valStr.indexOf("true") >= 0;
+
+            bool prev = serverCleanActive;
+            serverCleanActive = isActive;
+
+            if (serverCleanActive && !prev)
+            {
+                Serial.println();
+                Serial.println("====================================");
+                Serial.println(" CLEAN SCHEDULE ACTIVE (server)");
+                Serial.println(" Misting pump -> ON");
+                Serial.println("====================================");
+            }
+            else if (!serverCleanActive && prev)
+            {
+                Serial.println();
+                Serial.println("====================================");
+                Serial.println(" CLEAN SCHEDULE ENDED (server)");
+                Serial.println("====================================");
+            }
+        }
+    }
+
+    http.end();
+}
+
+// ============================================================
 // SEND DHT DATA TO BACKEND
 // ============================================================
 
@@ -349,6 +489,7 @@ void sendWaterToBackend(float waterLevel)
 void setup()
 {
     Serial.begin(115200);
+    delay(1000);
 
     // --------------------------------------------------------
     // DHT22
@@ -360,9 +501,34 @@ void setup()
     // RTC
     // --------------------------------------------------------
 
-    Wire.begin(8, 9);
+    Wire.begin(SDA_PIN, SCL_PIN);
 
-    rtc.begin();
+    if (!rtc.begin())
+    {
+        Serial.println("RTC NOT FOUND!");
+        // Halt here since bathing schedule and timestamps
+        // depend entirely on the RTC.
+        while (1)
+        {
+            delay(1000);
+        }
+    }
+
+    Serial.println("RTC detected.");
+
+    // =====================================================
+    // FIRST UPLOAD ONLY
+    // =====================================================
+    // Uncomment this line ONLY when you need to set the
+    // RTC using the computer's compile time.
+    //
+    // Upload once with it uncommented.
+    // Then COMMENT it again and upload a second time,
+    // otherwise the RTC will reset to compile time on
+    // every reboot/power loss.
+    //
+    // rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // =====================================================
 
     // --------------------------------------------------------
     // HC-SR04
@@ -372,7 +538,7 @@ void setup()
     pinMode(ECHO_PIN, INPUT);
 
     // --------------------------------------------------------
-    // RELAY
+    // MISTING RELAY
     // --------------------------------------------------------
 
     pinMode(RELAY_PIN, OUTPUT);
@@ -423,6 +589,13 @@ void loop()
     calculateWaterFlow();
 
     // --------------------------------------------------------
+    // POLL BATH / CLEAN SCHEDULE FROM BACKEND
+    // (self-throttled to every SCHEDULE_POLL_INTERVAL ms)
+    // --------------------------------------------------------
+
+    pollScheduleStatus();
+
+    // --------------------------------------------------------
     // WAIT FOR NEXT SENSOR READING
     // --------------------------------------------------------
 
@@ -440,7 +613,7 @@ void loop()
     float temperature = dht.readTemperature();
     float humidity = dht.readHumidity();
 
-    // DHT error = pump OFF
+    // DHT error = misting pump OFF
     if (isnan(temperature) || isnan(humidity))
     {
         pumpOff();
@@ -473,28 +646,28 @@ void loop()
     DateTime now = rtc.now();
 
     // ========================================================
-    // PUMP LOGIC
+    // MISTING PUMP LOGIC
     // ========================================================
     //
-    // Pump ON only when:
+    // Pump ON when ANY of these conditions are true:
     //
-    // THI >= 85
-    // AND
-    // water level >= MIN_WATER_LEVEL
+    //   1. THI >= 85   (heat stress cooling)
+    //   2. Bath schedule active   (from server)
+    //   3. Clean schedule active  (from server)
+    //
+    // AND water level >= MIN_WATER_LEVEL
     //
     // Otherwise pump OFF.
     //
 
-    if (thi >= THI_DANGER)
+    bool shouldMist =
+        (thi >= THI_DANGER) ||
+        serverBathActive ||
+        serverCleanActive;
+
+    if (shouldMist && waterLevel >= MIN_WATER_LEVEL)
     {
-        if (waterLevel >= MIN_WATER_LEVEL)
-        {
-            pumpOn();
-        }
-        else
-        {
-            pumpOff();
-        }
+        pumpOn();
     }
     else
     {
@@ -566,25 +739,35 @@ void loop()
     Serial.print(now.day());
     Serial.print(" ");
 
+    if (now.hour() < 10) Serial.print("0");
     Serial.print(now.hour());
     Serial.print(":");
+
+    if (now.minute() < 10) Serial.print("0");
     Serial.print(now.minute());
     Serial.print(":");
+
+    if (now.second() < 10) Serial.print("0");
     Serial.println(now.second());
 
     // --------------------------------------------------------
-    // PUMP OUTPUT
+    // MISTING PUMP OUTPUT
     // --------------------------------------------------------
 
-    if (thi >= THI_DANGER &&
-        waterLevel >= MIN_WATER_LEVEL)
-    {
-        Serial.println("PUMP: ON");
-    }
-    else
-    {
-        Serial.println("PUMP: OFF");
-    }
+    Serial.print("MISTING PUMP: ");
+    Serial.println(
+        (shouldMist && waterLevel >= MIN_WATER_LEVEL)
+            ? "ON" : "OFF");
+
+    // --------------------------------------------------------
+    // SCHEDULE STATUS OUTPUT
+    // --------------------------------------------------------
+
+    Serial.print("BATH SCHED:  ");
+    Serial.println(serverBathActive ? "ACTIVE" : "—");
+
+    Serial.print("CLEAN SCHED: ");
+    Serial.println(serverCleanActive ? "ACTIVE" : "—");
 
     Serial.println("------------------------------");
 }
