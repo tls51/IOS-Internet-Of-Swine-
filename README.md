@@ -34,6 +34,37 @@ An automated Internet of Things (IoT) system designed for swine barns to optimiz
 
 ---
 
+## 🏗 Repository Structure
+
+```
+IOS-Internet-Of-Swine-/
+├── dashboard/              ← Frontend (HTML + CSS + JS); also the ESP32 LittleFS data_dir
+│   ├── index.html
+│   ├── css/
+│   │   ├── base.css
+│   │   ├── layout.css
+│   │   ├── components.css
+│   │   └── charts.css
+│   └── js/
+│       ├── config.js       ← API base URL (empty = relative, works from Node & ESP32)
+│       ├── app.js
+│       ├── charts.js
+│       ├── data.js
+│       ├── pages.js
+│       └── schedule.js
+├── ios-backend/            ← Node.js + Express + SQLite backend
+│   ├── src/
+│   │   ├── server.js
+│   │   └── db.js
+│   └── package.json
+└── arduino/
+    └── ios_sensor_node/
+        └── ios-sensor-node/   ← PlatformIO project
+            ├── platformio.ini
+            └── src/
+                └── main.cpp
+```
+
 ## 🏗 System Architecture
 
 ```
@@ -43,7 +74,10 @@ ESP32 (DHT22 + RTC + HC-SR04 + YF-S201B)
 ios-backend/  (Node.js + Express + SQLite)
         │  HTTP GET / POST / PATCH (dashboard polls status every 3s)
         ▼
-Web Dashboard (HTML5 + CSS3 + Vanilla JS)
+dashboard/  (HTML5 + CSS3 + Vanilla JS)
+        │  also served directly from ESP32 LittleFS
+        ▼
+Web Browser (any device on the local network)
 ```
 
 ## 1. Run the backend
@@ -59,24 +93,33 @@ You should see:
 IoS backend listening on http://0.0.0.0:3000
 ```
 
+Then open `http://localhost:3000` in a browser and log in with `admin` / `ios2024`.
+
+The dashboard uses **relative API URLs** (e.g. `/api/status`), so it works from any
+host the server runs on without editing `config.js`.
+
 This creates `ios-backend/ios.db` automatically on first run — that's
 your database. Default schedules and a 32°C threshold are seeded in.
 
-## 2. Point the dashboard at the backend
+## 2. API base URL (config.js)
 
-Open `js/config.js` and set `apiBase` to wherever the backend is
-running. If you're opening `index.html` on the same computer running
-the backend, the default `http://localhost:3000` works as-is. If the
-dashboard is opened from another device on your network, use the
-backend machine's LAN IP instead, e.g. `http://192.168.1.50:3000`.
+`dashboard/js/config.js` sets `apiBase: ''` (empty string), meaning all
+`fetch()` calls use relative paths. This works both when:
 
-Then just open `index.html` in a browser (or serve the folder with any
-static file server) and log in with `admin` / `ios2024`.
+- The browser is served by the Node backend (`http://localhost:3000`), and
+- The dashboard is hosted on the ESP32's LittleFS and talks back to the same ESP32.
 
-## 3. Flash the ESP32
+If you need to open `dashboard/index.html` **directly from the filesystem**
+(`file://`) without a server, change `apiBase` to the backend's address:
 
-Open `arduino/ios_sensor_node.ino` in the Arduino IDE. Edit the four
-settings at the top:
+```js
+apiBase: 'http://192.168.1.61:3000'   // your backend machine's LAN IP
+```
+
+## 3. Flash the ESP32 firmware
+
+Open the PlatformIO project at `arduino/ios_sensor_node/ios-sensor-node/`.
+Edit the four settings at the top of `src/main.cpp`:
 
 ```cpp
 const char* WIFI_SSID     = "YOUR_WIFI_NAME";
@@ -85,14 +128,34 @@ const char* SERVER_HOST   = "192.168.1.50";   // backend machine's LAN IP
 const int   SERVER_PORT   = 3000;
 ```
 
-The ESP32 now joins your WiFi as a normal device (station mode) so it
-can reach the backend on your network — this replaces the old
-`accesspoint_ios.ino` behavior of hosting its own isolated network,
-since a device can't push to an external server while also acting as
-its own island access point. Required libraries (install via Library
-Manager): `DHT sensor library` (Adafruit), `RTClib` (Adafruit), and the
-built-in `WiFi`/`HTTPClient` (already part of the ESP32 board package).
+Then build and upload the firmware:
 
+```bash
+cd arduino/ios_sensor_node/ios-sensor-node
+pio run -t upload
+```
+
+## 4. Upload the dashboard to the ESP32 LittleFS
+
+`platformio.ini` is already configured:
+
+```ini
+board_build.filesystem = littlefs
+data_dir = ../../../dashboard
+```
+
+Upload the `dashboard/` folder to the ESP32's flash filesystem:
+
+```bash
+cd arduino/ios_sensor_node/ios-sensor-node
+pio run -t uploadfs
+```
+
+After uploading, the ESP32 will serve `index.html` from its own LittleFS,
+so the dashboard is accessible at `http://<ESP32-IP>/` even without the
+Node backend running.
+
+The ESP32 still pushes sensor readings to the Node backend (if available).
 Wiring is unchanged from the original sketches, plus optional pins:
 
 | Hardware Component | Pin(s)                                | Notes |
@@ -151,3 +214,5 @@ Wiring is unchanged from the original sketches, plus optional pins:
   `readAndPushWater()` if you want real usage tracking.
 - No authentication on the backend API — fine on a private home/farm
   network, but don't expose port 3000 to the public internet as-is.
+- `package-lock.json` at the repo root is an empty stub (no packages).
+  It can safely be deleted; it is not used by `ios-backend/`.

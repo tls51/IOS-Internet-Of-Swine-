@@ -1,0 +1,13 @@
+# Node dependencies
+node_modules/
+
+# SQLite database files (runtime data — not for version control)
+ios-backend/ios.db
+ios-backend/ios.db-shm
+ios-backend/ios.db-wal
+
+# PlatformIO build output
+.pio/
+
+# VS Code workspace settings
+.vscode/

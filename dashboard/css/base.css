@@ -1,0 +1,801 @@
+/* =========================================================
+   INTERNET OF SWINE - DARK IoT DASHBOARD
+   ========================================================= */
+
+/* ── Variables ──────────────────────────────────────────── */
+:root {
+  --bg:          #090B0F;
+  --bg-soft:     #0D1015;
+
+  --surface:     #11151B;
+  --surface-2:   #151A21;
+
+  --card:        #181D25;
+  --card-hover:  #1D232C;
+
+  --border:      #252C36;
+  --border-soft: #1D232B;
+
+  /* Accent colors */
+  --primary:     #4ADE80;
+  --primary-dark:#22C55E;
+  --accent:      #86EFAC;
+
+  --blue:        #60A5FA;
+  --cyan:        #38BDF8;
+  --warn:        #FBBF24;
+  --danger:      #F87171;
+  --orange:      #FB923C;
+
+  /* Text */
+  --text:        #F1F5F9;
+  --text-soft:   #CBD5E1;
+  --muted:       #8892A0;
+  --muted-dark:  #5E6875;
+
+  /* Effects */
+  --shadow:      0 12px 35px rgba(0, 0, 0, .40);
+  --shadow-soft: 0 6px 20px rgba(0, 0, 0, .30);
+
+  --radius:      12px;
+  --radius-sm:   8px;
+}
+
+/* =========================================================
+   RESET
+   ========================================================= */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+
+  background:
+    radial-gradient(
+      circle at 50% -20%,
+      rgba(255,255,255,.025),
+      transparent 35%
+    ),
+    var(--bg);
+
+  color: var(--text);
+
+  font-family:
+    Inter,
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+
+  font-size: 14px;
+  line-height: 1.5;
+
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+ul {
+  list-style: none;
+}
+
+button {
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* =========================================================
+   SCROLLBAR
+   ========================================================= */
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0B0E12;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #303844;
+  border-radius: 20px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #46515F;
+}
+
+/* =========================================================
+   UTILITY
+   ========================================================= */
+
+.hidden {
+  display: none !important;
+}
+
+.active {
+  display: block;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 12px;
+}
+
+.smaller {
+  font-size: 11px;
+}
+
+.mt-4  { margin-top: 4px; }
+.mt-6  { margin-top: 6px; }
+.mt-8  { margin-top: 8px; }
+.mt-10 { margin-top: 10px; }
+.mt-14 { margin-top: 14px; }
+.mt-16 { margin-top: 16px; }
+
+.mb-14 {
+  margin-bottom: 14px;
+}
+
+.mb-20 {
+  margin-bottom: 20px;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+.text-center {
+  text-align: center;
+}
+
+.center-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+/* =========================================================
+   COLORS
+   ========================================================= */
+
+.color-blue {
+  color: var(--blue);
+}
+
+.color-green {
+  color: var(--primary);
+}
+
+.color-warn {
+  color: var(--warn);
+}
+
+.color-danger {
+  color: var(--danger);
+}
+
+.color-orange {
+  color: var(--orange);
+}
+
+/* =========================================================
+   FIELD LABEL
+   ========================================================= */
+
+.field-label {
+  font-size: 10px;
+
+  text-transform: uppercase;
+
+  letter-spacing: 1px;
+
+  color: var(--muted);
+
+  font-weight: 600;
+
+  margin-bottom: 5px;
+}
+
+/* =========================================================
+   INPUTS
+   ========================================================= */
+
+.inp {
+  width: 100%;
+
+  background: #0D1117;
+
+  border: 1px solid var(--border);
+
+  border-radius: var(--radius-sm);
+
+  color: var(--text);
+
+  padding: 10px 13px;
+
+  outline: none;
+
+  transition:
+    border-color .2s ease,
+    box-shadow .2s ease,
+    background .2s ease;
+}
+
+.inp::placeholder {
+  color: var(--muted-dark);
+}
+
+.inp:hover {
+  border-color: #343D49;
+}
+
+.inp:focus {
+  border-color: var(--primary);
+
+  background: #10151B;
+
+  box-shadow:
+    0 0 0 3px rgba(74, 222, 128, .07);
+}
+
+.field-group {
+  display: flex;
+
+  flex-direction: column;
+
+  gap: 5px;
+
+  margin-bottom: 14px;
+}
+
+/* =========================================================
+   BUTTONS
+   ========================================================= */
+
+.btn {
+  border: none;
+
+  border-radius: var(--radius-sm);
+
+  padding: 9px 18px;
+
+  font-size: 13px;
+
+  font-weight: 600;
+
+  transition:
+    opacity .15s ease,
+    transform .1s ease,
+    box-shadow .2s ease;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+}
+
+.btn:active {
+  transform: scale(.97);
+}
+
+/* Primary */
+
+.btn-primary {
+  background: var(--primary);
+
+  color: #07100A;
+
+  box-shadow:
+    0 4px 14px rgba(74, 222, 128, .12);
+}
+
+.btn-primary:hover {
+  background: #5EE68D;
+
+  box-shadow:
+    0 6px 20px rgba(74, 222, 128, .18);
+}
+
+/* Outline */
+
+.btn-outline {
+  background: transparent;
+
+  color: var(--primary);
+
+  border: 1px solid #31523D;
+}
+
+.btn-outline:hover {
+  background: rgba(74, 222, 128, .05);
+
+  border-color: var(--primary);
+}
+
+.btn-full {
+  width: 100%;
+
+  padding: 11px;
+}
+
+/* =========================================================
+   CARDS
+   ========================================================= */
+
+.card {
+  background:
+    linear-gradient(
+      145deg,
+      #191E26,
+      #151A21
+    );
+
+  border: 1px solid var(--border);
+
+  border-radius: var(--radius);
+
+  box-shadow: var(--shadow-soft);
+
+  transition:
+    border-color .2s ease,
+    transform .2s ease,
+    box-shadow .2s ease;
+}
+
+.card:hover {
+  border-color: #303944;
+
+  box-shadow: var(--shadow);
+}
+
+/* =========================================================
+   SLIDER
+   ========================================================= */
+
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+
+  width: 100%;
+  height: 5px;
+
+  border-radius: 10px;
+
+  background: #2A313B;
+
+  outline: none;
+
+  accent-color: var(--primary);
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+
+  width: 17px;
+  height: 17px;
+
+  border-radius: 50%;
+
+  background: var(--primary);
+
+  border: 3px solid #151A21;
+
+  cursor: pointer;
+
+  box-shadow:
+    0 0 0 1px rgba(74, 222, 128, .4);
+
+  transition: transform .15s ease;
+}
+
+.slider::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
+}
+
+.slider::-moz-range-thumb {
+  width: 17px;
+  height: 17px;
+
+  border-radius: 50%;
+
+  background: var(--primary);
+
+  border: 3px solid #151A21;
+
+  cursor: pointer;
+}
+
+/* =========================================================
+   STATUS DOT
+   ========================================================= */
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+
+  display: inline-block;
+
+  border-radius: 50%;
+
+  background: var(--primary);
+
+  box-shadow:
+    0 0 0 3px rgba(74, 222, 128, .08),
+    0 0 8px rgba(74, 222, 128, .45);
+}
+
+.status-dot.warning {
+  background: var(--warn);
+
+  box-shadow:
+    0 0 0 3px rgba(251, 191, 36, .08),
+    0 0 8px rgba(251, 191, 36, .40);
+}
+
+.status-dot.danger {
+  background: var(--danger);
+
+  box-shadow:
+    0 0 0 3px rgba(248, 113, 113, .08),
+    0 0 8px rgba(248, 113, 113, .40);
+}
+
+.status-dot.offline {
+  background: #66707C;
+
+  box-shadow: none;
+}
+
+/* =========================================================
+   BADGES
+   ========================================================= */
+
+.badge {
+  display: inline-flex;
+
+  align-items: center;
+
+  gap: 6px;
+
+  padding: 4px 9px;
+
+  border-radius: 999px;
+
+  font-size: 11px;
+
+  font-weight: 600;
+
+  border: 1px solid transparent;
+}
+
+.badge-green {
+  color: var(--primary);
+
+  background: rgba(74, 222, 128, .06);
+
+  border-color: rgba(74, 222, 128, .18);
+}
+
+.badge-blue {
+  color: var(--blue);
+
+  background: rgba(96, 165, 250, .06);
+
+  border-color: rgba(96, 165, 250, .18);
+}
+
+.badge-warning {
+  color: var(--warn);
+
+  background: rgba(251, 191, 36, .06);
+
+  border-color: rgba(251, 191, 36, .18);
+}
+
+.badge-danger {
+  color: var(--danger);
+
+  background: rgba(248, 113, 113, .06);
+
+  border-color: rgba(248, 113, 113, .18);
+}
+
+/* =========================================================
+   TABLE
+   ========================================================= */
+
+table {
+  width: 100%;
+
+  border-collapse: separate;
+
+  border-spacing: 0;
+}
+
+thead th {
+  background: #10141A;
+
+  color: var(--muted);
+
+  font-size: 10px;
+
+  text-transform: uppercase;
+
+  letter-spacing: .8px;
+
+  font-weight: 600;
+
+  padding: 11px 13px;
+
+  border-bottom: 1px solid var(--border);
+}
+
+tbody td {
+  padding: 12px 13px;
+
+  border-bottom: 1px solid var(--border-soft);
+
+  color: var(--text-soft);
+}
+
+tbody tr {
+  transition: background .15s ease;
+}
+
+tbody tr:hover {
+  background: rgba(255,255,255,.015);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* =========================================================
+   PROGRESS BAR
+   ========================================================= */
+
+.progress {
+  width: 100%;
+
+  height: 7px;
+
+  background: #0D1117;
+
+  border-radius: 20px;
+
+  overflow: hidden;
+
+  border: 1px solid #202630;
+}
+
+.progress-bar {
+  height: 100%;
+
+  border-radius: inherit;
+
+  background: var(--primary);
+
+  box-shadow:
+    0 0 8px rgba(74, 222, 128, .25);
+
+  transition: width .4s ease;
+}
+
+/* =========================================================
+   ALERTS
+   ========================================================= */
+
+.alert {
+  display: flex;
+
+  align-items: flex-start;
+
+  gap: 10px;
+
+  padding: 12px 14px;
+
+  border-radius: var(--radius-sm);
+
+  border: 1px solid var(--border);
+
+  background: #15191F;
+}
+
+.alert-success {
+  border-color: rgba(74, 222, 128, .20);
+}
+
+.alert-warning {
+  border-color: rgba(251, 191, 36, .20);
+}
+
+.alert-danger {
+  border-color: rgba(248, 113, 113, .20);
+}
+
+.alert-info {
+  border-color: rgba(96, 165, 250, .20);
+}
+
+/* =========================================================
+   TOGGLE
+   ========================================================= */
+
+.toggle {
+  position: relative;
+
+  width: 42px;
+  height: 23px;
+
+  display: inline-block;
+}
+
+.toggle input {
+  opacity: 0;
+
+  width: 0;
+  height: 0;
+}
+
+.toggle-track {
+  position: absolute;
+
+  inset: 0;
+
+  background: #292F38;
+
+  border: 1px solid #39414C;
+
+  border-radius: 999px;
+
+  transition: .2s;
+}
+
+.toggle-track::before {
+  content: "";
+
+  position: absolute;
+
+  width: 17px;
+  height: 17px;
+
+  left: 2px;
+  top: 2px;
+
+  background: #89939E;
+
+  border-radius: 50%;
+
+  transition: .2s;
+}
+
+.toggle input:checked + .toggle-track {
+  background: rgba(74, 222, 128, .12);
+
+  border-color: var(--primary);
+}
+
+.toggle input:checked + .toggle-track::before {
+  transform: translateX(18px);
+
+  background: var(--primary);
+
+  box-shadow:
+    0 0 8px rgba(74, 222, 128, .45);
+}
+
+/* =========================================================
+   DIVIDER
+   ========================================================= */
+
+.divider {
+  height: 1px;
+
+  width: 100%;
+
+  background: var(--border);
+
+  margin: 16px 0;
+}
+
+/* =========================================================
+   GLOW EFFECTS
+   ========================================================= */
+
+.glow-green {
+  box-shadow:
+    0 0 0 1px rgba(74, 222, 128, .12),
+    0 0 18px rgba(74, 222, 128, .05);
+}
+
+.glow-blue {
+  box-shadow:
+    0 0 0 1px rgba(96, 165, 250, .12),
+    0 0 18px rgba(96, 165, 250, .05);
+}
+
+.glow-danger {
+  box-shadow:
+    0 0 0 1px rgba(248, 113, 113, .12),
+    0 0 18px rgba(248, 113, 113, .05);
+}
+
+/* =========================================================
+   ANIMATIONS
+   ========================================================= */
+
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: .55;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+.pulse {
+  animation: pulse 1.8s infinite ease-in-out;
+}
+
+/* =========================================================
+   RESPONSIVE
+   ========================================================= */
+
+@media (max-width: 900px) {
+
+  html,
+  body {
+    font-size: 13px;
+  }
+
+  .card {
+    border-radius: 10px;
+  }
+
+  .btn {
+    padding: 9px 14px;
+  }
+}
+
+@media (max-width: 600px) {
+
+  .card {
+    border-radius: 9px;
+  }
+
+  .btn-full {
+    padding: 11px;
+  }
+
+  table {
+    min-width: 600px;
+  }
+}

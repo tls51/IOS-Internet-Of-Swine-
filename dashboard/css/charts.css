@@ -1,0 +1,665 @@
+/* =========================================================
+   INTERNET OF SWINE
+   DARK MONITORING CHARTS
+   ========================================================= */
+
+/* ── Chart Containers ───────────────────────────────────── */
+
+.chart-area {
+  width: 100%;
+  height: 230px;
+  position: relative;
+
+  padding: 4px 0;
+}
+
+.chart-area-sm {
+  width: 100%;
+  height: 165px;
+  position: relative;
+
+  padding: 4px 0;
+}
+
+
+/* =========================================================
+   SVG CHART BASE
+   ========================================================= */
+
+.ios-chart {
+  width: 100%;
+  height: 100%;
+
+  overflow: visible;
+
+  display: block;
+}
+
+
+/* =========================================================
+   AXES
+   ========================================================= */
+
+.axis-line {
+  stroke: #303742;
+  stroke-width: 1;
+}
+
+.grid-line {
+  stroke: #20262F;
+  stroke-width: 1;
+
+  stroke-dasharray: 3 5;
+
+  opacity: .8;
+}
+
+.axis-label {
+  fill: #77818D;
+
+  font-size: 10px;
+
+  font-family: inherit;
+
+  user-select: none;
+}
+
+
+/* =========================================================
+   TEMPERATURE
+   ========================================================= */
+
+.line-temp {
+  fill: none;
+
+  stroke: #F87171;
+
+  stroke-width: 2.2;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+
+  filter:
+    drop-shadow(
+      0 0 4px rgba(248,113,113,.25)
+    );
+}
+
+
+/* =========================================================
+   HUMIDITY
+   ========================================================= */
+
+.line-humidity {
+  fill: none;
+
+  stroke: #60A5FA;
+
+  stroke-width: 2.2;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+
+  filter:
+    drop-shadow(
+      0 0 4px rgba(96,165,250,.22)
+    );
+}
+
+
+/* =========================================================
+   THI
+   ========================================================= */
+
+.line-thi {
+  fill: none;
+
+  stroke: #FBBF24;
+
+  stroke-width: 2.4;
+
+  stroke-linecap: round;
+  stroke-linejoin: round;
+
+  filter:
+    drop-shadow(
+      0 0 5px rgba(251,191,36,.25)
+    );
+}
+
+
+/* =========================================================
+   AREA FILLS
+   ========================================================= */
+
+.area-temp {
+  fill: url(#grad-temp);
+
+  opacity: .35;
+}
+
+.area-thi {
+  fill: url(#grad-thi);
+
+  opacity: .35;
+}
+
+
+/* =========================================================
+   CHART DATA POINTS
+   ========================================================= */
+
+.chart-point {
+  stroke: #11151B;
+
+  stroke-width: 2;
+
+  transition:
+    r .15s ease,
+    opacity .15s ease;
+}
+
+.chart-point:hover {
+  r: 5;
+
+  opacity: 1;
+}
+
+
+/* =========================================================
+   REFERENCE LINES
+   ========================================================= */
+
+/* THI warning threshold */
+
+.ref-warn {
+  stroke: #FBBF24;
+
+  stroke-width: 1.2;
+
+  stroke-dasharray: 6 5;
+
+  opacity: .75;
+}
+
+
+/* THI danger threshold */
+
+.ref-danger {
+  stroke: #F87171;
+
+  stroke-width: 1.2;
+
+  stroke-dasharray: 6 5;
+
+  opacity: .75;
+}
+
+
+/* Reference labels */
+
+.ref-label {
+  fill: #7D8793;
+
+  font-size: 9px;
+
+  font-family: inherit;
+
+  font-weight: 500;
+}
+
+
+/* =========================================================
+   REFERENCE LABEL BACKGROUND
+   ========================================================= */
+
+.ref-label-bg {
+  fill: #11151B;
+
+  stroke: #2A313B;
+
+  stroke-width: 1;
+
+  opacity: .95;
+}
+
+
+/* =========================================================
+   BAR CHART
+   ========================================================= */
+
+.bar-mist {
+  fill: #4ADE80;
+
+  opacity: .85;
+
+  transition:
+    opacity .15s ease,
+    filter .15s ease;
+}
+
+.bar-mist:hover {
+  opacity: 1;
+
+  filter:
+    drop-shadow(
+      0 0 5px rgba(74,222,128,.25)
+    );
+}
+
+
+.bar-bathe {
+  fill: #60A5FA;
+
+  opacity: .85;
+
+  transition:
+    opacity .15s ease,
+    filter .15s ease;
+}
+
+.bar-bathe:hover {
+  opacity: 1;
+
+  filter:
+    drop-shadow(
+      0 0 5px rgba(96,165,250,.25)
+    );
+}
+
+
+.bar-clean {
+  fill: #FBBF24;
+
+  opacity: .85;
+
+  transition:
+    opacity .15s ease,
+    filter .15s ease;
+}
+
+.bar-clean:hover {
+  opacity: 1;
+
+  filter:
+    drop-shadow(
+      0 0 5px rgba(251,191,36,.25)
+    );
+}
+
+
+/* =========================================================
+   CHART TOOLTIP
+   ========================================================= */
+
+.chart-tooltip {
+  position: absolute;
+
+  background:
+    linear-gradient(
+      145deg,
+      #1B2028,
+      #12161C
+    );
+
+  border: 1px solid #343C47;
+
+  border-radius: 9px;
+
+  padding: 9px 12px;
+
+  font-size: 11px;
+
+  pointer-events: none;
+
+  opacity: 0;
+
+  transform:
+    translateY(3px);
+
+  transition:
+    opacity .12s ease,
+    transform .12s ease;
+
+  white-space: nowrap;
+
+  z-index: 10;
+
+  box-shadow:
+    0 10px 25px rgba(0,0,0,.40);
+}
+
+.chart-tooltip.visible {
+  opacity: 1;
+
+  transform:
+    translateY(0);
+}
+
+
+/* Tooltip rows */
+
+.tt-row {
+  display: flex;
+
+  justify-content: space-between;
+
+  align-items: center;
+
+  gap: 18px;
+
+  min-height: 17px;
+}
+
+.tt-row + .tt-row {
+  margin-top: 3px;
+}
+
+
+/* Tooltip labels */
+
+.tt-label {
+  color: #89939F;
+}
+
+
+/* Tooltip values */
+
+.tt-value {
+  color: #F1F5F9;
+
+  font-weight: 600;
+}
+
+
+/* Tooltip dots */
+
+.tt-dot {
+  display: inline-block;
+
+  width: 7px;
+  height: 7px;
+
+  border-radius: 50%;
+
+  margin-right: 6px;
+
+  vertical-align: middle;
+}
+
+
+/* =========================================================
+   LEGEND
+   ========================================================= */
+
+.chart-legend {
+  display: flex;
+
+  gap: 16px;
+
+  margin-top: 9px;
+
+  padding-top: 8px;
+
+  border-top: 1px solid #1E242C;
+
+  font-size: 11px;
+
+  color: #7D8793;
+
+  justify-content: center;
+
+  flex-wrap: wrap;
+}
+
+.legend-item {
+  display: flex;
+
+  align-items: center;
+
+  gap: 6px;
+
+  white-space: nowrap;
+}
+
+
+/* Legend line */
+
+.legend-dot {
+  width: 18px;
+
+  height: 3px;
+
+  border-radius: 2px;
+
+  display: inline-block;
+}
+
+
+/* =========================================================
+   CHART HEADER
+   ========================================================= */
+
+.chart-header {
+  display: flex;
+
+  align-items: center;
+
+  justify-content: space-between;
+
+  gap: 12px;
+
+  margin-bottom: 10px;
+}
+
+.chart-title {
+  font-size: 13px;
+
+  font-weight: 600;
+
+  color: #E5E7EB;
+}
+
+.chart-subtitle {
+  font-size: 10px;
+
+  color: #69737F;
+
+  margin-top: 2px;
+}
+
+
+/* =========================================================
+   CHART STATUS
+   ========================================================= */
+
+.chart-status {
+  display: inline-flex;
+
+  align-items: center;
+
+  gap: 5px;
+
+  padding: 4px 8px;
+
+  border-radius: 999px;
+
+  background: #10151A;
+
+  border: 1px solid #272E37;
+
+  color: #7D8793;
+
+  font-size: 10px;
+
+  white-space: nowrap;
+}
+
+.chart-status.online {
+  color: #4ADE80;
+
+  border-color: rgba(74,222,128,.15);
+}
+
+.chart-status.warning {
+  color: #FBBF24;
+
+  border-color: rgba(251,191,36,.15);
+}
+
+.chart-status.danger {
+  color: #F87171;
+
+  border-color: rgba(248,113,113,.15);
+}
+
+
+/* =========================================================
+   CHART EMPTY STATE
+   ========================================================= */
+
+.chart-empty {
+  width: 100%;
+  height: 100%;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+  flex-direction: column;
+
+  gap: 5px;
+
+  color: #68727E;
+
+  font-size: 12px;
+}
+
+.chart-empty-icon {
+  font-size: 24px;
+
+  opacity: .45;
+}
+
+
+/* =========================================================
+   CHART LOADING
+   ========================================================= */
+
+.chart-loading {
+  width: 100%;
+  height: 100%;
+
+  display: flex;
+
+  align-items: center;
+
+  justify-content: center;
+}
+
+.chart-loading::after {
+  content: "";
+
+  width: 20px;
+  height: 20px;
+
+  border-radius: 50%;
+
+  border: 2px solid #29313A;
+
+  border-top-color: #4ADE80;
+
+  animation:
+    chartSpin .8s linear infinite;
+}
+
+@keyframes chartSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
+/* =========================================================
+   CHART CARD
+   ========================================================= */
+
+.chart-card {
+  background:
+    linear-gradient(
+      145deg,
+      #181D25,
+      #14191F
+    );
+
+  border: 1px solid #252C36;
+
+  border-radius: 12px;
+
+  padding: 16px;
+
+  box-shadow:
+    0 6px 20px rgba(0,0,0,.25);
+}
+
+
+/* =========================================================
+   MOBILE
+   ========================================================= */
+
+@media (max-width: 600px) {
+
+  .chart-area {
+    height: 195px;
+  }
+
+  .chart-area-sm {
+    height: 150px;
+  }
+
+  .axis-label {
+    font-size: 9px;
+  }
+
+  .chart-legend {
+    gap: 10px;
+
+    font-size: 10px;
+  }
+
+  .chart-card {
+    padding: 13px;
+  }
+
+  .chart-title {
+    font-size: 12px;
+  }
+
+  .chart-subtitle {
+    font-size: 9px;
+  }
+
+}
+
+
+/* =========================================================
+   VERY SMALL SCREENS
+   ========================================================= */
+
+@media (max-width: 400px) {
+
+  .chart-area {
+    height: 180px;
+  }
+
+  .chart-area-sm {
+    height: 140px;
+  }
+
+  .chart-legend {
+    justify-content: flex-start;
+  }
+
+}
