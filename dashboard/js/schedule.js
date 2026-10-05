@@ -7,7 +7,7 @@
 
 const SCHEDULE = (() => {
 
-  const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
+  const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
   const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
   let _modalType = 'bath';

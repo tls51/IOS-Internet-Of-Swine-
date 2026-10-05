@@ -407,7 +407,7 @@ const PAGES = (() => {
     if (!log) return;
 
     const TYPE_CLS = { Sensor: 'badge-blue', Mist: 'badge-warn', Bath: 'badge-green', Clean: 'badge-green', Alert: 'badge-danger', Info: 'badge-blue' };
-    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
 
     fetch(`${API}/api/activity?limit=30`)
       .then(r => r.json())

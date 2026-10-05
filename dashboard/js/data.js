@@ -8,7 +8,7 @@
 
 const DATA = (() => {
 
-  const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
+  const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
   const POLL_MS         = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.pollMs        : 3000;
   const HISTORY_POLL_MS = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.historyPollMs : 30000;
 

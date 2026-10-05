@@ -2,21 +2,18 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Wire.h>
+#include <LittleFS.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
 #include <RTClib.h>
 #include "DHT.h"
+#include "secrets.h"
 
 // ============================================================
 // WIFI
 // ============================================================
 
-// STA Wi-Fi
-
-const char* WIFI_SSID =
-    "Converge_2.4GHz_51BD";
-
-const char* WIFI_PASSWORD =
-    "Khe5ME92";
-
+// STA SSID/password and AP password come from secrets.h (gitignored).
 
 // Backend computer IP
 const char* SERVER_HOST = "192.168.1.33";
@@ -24,7 +21,14 @@ const int SERVER_PORT = 3000;
 
 // AP Wi-Fi
 const char* AP_SSID = "ESP32-Misting-System";
-const char* AP_PASSWORD = "12345678";
+
+AsyncWebServer server(80);
+
+float lastTemp = NAN;
+float lastHum = NAN;
+float lastThi = NAN;
+float lastWaterLevel = -1.0;
+bool pumpIsOn = false;
 
 // ============================================================
 // DEVICE
@@ -148,11 +152,13 @@ void IRAM_ATTR flowPulseISR()
 void pumpOn()
 {
     digitalWrite(RELAY_PIN, RELAY_ON);
+    pumpIsOn = true;
 }
 
 void pumpOff()
 {
     digitalWrite(RELAY_PIN, RELAY_OFF);
+    pumpIsOn = false;
 }
 
 // (Bath relay functions removed — bath/clean schedules now
@@ -195,6 +201,58 @@ void reconnectWiFi()
 
     WiFi.disconnect();
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+}
+
+// ============================================================
+// LOCAL WEB SERVER (LittleFS dashboard + /api/status)
+// ============================================================
+
+void handleStatus(AsyncWebServerRequest *request)
+{
+    JsonDocument doc;
+
+    if (isnan(lastTemp)) {
+        doc["temp"] = nullptr;
+    } else {
+        doc["temp"] = lastTemp;
+    }
+
+    if (isnan(lastHum)) {
+        doc["hum"] = nullptr;
+        doc["humidity"] = nullptr;
+    } else {
+        doc["hum"] = lastHum;
+        doc["humidity"] = lastHum;
+    }
+
+    if (isnan(lastThi)) {
+        doc["thi"] = nullptr;
+    } else {
+        doc["thi"] = lastThi;
+    }
+
+    if (lastWaterLevel < 0) {
+        doc["waterLevel"] = nullptr;
+    } else {
+        doc["waterLevel"] = lastWaterLevel;
+    }
+
+    doc["pumpOn"] = pumpIsOn;
+    doc["pumpActive"] = pumpIsOn;
+    doc["relayState"] = pumpIsOn;
+    doc["mistActive"] = pumpIsOn;
+
+    String json;
+    serializeJson(doc, json);
+    request->send(200, "application/json", json);
+}
+
+void setupWebServer()
+{
+    server.on("/api/status", HTTP_GET, handleStatus);
+    server.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
+    server.begin();
+    Serial.println("HTTP server started.");
 }
 
 // ============================================================
@@ -561,10 +619,29 @@ void setup()
     lastFlowCalculation = millis();
 
     // --------------------------------------------------------
+    // LITTLEFS
+    // --------------------------------------------------------
+
+    if (!LittleFS.begin())
+    {
+        Serial.println("ERROR: LittleFS mount failed");
+    }
+    else
+    {
+        Serial.println("LittleFS mounted.");
+    }
+
+    // --------------------------------------------------------
     // WIFI
     // --------------------------------------------------------
 
     setupWiFi();
+
+    // --------------------------------------------------------
+    // HTTP SERVER
+    // --------------------------------------------------------
+
+    setupWebServer();
 
     Serial.println("System started.");
     Serial.println("YF-S201 flow sensor initialized.");
@@ -638,6 +715,11 @@ void loop()
 
     float waterLevel =
         calculateWaterLevel(distance);
+
+    lastTemp = temperature;
+    lastHum = humidity;
+    lastThi = thi;
+    lastWaterLevel = waterLevel;
 
     // ========================================================
     // RTC

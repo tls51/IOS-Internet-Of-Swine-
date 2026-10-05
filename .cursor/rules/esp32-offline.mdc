@@ -1,0 +1,42 @@
+---
+description: ESP32 offline misting system - project context and constraints
+alwaysApply: true
+---
+# Project: ESP32 misting system (offline first)
+
+## Goal
+ESP32-S3 hosts the dashboard in Wi-Fi AP mode, runs schedules and controls
+the pump by itself. No PC or internet needed. Cloud comes later.
+
+## Layout
+- dashboard/            index.html, css/, js/ (served from LittleFS)
+- ios-backend/          Node/Express + SQLite (do not change unless told)
+- arduino/ios_sensor_node/ios-sensor-node/   platformio.ini, src/main.cpp
+- docs/offline-notes.md running notes; READ IT at the start of every task
+  and UPDATE it at the end of every task
+
+## Hard rules
+- Build only: run `pio run` from arduino/ios_sensor_node/ios-sensor-node/.
+  NEVER run `pio run -t upload`, `uploadfs`, or open a serial monitor.
+  The human does uploads and device tests.
+- No delay() in loop() or in web handlers. Use millis() timers.
+- Web handlers only set flags or return data; hardware control happens in
+  loop().
+- No Wi-Fi credentials, passwords or tokens in source. Use src/secrets.h
+  (gitignored) plus src/secrets.h.example.
+- Dashboard must have no external links (no CDN, no hardcoded IPs). Use
+  relative URLs like /api/status.
+- Keep flash writes minimal (LittleFS/NVS only when data changes or on a
+  slow timer).
+- Do exactly the part requested. Do not refactor unrelated code, rename
+  files, delete files, or start the next part.
+- Keep existing sensor pins and calculations unless the task says otherwise.
+- API JSON shapes must match what the dashboard already sends/expects.
+  Never change the dashboard to fit the firmware unless told.
+
+## Finish every task with
+1. List of files changed
+2. `pio run` result (and warnings)
+3. Anything uncertain or not matched
+4. What the human should test on the device
+5. Updated docs/offline-notes.md

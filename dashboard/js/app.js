@@ -201,7 +201,7 @@
     });
 
     /* Save to backend when the user releases */
-    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
     slider.addEventListener('change', () => {
       const newVal = parseFloat(slider.value);
       if (valEl) valEl.textContent = newVal + '°C';
@@ -226,7 +226,7 @@
     const statusEl = document.getElementById('thi-save-status');
     if (!btnSave || !inpNorm || !inpStress || !inpExtreme) return;
 
-    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
 
     btnSave.addEventListener('click', () => {
       const normalMax = parseFloat(inpNorm.value);
@@ -281,7 +281,7 @@
     const statusEl = document.getElementById('dur-save-status');
     if (!btnSave || !inpDur || !inpPause) return;
 
-    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
 
     btnSave.addEventListener('click', () => {
       const mistDurationMin = parseFloat(inpDur.value);
@@ -338,7 +338,7 @@
     const btnExport = document.getElementById('btn-export-csv');
     if (!btnExport) return;
 
-    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : 'http://localhost:3000';
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
 
     btnExport.addEventListener('click', () => {
       const activeTab = document.querySelector('.range-tab.active');
