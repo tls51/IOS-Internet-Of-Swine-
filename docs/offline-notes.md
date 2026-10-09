@@ -640,3 +640,97 @@ Done:
   - Built cleanly in release mode: SUCCESS (9.22 s).
   - RAM: 14.3% (used 46,800 bytes of 327,680 bytes).
   - Flash: 26.4% (used 881,621 bytes of 3,342,336 bytes).
+
+### 2026-10-09 — Part 7 (NVS Preferences settings + 24h RAM ring buffer history + LittleFS periodic persistence)
+
+Done:
+- **Settings persisted via Preferences (NVS)**:
+  - Stored in `"ios_settings"` NVS namespace with keys under 15 characters (`thi_thresh`, `temp_thresh`, `thi_norm`, `thi_stress`, `thi_extr`, `mist_dur`, `mist_pause`, `min_water`).
+  - Runtime settings variables initialized with defaults:
+    - `thiThreshold = 85.0f` (cooling trigger setpoint)
+    - `tempThreshold = 32.0f` (slider threshold)
+    - `thiNormalMax = 74.0f` (Normal upper bound)
+    - `thiStressMax = 78.0f` (Stressful upper bound)
+    - `thiExtremeMax = 83.0f` (Extreme Heat upper bound)
+    - `mistDurationMin = 5.0f` (mist run duration)
+    - `mistPauseSec = 30.0f` (mist pause duration)
+    - `minWaterLevelPct = 10.0f` (water safety gate)
+  - `loadSettings()` called at boot in `setup()`.
+  - `saveSettings()` called whenever settings change via HTTP.
+  - REST endpoints implemented matching dashboard and Node backend:
+    - `GET /api/settings` & `POST /api/settings`: unified full configuration object.
+    - `GET /api/settings/threshold` & `POST /api/settings/threshold`: `{ "value": 32 }`.
+    - `GET /api/settings/durations` & `POST /api/settings/durations`: `{ "mistDurationMin": 5, "mistPauseSec": 30 }`.
+    - `GET /api/settings/thi` & `POST /api/settings/thi`: `{ "normalMax": 74, "stressMax": 78, "extremeMax": 83 }`.
+  - Wired into `updatePump()` (dynamic THI trigger setpoint, mist duty cycle, water safety gate) and `handleStatus` (`/api/status` returns dynamic thresholds, durations, and dynamic `thiStatus` tier classification).
+- **Readings History (~24h RAM ring buffer with RTC timestamps)**:
+  - 288-record circular ring buffer in static RAM (`HISTORY_CAPACITY = 288`, 5-minute sampling interval = 24 hours).
+  - Populates first reading immediately on boot once valid DHT reading is available, then every 5 minutes (`HISTORY_SAMPLE_INTERVAL_MS = 300000`).
+  - Timestamps generated from UTC DS3231 RTC (`ts` in milliseconds, `time` in local UTC+8 `"HH:MM"`).
+  - REST endpoints `GET /api/readings` and `GET /api/readings/history` (queried with `?range=24h` by `dashboard/js/data.js`).
+  - Response streams chronological JSON array matching dashboard chart shape (`time`, `ts`, `temp`, `humidity`, `thi`) using `AsyncResponseStream` to prevent heap fragmentation.
+- **LittleFS Periodic History Persistence (Minimal flash writes)**:
+  - Persisted to `/history.json` on LittleFS.
+  - Flush interval: constant 5 minutes (`HISTORY_SAVE_INTERVAL_MS = 300000`).
+  - Flash wear protection: only writes to LittleFS if new readings were added (`historyDirty == true`), avoiding flash writes during sensor fault or idle.
+  - Reloaded at boot via `loadHistory()` in `setup()` immediately after LittleFS mounts.
+- **Auxiliary Routes**:
+  - `GET /api/water/weekly`: returns 7-day water structure to avoid 404 logs from dashboard polling.
+  - `GET /api/diagnostics`: returns hardware sensor test status.
+- **`pio run` result**:
+  - Built cleanly in release mode: SUCCESS (24.52 s).
+  - RAM: 17.1% (used 56,128 bytes from 327,680 bytes — only +9,328 bytes for 24h history buffer + Preferences).
+  - Flash: 26.9% (used 898,445 bytes from 3,342,336 bytes).
+
+---
+
+### 2026-10-09 — Part 8 (Token-based access control for control routes)
+
+**Goal**: No Wi-Fi credentials or passwords in committed source. All mutating/control routes protected by a simple bearer token; read-only routes stay fully open.
+
+**`secrets.h` / `.gitignore`**:
+- `AUTH_TOKEN` added to `src/secrets.h` (gitignored). Never committed.
+- `src/secrets.h.example` updated as a committed template so collaborators know what to create.
+- Root `.gitignore` entries: `secrets.h` and `**/secrets.h` (belt-and-suspenders alongside the arduino-level `src/secrets.h` rule already present).
+
+**Firmware (`main.cpp`)**:
+- `isAuthorized(AsyncWebServerRequest*)` helper — checks in order:
+  1. `X-Auth-Token: <token>` header (primary — what the dashboard sends).
+  2. `Authorization: Bearer <token>` header (fallback for API clients).
+  3. `?token=<token>` query param (last resort / curl one-liners).
+  - Returns `true` unconditionally when `AUTH_TOKEN` is empty (open/dev mode).
+- `sendUnauthorized(AsyncWebServerRequest*)` — sends HTTP 401 JSON:
+  `{"ok":false,"error":"Unauthorized: Invalid or missing access token"}`.
+- Auth guard applied to **all 11 mutating routes** (first statement inside each lambda):
+  - `POST /api/schedules` (create)
+  - `PATCH /api/schedules/*` and `PUT /api/schedules/*` (update / toggle)
+  - `DELETE /api/schedules/*`
+  - `POST /api/settings` (bulk)
+  - `POST /api/settings/threshold`
+  - `POST /api/settings/durations`
+  - `POST /api/settings/thi`
+  - `POST /api/time`
+  - `POST /api/manual`
+  - `POST /api/relay/control`
+  - `POST /api/relay/test`
+- **Read-only GET routes remain open** (no token required): `/api/status`, `/api/schedules`, `/api/readings`, `/api/readings/history`, `/api/settings/*`, `/api/diagnostics`, `/api/water/weekly`, `/api/info`.
+- Global CORS headers via `DefaultHeaders::Instance()` expose `X-Auth-Token` and `Authorization` so browsers allow them from the dashboard origin.
+- `server.onNotFound` handler: replies `204` to `OPTIONS` preflight; `404 JSON` to all other unknown paths.
+
+**Dashboard**:
+- `dashboard/js/config.js` — full rewrite:
+  - `getAuthToken()` / `setAuthToken()` read/write `localStorage['ios_auth_token']`.
+  - `promptForToken(message)` — shows `window.prompt` with server error message as context.
+  - `authFetch(url, options)` — wrapper around `fetch()`:
+    - For mutating methods (POST/PATCH/PUT/DELETE) attaches both `X-Auth-Token` and `Authorization: Bearer` headers from the stored token.
+    - On `401` response: extracts `error`/`msg` from JSON body, prompts user for new token, stores it, retries the request **once**.
+  - All helpers exposed on `window` and `IOS_CONFIG`.
+- `dashboard/js/data.js` — `postJSON()` now calls `authFetch`; extracts 401 error body before throwing.
+- `dashboard/js/schedule.js` — `createSchedule`, `toggleScheduleActive`, `deleteScheduleById` use `authFetch`.
+- `dashboard/js/app.js` — settings save handlers use `authFetch`; `initTokenControls()` wires the `🔑 Token` topbar button to `promptForToken`; `boot()` calls `initTokenControls()`.
+- `dashboard/index.html` — `🔑 Token` button added to `topbar-right` for manual token entry at any time.
+
+**`pio run` result**:
+- Built cleanly in release mode: SUCCESS (24.52 s).
+- RAM: 17.1% (used 56,120 bytes from 327,680 bytes — +0 bytes vs Part 7; auth is pure logic, no heap).
+- Flash: 26.9% (used 900,609 bytes from 3,342,336 bytes — +2,164 bytes for auth helpers and CORS/404 handlers).

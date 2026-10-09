@@ -17,6 +17,84 @@ const IOS_CONFIG = {
   mode: 'device'       // 'device' | 'cloud' — from GET /api/info
 };
 
+/* ── Access Token Storage & Prompt ────────────────────────── */
+const AUTH_STORAGE_KEY = 'ios_auth_token';
+
+function getAuthToken() {
+  return localStorage.getItem(AUTH_STORAGE_KEY) || '';
+}
+
+function setAuthToken(token) {
+  if (token) {
+    localStorage.setItem(AUTH_STORAGE_KEY, token.trim());
+  } else {
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+  }
+}
+
+function promptForToken(message) {
+  const msg = message || 'Control operations require authorization.\nPlease enter the device access token:';
+  const entered = window.prompt(msg, getAuthToken());
+  if (entered !== null && entered.trim() !== '') {
+    const trimmed = entered.trim();
+    setAuthToken(trimmed);
+    return trimmed;
+  }
+  return null;
+}
+
+/* ── Auth Fetch Wrapper for Control Routes ─────────────────── */
+async function authFetch(url, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const isControl = ['POST', 'PATCH', 'PUT', 'DELETE'].includes(method);
+
+  const opts = { ...options };
+  opts.headers = { ...(options.headers || {}) };
+
+  if (isControl) {
+    let token = getAuthToken();
+    if (!token) {
+      token = promptForToken('Enter device access token to perform this control action:');
+    }
+    if (token) {
+      opts.headers['X-Auth-Token'] = token;
+      opts.headers['Authorization'] = `Bearer ${token}`;
+    }
+  }
+
+  let res = await fetch(url, opts);
+
+  // If 401 Unauthorized, prompt the user with server message and retry once
+  if (res.status === 401 && isControl) {
+    let errMsg = 'Unauthorized: Invalid or missing access token.';
+    try {
+      const cloned = res.clone();
+      const data = await cloned.json();
+      if (data && (data.error || data.msg)) {
+        errMsg = data.error || data.msg;
+      }
+    } catch (_) {}
+
+    const newToken = promptForToken(`${errMsg}\n\nPlease enter the correct access token:`);
+    if (newToken) {
+      opts.headers['X-Auth-Token'] = newToken;
+      opts.headers['Authorization'] = `Bearer ${newToken}`;
+      res = await fetch(url, opts);
+    }
+  }
+
+  return res;
+}
+
+window.authFetch = authFetch;
+window.getAuthToken = getAuthToken;
+window.setAuthToken = setAuthToken;
+window.promptForToken = promptForToken;
+
+IOS_CONFIG.authFetch = authFetch;
+IOS_CONFIG.getAuthToken = getAuthToken;
+IOS_CONFIG.setAuthToken = setAuthToken;
+
 function applyDataMode(mode) {
   const resolved = (mode === 'cloud') ? 'cloud' : 'device';
   IOS_CONFIG.mode = resolved;

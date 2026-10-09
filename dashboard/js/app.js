@@ -219,11 +219,13 @@
       const newVal = parseFloat(slider.value);
       if (valEl) valEl.textContent = newVal + '°C';
 
-      fetch(`${API}/api/settings/threshold`, {
+      const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
+      fetchFn(`${API}/api/settings/threshold`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ value: newVal }),
-      }).then(() => {
+      }).then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         DATA.state.threshold = newVal;
         PAGES.update(DATA.state, activePage);
       }).catch(err => console.warn('Could not save threshold:', err));
@@ -258,7 +260,8 @@
       btnSave.disabled = true;
       btnSave.textContent = 'Saving...';
 
-      fetch(`${API}/api/settings/thi`, {
+      const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
+      fetchFn(`${API}/api/settings/thi`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ normalMax, stressMax, extremeMax }),
@@ -308,7 +311,8 @@
       btnSave.disabled = true;
       btnSave.textContent = 'Saving...';
 
-      fetch(`${API}/api/settings/durations`, {
+      const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
+      fetchFn(`${API}/api/settings/durations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mistDurationMin, mistPauseSec }),
@@ -527,6 +531,29 @@
     if (btnPage) btnPage.addEventListener('click', handleSync);
   }
 
+  /* ── Access Token button control ────────────────────────── */
+  function initTokenControls() {
+    const btnToken = document.getElementById('btn-token-top');
+    if (!btnToken) return;
+    btnToken.addEventListener('click', () => {
+      const cur = (typeof getAuthToken === 'function') ? getAuthToken() : (localStorage.getItem('ios_auth_token') || '');
+      const val = prompt('Device Access Token for control actions:\n(Saved locally in your browser)', cur);
+      if (val !== null) {
+        if (typeof setAuthToken === 'function') setAuthToken(val);
+        else if (val.trim()) localStorage.setItem('ios_auth_token', val.trim());
+        else localStorage.removeItem('ios_auth_token');
+        if (typeof NOTIFY !== 'undefined') {
+          NOTIFY.show({
+            title: 'Token Updated',
+            message: val.trim() ? 'Device access token saved in browser.' : 'Device access token cleared.',
+            type: 'info',
+            icon: '🔑'
+          });
+        }
+      }
+    });
+  }
+
   /* ── Boot (called after login) ───────────────────────────── */
   async function boot() {
     startClock();
@@ -537,6 +564,7 @@
     initOperationDurationControls();
     initPumpControls();
     initTimeSyncControls();
+    initTokenControls();
     initRangeTabs();
     initCSVExport();
 

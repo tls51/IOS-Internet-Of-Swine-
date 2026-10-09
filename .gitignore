@@ -11,3 +11,7 @@ ios-backend/ios.db-wal
 
 # VS Code workspace settings
 .vscode/
+
+# Secrets & credentials
+secrets.h
+**/secrets.h

@@ -21,28 +21,43 @@ const SCHEDULE = (() => {
   }
 
   async function createSchedule(entry) {
-    const res = await fetch(`${API}/api/schedules`, {
+    const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
+    const res = await fetchFn(`${API}/api/schedules`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(entry),
     });
-    if (!res.ok) throw new Error('Failed to create schedule');
+    if (!res.ok) {
+      let msg = 'Failed to create schedule';
+      try { const err = await res.json(); if (err && (err.error || err.msg)) msg = err.error || err.msg; } catch (_) {}
+      throw new Error(msg);
+    }
     return res.json();
   }
 
   async function toggleScheduleActive(id, active) {
-    const res = await fetch(`${API}/api/schedules/${id}`, {
+    const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
+    const res = await fetchFn(`${API}/api/schedules/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ active }),
     });
-    if (!res.ok) throw new Error('Failed to update schedule');
+    if (!res.ok) {
+      let msg = 'Failed to update schedule';
+      try { const err = await res.json(); if (err && (err.error || err.msg)) msg = err.error || err.msg; } catch (_) {}
+      throw new Error(msg);
+    }
     return res.json();
   }
 
   async function deleteScheduleById(id) {
-    const res = await fetch(`${API}/api/schedules/${id}`, { method: 'DELETE' });
-    if (!res.ok && res.status !== 204) throw new Error('Failed to delete schedule');
+    const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
+    const res = await fetchFn(`${API}/api/schedules/${id}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 204) {
+      let msg = 'Failed to delete schedule';
+      try { const err = await res.json(); if (err && (err.error || err.msg)) msg = err.error || err.msg; } catch (_) {}
+      throw new Error(msg);
+    }
   }
 
   /* ── Toggle button ───────────────────────────────────────── */

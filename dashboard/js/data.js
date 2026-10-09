@@ -65,12 +65,20 @@ const DATA = (() => {
   }
 
   async function postJSON(path, data) {
-    const res = await fetch(API + path, {
+    const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
+    const res = await fetchFn(API + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
+    if (!res.ok) {
+      let errDetail = `${path} -> HTTP ${res.status}`;
+      try {
+        const errJson = await res.json();
+        if (errJson && (errJson.error || errJson.msg)) errDetail = errJson.error || errJson.msg;
+      } catch (_) {}
+      throw new Error(errDetail);
+    }
     return res.json();
   }
 
