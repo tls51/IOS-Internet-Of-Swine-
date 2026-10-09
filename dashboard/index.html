@@ -89,6 +89,7 @@
           <span id="thi-chip" class="badge">THI — · —</span>
           <span id="live-env" class="live-env">🌡 —°C · 💧 —%</span>
           <span id="live-time" class="live-time"></span>
+          <button id="btn-sync-time-top" class="btn btn-sm btn-outline" data-mode="device" title="Sync RTC with phone time">🕒 Set time</button>
         </div>
       </header>
 
@@ -321,6 +322,27 @@
           <div class="card info-card mb-20">
             <span>ℹ</span>
             <p>These systems activate automatically based on environmental thresholds and scheduled times. No manual trigger is required.</p>
+          </div>
+
+          <!-- Real-Time Clock Synchronization (Device Mode Only) -->
+          <div class="card mb-20" data-mode="device">
+            <div class="field-label mb-14">Real-Time Clock (DS3231) Synchronization</div>
+            <p class="muted small mb-14">Synchronize the onboard hardware RTC with your phone or computer clock for accurate scheduled misting and watering.</p>
+            <div class="pump-status-row">
+              <div class="pump-status-left">
+                <div class="pump-indicator-icon">🕒</div>
+                <div>
+                  <div class="pump-title">RTC Status: <span id="rtc-status-text" class="color-green">OK</span></div>
+                  <div class="pump-meta muted small" id="rtc-time-meta">Hardware clock in UTC · Converted to local time for display</div>
+                </div>
+              </div>
+              <div>
+                <button id="btn-set-time" class="btn btn-primary" data-mode="device">
+                  <span>🕒</span> Set time
+                </button>
+              </div>
+            </div>
+            <p id="time-sync-status" class="muted smaller mt-8 hidden" style="color:var(--primary)">Clock synchronized successfully.</p>
           </div>
           <div class="card mb-20">
             <div class="field-label mb-14">Mist Cooling Temperature Threshold</div>

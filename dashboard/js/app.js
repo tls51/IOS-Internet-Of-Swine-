@@ -107,7 +107,20 @@
   /* ── Clock ───────────────────────────────────────────────── */
   function startClock() {
     const el = document.getElementById('live-time');
-    function tick() { el.textContent = new Date().toLocaleTimeString(); }
+    function tick() {
+      if (!el) return;
+      if (DATA.state && DATA.state.rtcOk === false) {
+        el.textContent = 'RTC Error';
+        return;
+      }
+      if (DATA.state && DATA.state.epoch != null && DATA.state.epochReceivedAt != null) {
+        const elapsedSec = Math.floor((Date.now() - DATA.state.epochReceivedAt) / 1000);
+        const deviceTime = new Date((DATA.state.epoch + elapsedSec) * 1000);
+        el.textContent = deviceTime.toLocaleTimeString();
+      } else {
+        el.textContent = new Date().toLocaleTimeString();
+      }
+    }
     tick();
     setInterval(tick, 1000);
   }
@@ -460,6 +473,60 @@
     }
   }
 
+  /* ── Time Synchronization (Device Mode) ──────────────────── */
+  function initTimeSyncControls() {
+    async function handleSync() {
+      const btnTop = document.getElementById('btn-sync-time-top');
+      const btnPage = document.getElementById('btn-set-time');
+      const statusMsg = document.getElementById('time-sync-status');
+
+      const buttons = [btnTop, btnPage].filter(Boolean);
+      buttons.forEach(b => { b.disabled = true; });
+
+      try {
+        const phoneEpoch = Math.floor(Date.now() / 1000);
+        await DATA.setTime(phoneEpoch);
+
+        if (statusMsg) {
+          statusMsg.textContent = 'RTC clock synchronized with phone time!';
+          statusMsg.classList.remove('hidden');
+          setTimeout(() => { statusMsg.classList.add('hidden'); }, 4000);
+        }
+
+        if (typeof NOTIFY !== 'undefined') {
+          NOTIFY.show({
+            title: 'Time Synchronized',
+            message: `ESP32 RTC set to ${new Date().toLocaleTimeString()} (UTC epoch ${phoneEpoch})`,
+            type: 'success',
+            icon: '🕒'
+          });
+        }
+      } catch (err) {
+        console.error('Time sync error:', err);
+        if (statusMsg) {
+          statusMsg.textContent = 'Failed to sync time: ' + err.message;
+          statusMsg.classList.remove('hidden');
+        }
+        if (typeof NOTIFY !== 'undefined') {
+          NOTIFY.show({
+            title: 'Time Sync Failed',
+            message: err.message,
+            type: 'danger',
+            icon: '⚠️'
+          });
+        }
+      } finally {
+        buttons.forEach(b => { b.disabled = false; });
+      }
+    }
+
+    const btnTop = document.getElementById('btn-sync-time-top');
+    if (btnTop) btnTop.addEventListener('click', handleSync);
+
+    const btnPage = document.getElementById('btn-set-time');
+    if (btnPage) btnPage.addEventListener('click', handleSync);
+  }
+
   /* ── Boot (called after login) ───────────────────────────── */
   async function boot() {
     startClock();
@@ -469,6 +536,7 @@
     initTHIThresholdControls();
     initOperationDurationControls();
     initPumpControls();
+    initTimeSyncControls();
     initRangeTabs();
     initCSVExport();
 

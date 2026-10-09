@@ -64,7 +64,16 @@ const PAGES = (() => {
       ? `🌡 ${state.temp}°C · 💧 ${state.humidity}%`
       : '🌡 —°C · 💧 —%';
     document.getElementById('live-env').textContent = envTxt;
-    document.getElementById('live-time').textContent = new Date().toLocaleTimeString();
+
+    if (state.rtcOk === false) {
+      document.getElementById('live-time').textContent = 'RTC Error';
+    } else if (state.epoch != null && state.epochReceivedAt != null) {
+      const elapsedSec = Math.floor((Date.now() - state.epochReceivedAt) / 1000);
+      const currentDeviceDate = new Date((state.epoch + elapsedSec) * 1000);
+      document.getElementById('live-time').textContent = currentDeviceDate.toLocaleTimeString();
+    } else {
+      document.getElementById('live-time').textContent = new Date().toLocaleTimeString();
+    }
 
     /* connection indicator */
     const dot   = document.getElementById('conn-dot');
@@ -297,7 +306,7 @@ const PAGES = (() => {
     }
 
     /* Update Relay Module & Water Pump Test Box */
-    const isPumpOn = state.relayState || state.manualPumpActive || state.mistActive || state.bathActive || state.cleanActive;
+    const isPumpOn = state.pumpState === 'ON' || state.pumpActive || state.relayState || state.manualPumpActive || state.mistActive || state.bathActive || state.cleanActive;
     const pumpIcon = document.getElementById('pump-indicator-icon');
     const pumpText = document.getElementById('pump-relay-text');
     const pumpBadge = document.getElementById('pump-live-badge');
@@ -305,17 +314,38 @@ const PAGES = (() => {
     const resultBox = document.getElementById('pump-test-result');
     const resultMsg = document.getElementById('pump-test-msg');
 
+    const reasonLabels = {
+      manual: 'Manual Override',
+      scheduled: 'Scheduled Run',
+      thi_cooling: 'Heat Stress Cooling (THI)',
+      low_water: 'Halted: Low Water (<10%)',
+      mist_pause: 'Cycle Pause',
+      idle: 'Standby'
+    };
+    const reasonTxt = reasonLabels[state.pumpReason] || state.pumpReason || (isPumpOn ? 'Active' : 'Standby');
+
     if (pumpIcon) {
       pumpIcon.classList.toggle('active', isPumpOn);
       pumpIcon.textContent = isPumpOn ? '💧' : '⚡';
     }
     if (pumpText) {
-      pumpText.textContent = isPumpOn ? 'Active (Water Pump Running)' : 'Standby (OFF)';
+      pumpText.textContent = `${isPumpOn ? 'Active (ON)' : 'Standby (OFF)'} · Reason: ${reasonTxt}`;
       pumpText.style.color = isPumpOn ? 'var(--primary)' : 'var(--blue)';
     }
     if (pumpBadge) {
-      pumpBadge.className = `badge ${isPumpOn ? 'badge-green' : 'badge-muted'}`;
-      pumpBadge.textContent = isPumpOn ? '✓ Pump ON' : 'Relay Standby';
+      if (isPumpOn) {
+        pumpBadge.className = 'badge badge-green';
+        pumpBadge.textContent = `✓ Pump ON (${reasonTxt})`;
+      } else if (state.pumpReason === 'low_water') {
+        pumpBadge.className = 'badge badge-danger';
+        pumpBadge.textContent = '⚠ Low Water (<10%)';
+      } else if (state.pumpReason === 'mist_pause') {
+        pumpBadge.className = 'badge badge-warn';
+        pumpBadge.textContent = '⏸ Mist Pause';
+      } else {
+        pumpBadge.className = 'badge badge-muted';
+        pumpBadge.textContent = 'Relay Standby';
+      }
     }
     if (toggleBtnTxt) {
       toggleBtnTxt.textContent = state.manualPumpActive ? 'Manual Pump OFF' : 'Manual Pump ON';
@@ -327,6 +357,21 @@ const PAGES = (() => {
       resultMsg.innerHTML = `<strong>Status:</strong> <span class="${statusCls}">${pt.status}</span> · <em>${timeStr}</em>` +
         (pt.flow_lpm != null ? ` · Flow: <strong>${pt.flow_lpm} L/min</strong> (${pt.flow_pulses || 0} pulses)` : ` (Pulse: ${(pt.duration_ms || 3000)/1000}s)`);
       resultBox.classList.remove('hidden');
+    }
+
+    /* Update RTC Synchronization Status (Device Mode Card) */
+    const rtcStatus = document.getElementById('rtc-status-text');
+    if (rtcStatus) {
+      if (state.rtcOk === false) {
+        rtcStatus.textContent = 'Hardware Error / Not Detected';
+        rtcStatus.className = 'color-red';
+      } else if (state.epoch != null) {
+        rtcStatus.textContent = 'OK (Synchronized)';
+        rtcStatus.className = 'color-green';
+      } else {
+        rtcStatus.textContent = 'OK';
+        rtcStatus.className = 'color-green';
+      }
     }
 
     updateDiagnostics(state);
@@ -351,6 +396,12 @@ const PAGES = (() => {
       if (!badge) return;
 
       if (!d) {
+        if (id === 'diag-rtc' && state.rtcOk === false) {
+          badge.className = 'badge badge-danger diag-badge';
+          badge.textContent = '✗ Offline';
+          row.style.borderColor = 'rgba(239,68,68,0.4)';
+          return;
+        }
         // No diagnostics yet — show waiting state
         badge.className = 'badge badge-muted diag-badge';
         badge.textContent = 'Awaiting ESP32…';

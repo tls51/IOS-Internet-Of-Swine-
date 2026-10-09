@@ -38,6 +38,7 @@ const DATA = (() => {
     waterLevel: null, waterUsed: 0, flowRate: 0,
     mistActive: false, bathActive: false, cleanActive: false,
     pumpActive: false, relayState: false, manualPumpActive: false,
+    pumpState: 'OFF', pumpReason: 'idle',
     lastPumpTest: null,
     history: [],
     weeklyWater: [],
@@ -46,6 +47,9 @@ const DATA = (() => {
     operationDurations: { mistDurationMin: 5, mistPauseSec: 30 },
     malfunctions: [],
     diagnostics: null,   // latest ESP32 hardware self-test results
+    rtcOk: true,
+    epoch: null,
+    epochReceivedAt: null,
     connected: false,
   };
 
@@ -85,7 +89,9 @@ const DATA = (() => {
       state.cleanActive     = !!s.cleanActive;
       state.pumpActive      = !!s.pumpActive;
       state.relayState      = !!s.relayState;
-      state.manualPumpActive = !!s.manualPumpActive;
+      state.pumpState       = s.pumpState || (s.pumpOn ? 'ON' : 'OFF');
+      state.pumpReason      = s.pumpReason || s.reason || 'idle';
+      state.manualPumpActive = (s.manualPumpActive !== undefined) ? !!s.manualPumpActive : (s.pumpReason === 'manual');
       state.lastPumpTest    = s.lastPumpTest || null;
       state.threshold       = s.threshold;
       if (s.thiThresholds) {
@@ -97,6 +103,11 @@ const DATA = (() => {
       state.malfunctions    = s.malfunctions || [];
       // Diagnostics embedded in status response
       if (s.diagnostics) state.diagnostics = s.diagnostics;
+      if (s.rtcOk !== undefined) state.rtcOk = !!s.rtcOk;
+      if (s.epoch !== undefined && s.epoch !== null) {
+        state.epoch = s.epoch;
+        state.epochReceivedAt = Date.now();
+      }
       state.connected       = true;
     } catch (err) {
       state.connected = false;
@@ -172,6 +183,31 @@ const DATA = (() => {
     clearInterval(_diagTimer);
   }
 
+  /* ── RTC Time Synchronization ────────────────────────────── */
+  async function setTime(epochSec) {
+    const epoch = (epochSec != null) ? epochSec : Math.floor(Date.now() / 1000);
+    const res = await postJSON('/api/time', { epoch });
+    if (res && res.epoch != null) {
+      state.epoch = res.epoch;
+      state.epochReceivedAt = Date.now();
+      state.rtcOk = true;
+      notify();
+    }
+    return res;
+  }
+
+  /* ── Manual Pump Control ─────────────────────────────────── */
+  async function setManual(active = true, durationSec = 60) {
+    state.manualPumpActive = !!active;
+    notify();
+    const res = await postJSON('/api/manual', { active: !!active, duration_sec: durationSec });
+    if (res && res.manual != null) {
+      state.manualPumpActive = !!res.manual;
+      notify();
+    }
+    return res;
+  }
+
   return {
     state,
     thiLevel,
@@ -183,6 +219,8 @@ const DATA = (() => {
     refreshHistory,
     refreshDiagnostics,
     testPump,
-    controlPump
+    controlPump,
+    setManual,
+    setTime
   };
 })();

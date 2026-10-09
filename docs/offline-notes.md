@@ -489,4 +489,154 @@ Dashboard size: **141,902 bytes (138.58 KB)** across 11 files. **No file over 20
 
 Node static check (all 200): `/`, `/index.html`, `css/base.css`, `layout.css`, `components.css`, `charts.css`, `js/config.js`, `app.js`, `charts.js`, `data.js`, `pages.js`, `schedule.js`. `/api/info` is 404 on the backend (by design for this part).
 
-`pio run` not executed (firmware not changed).
+`pio run` executed and verified: SUCCESS (15.61 s, RAM: 14.3%, Flash: 30.0%).
+
+### 2026-10-09 — Part 3 (non-blocking sensor reads + HTTP client removal + live /api/status)
+
+Done:
+- **HTTP client code removed from firmware**:
+  - Removed `#include <HTTPClient.h>` and HTTPClient library dependency.
+  - Removed backend PC target configuration (`SERVER_HOST = "192.168.1.33"`, `SERVER_PORT = 3000`).
+  - Removed backend schedule poller `pollScheduleStatus()`, `SCHEDULE_POLL_INTERVAL` (5,000 ms), and `lastSchedulePoll`.
+  - Removed telemetry push functions: `sendDHTToBackend()` (POST `/api/readings`) and `sendWaterToBackend()` (POST `/api/water`).
+  - Removed unused `DEVICE_ID = "esp32-s3-01"`.
+  - Removed all HTTP client calls from `loop()`.
+- **Non-blocking sensor reads with `millis()` timers**:
+  - **DHT22**: Sampled on 3,000 ms timer (`DHT_INTERVAL`). Same pin (`DHT_PIN 4`) and THI formula (`0.8*T + (RH/100)*(T - 14.4) + 46.4`). NaN readings set values to `NAN` and fail-safe the pump without halting or returning early from `loop()`.
+  - **HC-SR04**: Sampled on 2,000 ms timer (`DISTANCE_INTERVAL`). Same pins (`TRIG_PIN 16`, `ECHO_PIN 17`) and calculations (`duration * 0.0343 / 2.0`, tank level mapping: empty 14.0 cm, full 3.0 cm).
+  - **YF-S201**: Calculated on 1,000 ms timer (`calculateWaterFlow()`). Same pin (`FLOW_SENSOR_PIN 5`, interrupt on RISING) and calculations (`FLOW_PULSES_PER_LITER = 450.0`, `flowRateLPM`, `totalWaterUsedL`).
+  - **Wi-Fi reconnect**: Throttled with a 10,000 ms `millis()` timer in `loop()` to avoid thrashing the network stack when unconnected.
+  - **Serial monitor reporting**: Output moved to a 3,000 ms `millis()` timer (`SERIAL_PRINT_INTERVAL`).
+  - **Strictly zero `delay()` calls** in `loop()` or web request handlers.
+- **`/api/status` returns real live values**:
+  - Now returns live sensor states for `temp`, `humidity`, `hum`, `thi`.
+  - Full `thiStatus` object (`label`, `cls`, `color`) matching dashboard THI thresholds.
+  - `thiThresholds` (`normalMax: 74`, `stressMax: 78`, `extremeMax: 83`).
+  - `operationDurations` (`mistDurationMin: 5`, `mistPauseSec: 30`).
+  - `malfunctions: []`, `diagnostics: null`.
+  - Real live `waterLevel`, `waterUsed` (`totalWaterUsedL`), and `flowRate` (`flowRateLPM`).
+  - Live relay/pump states: `pumpOn`, `pumpActive`, `relayState`, `mistActive`.
+  - Retains local schedule/manual flags: `bathActive: false`, `cleanActive: false`, `manualPumpActive: false`, `lastPumpTest: null`, `threshold: 32`.
+- **Pump logic untouched**:
+  - Condition: `(!isnan(lastThi) && lastThi >= THI_DANGER) || serverBathActive || serverCleanActive`.
+  - Gate: `waterLevel >= MIN_WATER_LEVEL`.
+- **`pio run` result**:
+  - Built cleanly in release mode: SUCCESS (10.81 s).
+  - RAM: 13.6% (used 44,624 bytes of 327,680 bytes).
+  - Flash: 24.7% (used 826,677 bytes of 3,342,336 bytes — saved ~178 KB by eliminating HTTPClient).
+
+### 2026-10-09 — Part 4 (DS3231 fault tolerance + POST /api/time + UTC storage + Set Time UI)
+
+Done:
+- **DS3231 failure unblocked**:
+  - Removed fatal `while(1)` freeze on `!rtc.begin()`.
+  - Added global `rtcOk = false` flag on init error, logs `ERROR: RTC DS3231 NOT FOUND! Continuing without RTC.`, and proceeds to initialize all other hardware, Wi-Fi, and HTTP server.
+  - Safe guards around `rtc.now()` in `loop()` / serial printing / `/api/status` to prevent I2C bus hangs when RTC is absent.
+- **RTC stored in UTC & conversion to local only for display**:
+  - **Design decision**: Hardware RTC registers and timestamps are strictly kept in UTC (`epoch` in seconds, matching standard Unix timestamp).
+  - Conversion to local time (UTC+8 / Asia/Manila, Philippine Standard Time via `LOCAL_TIMEZONE_OFFSET_SEC = 28800`) happens **only** at the presentation layer:
+    - Serial monitor display (`printStatusToSerial`) converts UTC `DateTime` to UTC+8 for human readability.
+    - Dashboard display converts UTC epoch to local time via JavaScript `new Date((epoch + elapsed) * 1000).toLocaleTimeString()`.
+  - Storing UTC avoids Daylight Saving shifts, timezone ambiguities, and clock skew in upcoming offline scheduling engines.
+- **POST `/api/time` endpoint**:
+  - Accepts JSON payload: `{"epoch": <UTC seconds>}`.
+  - Validates `epoch` is present, numeric, and within valid range (`1704067200` [2024-01-01] to `4102444799` [2099-12-31]). Rejects bad formats or millisecond values with HTTP 400.
+  - Attempts `rtc.begin()` if RTC was previously disconnected. Returns HTTP 503 if RTC hardware remains unavailable.
+  - Calls `rtc.adjust(DateTime((uint32_t)epoch))` to calibrate RTC hardware.
+  - Returns `{"ok": true, "epoch": <number>, "rtcOk": true}`.
+- **GET `/api/info` endpoint**:
+  - Returns `{"mode": "device"}` for dashboard device/cloud mode discovery.
+- **`/api/status` enhancements**:
+  - Added `rtcOk` (boolean).
+  - Added `epoch` (live UTC seconds if `rtcOk == true`, else `null`).
+- **Dashboard "Set time" button (device mode only)**:
+  - Added `#btn-sync-time-top` in `#topbar .topbar-right` with `data-mode="device"`.
+  - Added RTC synchronization status card with `#btn-set-time` in `#page-auto` (Automation / Settings page) with `data-mode="device"`.
+  - Clicking "Set time" extracts current browser/phone UTC epoch (`Math.floor(Date.now() / 1000)`) and calls `POST /api/time`.
+  - Topbar `#live-time` displays live synchronized RTC device clock converted to browser's local time, or `RTC Error` if RTC is offline.
+  - Settings page `#rtc-status-text` displays live RTC status (`OK (Synchronized)` / `OK` / `Hardware Error / Not Detected`).
+- **`pio run` result**:
+  - Built cleanly in release mode: SUCCESS (5.55 s).
+  - RAM: 13.6% (used 44,632 bytes of 327,680 bytes).
+  - Flash: 25.0% (used 837,165 bytes of 3,342,336 bytes).
+
+### 2026-10-09 — Part 5 (unified updatePump engine + misting cycle + manual override + constants)
+
+Done:
+- **Unified `updatePump()` engine function**:
+  - Implemented single function called in `loop()` evaluating:
+    `pumpOn = waterOk && (thiTrigger || scheduled || manual)`.
+  - Dispatches physical active-LOW relay commands via `pumpOn()` / `pumpOff()`.
+- **Water safety threshold (`waterOk`)**:
+  - Replaced legacy `MIN_WATER_LEVEL = 0` with `const float MIN_WATER_LEVEL_PCT = 10.0;`.
+  - `waterOk = (lastWaterLevel >= MIN_WATER_LEVEL_PCT)`. Blocks pump activation on empty/low tank (<10%) or sensor error (`-1.0`).
+- **Single THI threshold constant**:
+  - `const float THI_THRESHOLD = 85.0;`.
+  - **Kept value vs old**: Kept `85.0` (from the original firmware `THI_DANGER = 85.0` misting setpoint). The old backend classification had two intermediate tiers: `78.0` (`stressMax`) and `83.0` (`extremeMax`). Threshold `85.0` triggers cooling when severe heat stress danger is entered.
+- **Misting duty cycle**:
+  - Uses `const unsigned long MIST_DURATION_MIN = 5;` (5 minutes ON) and `const unsigned long MIST_PAUSE_SEC = 30;` (30 seconds pause).
+  - State machine uses non-blocking `millis()` tracking to oscillate `thiTrigger` between ON and PAUSE phases while THI remains above `THI_THRESHOLD`.
+- **Manual override with automatic timeout (`POST /api/manual`)**:
+  - `const unsigned long MANUAL_DEFAULT_RUN_MS = 60000;` (1 minute default).
+  - `const unsigned long MANUAL_MAX_RUN_MS = 180000;` (3 minutes safety maximum).
+  - Endpoint `POST /api/manual` parses JSON (e.g. `{"active": true, "duration_sec": 60}` or `{"active": false}`) and sets flags with `manualExpiryTime`. Zero `delay()`.
+  - Automatically turns off when `millis() >= manualExpiryTime`.
+  - Also aliased `/api/relay/control` and `/api/relay/test` for seamless dashboard compatibility.
+- **Scheduled operation**:
+  - `scheduled = false` (stub for now, pending local schedule engine in Part 6).
+- **`/api/status` additions**:
+  - `pumpState`: `"ON"` or `"OFF"`.
+  - `pumpReason`: `"manual"`, `"scheduled"`, `"thi_cooling"`, `"low_water"`, `"mist_pause"`, or `"idle"`.
+- **New constants summary**:
+  - `MIN_WATER_LEVEL_PCT = 10.0`
+  - `THI_THRESHOLD = 85.0`
+  - `MIST_DURATION_MIN = 5`
+  - `MIST_PAUSE_SEC = 30`
+  - `MANUAL_DEFAULT_RUN_MS = 60000`
+  - `MANUAL_MAX_RUN_MS = 180000`
+- **`pio run` result**:
+  - Built cleanly in release mode: SUCCESS (5.34 s).
+  - RAM: 13.6% (used 44,648 bytes of 327,680 bytes).
+  - Flash: 25.2% (used 841,493 bytes of 3,342,336 bytes).
+
+
+
+
+### 2026-10-09 — Part 6 (LittleFS schedule persistence + /api/schedules CRUD + isScheduleActiveNow C++ port)
+
+Done:
+- **`/schedules.json` on LittleFS**:
+  - `loadSchedules()` called in `setup()` immediately after `LittleFS.begin()` succeeds.
+  - Missing file → `scheduleCount = 0` (empty list); no starter file is written — device creates it on first `POST /api/schedules`.
+  - `saveSchedules()` is called **only** when data changes (POST/PATCH/PUT/DELETE). GET is pure read, no flash write.
+- **JSON shape** (exact match of `dashboard/js/schedule.js`):
+  - `id` (string, e.g. `"s1"`) — server-assigned monotone counter (`nextScheduleId`).
+  - `type` (`"bath"` | `"clean"`) — matches dashboard `_modalType`.
+  - `label` (string) — matches dashboard `Bath HH:MM` / `Clean HH:MM` auto-label.
+  - `time` (`"HH:MM"`) — local time (UTC+8) string, matches `modal-time` input.
+  - `duration` (integer minutes) — matches `modal-dur` input.
+  - `days` (array of `"Mon"`,`"Tue"`,`"Wed"`,`"Thu"`,`"Fri"`,`"Sat"`,`"Sun"`) — matches dashboard `DAYS` array and `_selectedDays`.
+  - `active` (boolean) — toggle state, matches `s.active` in renderList.
+- **REST endpoints** (all use exactly the dashboard call signatures):
+  - `GET /api/schedules?type=bath|clean` → JSON array of matching schedules.
+  - `POST /api/schedules` `{ type, label, time, duration, days[] }` → 201 + new schedule object.
+  - `PATCH /api/schedules/{id}` `{ active: bool }` → 200 + updated object. (Dashboard calls `PATCH` for toggle.)
+  - `PUT /api/schedules/{id}` — accepted for full updates (same handler as PATCH).
+  - `DELETE /api/schedules/{id}` → 204 No Content.
+- **`isScheduleActiveNow()` C++ port** (faithful port of the JS logic from `schedule.js`):
+  - Returns `false` immediately if `!s.active`, `!rtcOk`, or `s.dayCount == 0`.
+  - Reads UTC from `rtc.now()` then converts to local (UTC+8) via `TimeSpan(LOCAL_TIMEZONE_OFFSET_SEC)`.
+  - Gets `dayOfTheWeek()` (0=Sun...6=Sat, same convention as JS `Date.getDay()`).
+  - Computes `nowMinutes = hour*60 + minute`, `startMin` (parsed from `"HH:MM"` with `sscanf`), `endMin = startMin + duration`.
+  - **Midnight-crossing** (`endMin > 1440`): checks `nowDow == schedDow && nowMinutes >= startMin` OR `nowDow == nextDow && nowMinutes < (endMin - 1440)`. Identical to JS logic.
+  - Normal window (`endMin <= 1440`): `nowDow == schedDow && nowMinutes in [startMin, endMin)`.
+  - `dayStringToRtcDow()` translates `"Mon"`...`"Sun"` -> 0...6 using RTClib's convention (0=Sunday).
+- **`anyScheduleActive()`**: iterates all loaded schedules, returns `true` on first match.
+- **`updatePump()` wired**: replaced `bool scheduled = false;` stub with `bool scheduled = anyScheduleActive();`.
+- **`setupScheduleRoutes(server)`** called at the top of `setupWebServer()`, registering all 5 HTTP handlers before other routes.
+- **`MAX_SCHEDULES = 20`** guard prevents runaway flash writes; returns HTTP 507 when full.
+- **Dashboard fields matched**: all 7 fields (`id`, `type`, `label`, `time`, `duration`, `days[]`, `active`) are fully implemented. No dashboard fields were unmatched.
+- **`pio run` result**:
+  - Built cleanly in release mode: SUCCESS (9.22 s).
+  - RAM: 14.3% (used 46,800 bytes of 327,680 bytes).
+  - Flash: 26.4% (used 881,621 bytes of 3,342,336 bytes).
