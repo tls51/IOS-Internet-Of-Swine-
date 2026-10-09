@@ -46,6 +46,7 @@ unsigned long lastDHTRead = 0;
 
 RTC_DS3231 rtc;
 bool rtcOk = false;
+bool rtcTimeValid = false;
 
 // RTC runs in UTC internally; convert to local timezone only for display
 const int LOCAL_TIMEZONE_OFFSET_SEC = 8 * 3600; // UTC+8 (Asia/Manila)
@@ -89,6 +90,18 @@ unsigned long lastDistanceRead = 0;
 // ============================================================
 
 Preferences preferences;
+
+// Setting limits and validation ranges
+const float MIN_WATER_LEVEL_MIN     = 10.0f;
+const float MIN_WATER_LEVEL_MAX     = 100.0f;
+const float MIST_DURATION_MIN_LIMIT = 1.0f;
+const float MIST_DURATION_MAX_LIMIT = 30.0f;
+const float MIST_PAUSE_MIN_LIMIT    = 1.0f;
+const float MIST_PAUSE_MAX_LIMIT    = 600.0f;
+const float THI_THRESHOLD_MIN       = 60.0f;
+const float THI_THRESHOLD_MAX       = 100.0f;
+const float TEMP_THRESHOLD_MIN      = 20.0f;
+const float TEMP_THRESHOLD_MAX      = 50.0f;
 
 // Runtime settings with defaults (matching dashboard expectations)
 float thiThreshold     = 85.0f; // Mist cooling THI setpoint
@@ -145,6 +158,38 @@ static void settingsToJson(JsonObject obj) {
     opDur["mistDurationMin"]  = mistDurationMin;
     opDur["mistPauseSec"]     = mistPauseSec;
     obj["minWaterLevelPct"]   = minWaterLevelPct;
+}
+
+bool validateSettings(float minWater, float mistDur, float mistPause,
+                      float thiThr, float tempThr, float normalMax,
+                      float stressMax, float extremeMax, String &err)
+{
+    if (isnan(minWater) || minWater < MIN_WATER_LEVEL_MIN || minWater > MIN_WATER_LEVEL_MAX) {
+        err = "minWaterLevelPct must be between " + String(MIN_WATER_LEVEL_MIN, 1) + " and " + String(MIN_WATER_LEVEL_MAX, 1);
+        return false;
+    }
+    if (isnan(mistDur) || mistDur < MIST_DURATION_MIN_LIMIT || mistDur > MIST_DURATION_MAX_LIMIT) {
+        err = "mistDurationMin must be between " + String(MIST_DURATION_MIN_LIMIT, 1) + " and " + String(MIST_DURATION_MAX_LIMIT, 1);
+        return false;
+    }
+    if (isnan(mistPause) || mistPause < MIST_PAUSE_MIN_LIMIT || mistPause > MIST_PAUSE_MAX_LIMIT) {
+        err = "mistPauseSec must be between " + String(MIST_PAUSE_MIN_LIMIT, 1) + " and " + String(MIST_PAUSE_MAX_LIMIT, 1);
+        return false;
+    }
+    if (isnan(thiThr) || thiThr < THI_THRESHOLD_MIN || thiThr > THI_THRESHOLD_MAX) {
+        err = "thiThreshold must be between " + String(THI_THRESHOLD_MIN, 1) + " and " + String(THI_THRESHOLD_MAX, 1);
+        return false;
+    }
+    if (isnan(tempThr) || tempThr < TEMP_THRESHOLD_MIN || tempThr > TEMP_THRESHOLD_MAX) {
+        err = "tempThreshold must be between " + String(TEMP_THRESHOLD_MIN, 1) + " and " + String(TEMP_THRESHOLD_MAX, 1);
+        return false;
+    }
+    if (isnan(normalMax) || isnan(stressMax) || isnan(extremeMax) ||
+        !(normalMax < stressMax && stressMax < extremeMax)) {
+        err = "THI thresholds must satisfy normalMax < stressMax < extremeMax";
+        return false;
+    }
+    return true;
 }
 
 // ============================================================
@@ -286,6 +331,9 @@ unsigned long manualExpiryTime = 0;
 // Current pump reason string for /api/status and logging
 const char* currentPumpReason = "idle";
 
+// Type of the first currently-active schedule ("bath", "clean", or "")
+const char* activeScheduleType = "";
+
 // ============================================================
 // SCHEDULE ENGINE (LittleFS-backed, matches dashboard JSON shape)
 // ============================================================
@@ -331,8 +379,9 @@ static int8_t dayStringToRtcDow(const char* d) {
 // Checks whether the current local time falls inside the schedule window.
 // Supports midnight-crossing durations (e.g. 23:30 + 60 min = 00:30 next day).
 bool isScheduleActiveNow(const Schedule &s) {
-    if (!s.active)   return false;
-    if (!rtcOk)      return false;
+    if (!s.active)       return false;
+    if (!rtcOk)          return false;
+    if (!rtcTimeValid)   return false;
     if (s.dayCount == 0) return false;
 
     // Convert UTC epoch to local time (UTC+8)
@@ -378,8 +427,12 @@ bool isScheduleActiveNow(const Schedule &s) {
 // ── Check all schedules; returns true if any is currently active ──────────
 bool anyScheduleActive() {
     for (uint8_t i = 0; i < scheduleCount; i++) {
-        if (isScheduleActiveNow(schedules[i])) return true;
+        if (isScheduleActiveNow(schedules[i])) {
+            activeScheduleType = schedules[i].type;
+            return true;
+        }
     }
+    activeScheduleType = "";
     return false;
 }
 
@@ -510,12 +563,6 @@ bool isAuthorized(AsyncWebServerRequest *request) {
             if (val.equals(AUTH_TOKEN)) {
                 return true;
             }
-        }
-    }
-
-    if (request->hasParam("token")) {
-        if (request->getParam("token")->value().equals(AUTH_TOKEN)) {
-            return true;
         }
     }
 
@@ -771,7 +818,7 @@ void updatePump()
     // 1. Check manual override expiry (turns off automatically)
     if (manualActive)
     {
-        if (millis() >= manualExpiryTime)
+        if ((long)(millis() - manualExpiryTime) >= 0)
         {
             manualActive = false;
             manualExpiryTime = 0;
@@ -992,6 +1039,7 @@ void handleStatus(AsyncWebServerRequest *request)
 
     // RTC status and current UTC epoch
     doc["rtcOk"] = rtcOk;
+    doc["rtcTimeValid"] = rtcTimeValid;
     if (rtcOk) {
         DateTime nowUtc = rtc.now();
         doc["epoch"] = nowUtc.unixtime();
@@ -1016,8 +1064,8 @@ void handleStatus(AsyncWebServerRequest *request)
     doc["reason"] = currentPumpReason;
     doc["relayState"] = pumpIsOn;
     doc["mistActive"] = (strcmp(currentPumpReason, "thi_cooling") == 0);
-    doc["bathActive"] = (strcmp(currentPumpReason, "scheduled") == 0);
-    doc["cleanActive"] = false;
+    doc["bathActive"]  = (strcmp(currentPumpReason, "scheduled") == 0) && (strcmp(activeScheduleType, "bath")  == 0);
+    doc["cleanActive"] = (strcmp(currentPumpReason, "scheduled") == 0) && (strcmp(activeScheduleType, "clean") == 0);
     doc["manualPumpActive"] = manualActive;
     doc["lastPumpTest"] = nullptr;
     doc["threshold"] = tempThreshold;
@@ -1051,30 +1099,61 @@ void setupSettingsRoutes(AsyncWebServer &srv) {
             }
             JsonObject obj = json.as<JsonObject>();
 
-            if (obj["threshold"].is<float>())          tempThreshold = obj["threshold"].as<float>();
-            if (obj["temp_threshold"].is<float>())     tempThreshold = obj["temp_threshold"].as<float>();
-            if (obj["thiThreshold"].is<float>())       thiThreshold = obj["thiThreshold"].as<float>();
-            if (obj["thi_threshold"].is<float>())      thiThreshold = obj["thi_threshold"].as<float>();
-            if (obj["minWaterLevelPct"].is<float>())   minWaterLevelPct = obj["minWaterLevelPct"].as<float>();
-            if (obj["min_water"].is<float>())          minWaterLevelPct = obj["min_water"].as<float>();
+            float newTempThr    = tempThreshold;
+            float newThiThr     = thiThreshold;
+            float newMinWater   = minWaterLevelPct;
+            float newNormalMax  = thiNormalMax;
+            float newStressMax  = thiStressMax;
+            float newExtremeMax = thiExtremeMax;
+            float newMistDur    = mistDurationMin;
+            float newMistPause  = mistPauseSec;
+
+            if (obj["threshold"].is<float>())          newTempThr = obj["threshold"].as<float>();
+            if (obj["temp_threshold"].is<float>())     newTempThr = obj["temp_threshold"].as<float>();
+            if (obj["thiThreshold"].is<float>())       newThiThr = obj["thiThreshold"].as<float>();
+            if (obj["thi_threshold"].is<float>())      newThiThr = obj["thi_threshold"].as<float>();
+            if (obj["minWaterLevelPct"].is<float>())   newMinWater = obj["minWaterLevelPct"].as<float>();
+            if (obj["min_water"].is<float>())          newMinWater = obj["min_water"].as<float>();
 
             if (obj["thiThresholds"].is<JsonObject>()) {
                 JsonObject tt = obj["thiThresholds"].as<JsonObject>();
-                if (tt["normalMax"].is<float>())  thiNormalMax = tt["normalMax"].as<float>();
-                if (tt["stressMax"].is<float>())  thiStressMax = tt["stressMax"].as<float>();
-                if (tt["extremeMax"].is<float>()) thiExtremeMax = tt["extremeMax"].as<float>();
+                if (tt["normalMax"].is<float>())  newNormalMax = tt["normalMax"].as<float>();
+                if (tt["stressMax"].is<float>())  newStressMax = tt["stressMax"].as<float>();
+                if (tt["extremeMax"].is<float>()) newExtremeMax = tt["extremeMax"].as<float>();
             }
-            if (obj["normalMax"].is<float>())  thiNormalMax = obj["normalMax"].as<float>();
-            if (obj["stressMax"].is<float>())  thiStressMax = obj["stressMax"].as<float>();
-            if (obj["extremeMax"].is<float>()) thiExtremeMax = obj["extremeMax"].as<float>();
+            if (obj["normalMax"].is<float>())  newNormalMax = obj["normalMax"].as<float>();
+            if (obj["stressMax"].is<float>())  newStressMax = obj["stressMax"].as<float>();
+            if (obj["extremeMax"].is<float>()) newExtremeMax = obj["extremeMax"].as<float>();
 
             if (obj["operationDurations"].is<JsonObject>()) {
                 JsonObject od = obj["operationDurations"].as<JsonObject>();
-                if (od["mistDurationMin"].is<float>()) mistDurationMin = od["mistDurationMin"].as<float>();
-                if (od["mistPauseSec"].is<float>())    mistPauseSec = od["mistPauseSec"].as<float>();
+                if (od["mistDurationMin"].is<float>()) newMistDur = od["mistDurationMin"].as<float>();
+                if (od["mistPauseSec"].is<float>())    newMistPause = od["mistPauseSec"].as<float>();
             }
-            if (obj["mistDurationMin"].is<float>()) mistDurationMin = obj["mistDurationMin"].as<float>();
-            if (obj["mistPauseSec"].is<float>())    mistPauseSec = obj["mistPauseSec"].as<float>();
+            if (obj["mistDurationMin"].is<float>()) newMistDur = obj["mistDurationMin"].as<float>();
+            if (obj["mistPauseSec"].is<float>())    newMistPause = obj["mistPauseSec"].as<float>();
+
+            String err;
+            if (!validateSettings(newMinWater, newMistDur, newMistPause,
+                                  newThiThr, newTempThr, newNormalMax,
+                                  newStressMax, newExtremeMax, err)) {
+                JsonDocument errDoc;
+                errDoc["ok"] = false;
+                errDoc["msg"] = err;
+                String errJson;
+                serializeJson(errDoc, errJson);
+                request->send(400, "application/json", errJson);
+                return;
+            }
+
+            tempThreshold    = newTempThr;
+            thiThreshold     = newThiThr;
+            minWaterLevelPct = newMinWater;
+            thiNormalMax     = newNormalMax;
+            thiStressMax     = newStressMax;
+            thiExtremeMax    = newExtremeMax;
+            mistDurationMin  = newMistDur;
+            mistPauseSec     = newMistPause;
 
             saveSettings();
 
@@ -1112,12 +1191,19 @@ void setupSettingsRoutes(AsyncWebServer &srv) {
                 request->send(400, "application/json", "{\"error\":\"value must be a number\"}");
                 return;
             }
-            float val = obj["value"].as<float>();
-            if (val < 20.0f || val > 50.0f) {
-                request->send(400, "application/json", "{\"error\":\"value must be between 20 and 50\"}");
+            float newTempThr = obj["value"].as<float>();
+            String err;
+            if (!validateSettings(minWaterLevelPct, mistDurationMin, mistPauseSec,
+                                  thiThreshold, newTempThr, thiNormalMax,
+                                  thiStressMax, thiExtremeMax, err)) {
+                JsonDocument errDoc;
+                errDoc["error"] = err;
+                String errJson;
+                serializeJson(errDoc, errJson);
+                request->send(400, "application/json", errJson);
                 return;
             }
-            tempThreshold = val;
+            tempThreshold = newTempThr;
             saveSettings();
 
             JsonDocument res;
@@ -1151,14 +1237,29 @@ void setupSettingsRoutes(AsyncWebServer &srv) {
                 return;
             }
             JsonObject obj = json.as<JsonObject>();
+            float newMistDur   = mistDurationMin;
+            float newMistPause = mistPauseSec;
             if (obj["mistDurationMin"].is<float>()) {
-                float dur = obj["mistDurationMin"].as<float>();
-                if (dur >= 1.0f) mistDurationMin = dur;
+                newMistDur = obj["mistDurationMin"].as<float>();
             }
             if (obj["mistPauseSec"].is<float>()) {
-                float pause = obj["mistPauseSec"].as<float>();
-                if (pause >= 1.0f) mistPauseSec = pause;
+                newMistPause = obj["mistPauseSec"].as<float>();
             }
+
+            String err;
+            if (!validateSettings(minWaterLevelPct, newMistDur, newMistPause,
+                                  thiThreshold, tempThreshold, thiNormalMax,
+                                  thiStressMax, thiExtremeMax, err)) {
+                JsonDocument errDoc;
+                errDoc["error"] = err;
+                String errJson;
+                serializeJson(errDoc, errJson);
+                request->send(400, "application/json", errJson);
+                return;
+            }
+
+            mistDurationMin = newMistDur;
+            mistPauseSec    = newMistPause;
             saveSettings();
 
             JsonDocument res;
@@ -1194,9 +1295,28 @@ void setupSettingsRoutes(AsyncWebServer &srv) {
                 return;
             }
             JsonObject obj = json.as<JsonObject>();
-            if (obj["normalMax"].is<float>())  thiNormalMax = obj["normalMax"].as<float>();
-            if (obj["stressMax"].is<float>())  thiStressMax = obj["stressMax"].as<float>();
-            if (obj["extremeMax"].is<float>()) thiExtremeMax = obj["extremeMax"].as<float>();
+            float newNormalMax  = thiNormalMax;
+            float newStressMax  = thiStressMax;
+            float newExtremeMax = thiExtremeMax;
+            if (obj["normalMax"].is<float>())  newNormalMax = obj["normalMax"].as<float>();
+            if (obj["stressMax"].is<float>())  newStressMax = obj["stressMax"].as<float>();
+            if (obj["extremeMax"].is<float>()) newExtremeMax = obj["extremeMax"].as<float>();
+
+            String err;
+            if (!validateSettings(minWaterLevelPct, mistDurationMin, mistPauseSec,
+                                  thiThreshold, tempThreshold, newNormalMax,
+                                  newStressMax, newExtremeMax, err)) {
+                JsonDocument errDoc;
+                errDoc["error"] = err;
+                String errJson;
+                serializeJson(errDoc, errJson);
+                request->send(400, "application/json", errJson);
+                return;
+            }
+
+            thiNormalMax  = newNormalMax;
+            thiStressMax  = newStressMax;
+            thiExtremeMax = newExtremeMax;
             saveSettings();
 
             JsonDocument res;
@@ -1232,6 +1352,24 @@ void setupReadingsRoutes(AsyncWebServer &srv) {
 
     srv.on("/api/readings", HTTP_GET, handleReadings);
     srv.on("/api/readings/history", HTTP_GET, handleReadings);
+
+    // GET /api/reports/export — streams history as CSV; ?range= accepted and ignored (device holds 24 h only)
+    srv.on("/api/reports/export", HTTP_GET, [](AsyncWebServerRequest *request) {
+        AsyncResponseStream *response = request->beginResponseStream("text/csv");
+        response->addHeader("Content-Disposition", "attachment; filename=\"readings.csv\"");
+        response->addHeader("Access-Control-Allow-Origin", "*");
+        response->print("time,ts,temp,humidity,thi\n");
+        for (size_t i = 0; i < historyCount; i++) {
+            size_t idx = (historyCount < HISTORY_CAPACITY) ? i : ((historyHead + i) % HISTORY_CAPACITY);
+            response->printf("%s,%llu,%.1f,%.1f,%.1f\n",
+                historyRing[idx].time,
+                (unsigned long long)historyRing[idx].ts,
+                historyRing[idx].temp,
+                historyRing[idx].humidity,
+                historyRing[idx].thi);
+        }
+        request->send(response);
+    });
 }
 
 void setupAuxRoutes(AsyncWebServer &srv) {
@@ -1263,6 +1401,11 @@ void setupAuxRoutes(AsyncWebServer &srv) {
         String json;
         serializeJson(doc, json);
         request->send(200, "application/json", json);
+    });
+
+    // No event log yet, placeholder.
+    srv.on("/api/activity", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "application/json", "[]");
     });
 }
 
@@ -1323,6 +1466,7 @@ void setupWebServer()
         }
 
         rtc.adjust(DateTime((uint32_t)epochVal));
+        rtcTimeValid = true;
 
         Serial.print("RTC successfully adjusted to UTC epoch: ");
         Serial.println((uint32_t)epochVal);
@@ -1704,6 +1848,11 @@ void setup()
     {
         Serial.println("RTC DS3231 detected.");
         rtcOk = true;
+        rtcTimeValid = !rtc.lostPower();
+        if (!rtcTimeValid)
+        {
+            Serial.println("WARNING: RTC DS3231 lost power! Time is invalid until synchronized.");
+        }
     }
 
     // --------------------------------------------------------
@@ -1717,10 +1866,16 @@ void setup()
     // MISTING RELAY
     // --------------------------------------------------------
 
+    digitalWrite(RELAY_PIN, RELAY_OFF);
     pinMode(RELAY_PIN, OUTPUT);
 
-    // Pump OFF at startup
-    pumpOff();
+    // --------------------------------------------------------
+    // BATHING RELAY
+    // --------------------------------------------------------
+
+    // Initialized OFF only and not used by any logic yet
+    digitalWrite(BATH_RELAY_PIN, HIGH);
+    pinMode(BATH_RELAY_PIN, OUTPUT);
 
     // --------------------------------------------------------
     // YF-S201
