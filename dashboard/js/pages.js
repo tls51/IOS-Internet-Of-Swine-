@@ -387,21 +387,44 @@ const PAGES = (() => {
     }
 
     /* Update MicroSD Storage & Backend Sync Card */
+    const sd = state.sdDetails || (d && d.details && d.details.sd_info) || null;
+    const hasReport = !!(sd || (d && (d.sd_ok !== undefined || (d.details && d.details.sd))) || (state.sdStatus && state.sdStatus !== 'Unknown'));
+    const isConnected = state.connected !== false;
+    const lastUpdateTs = (sd && sd.statusTs && sd.statusTs > 1000000000000)
+      ? sd.statusTs
+      : (state.sdLastReportAt && state.sdLastReportAt > 1000000000000 ? state.sdLastReportAt : (d && d.ts && d.ts > 1000000000000 ? d.ts : null));
+    const isFresh = isConnected && (lastUpdateTs ? (Date.now() - lastUpdateTs <= 120000) : isConnected);
+
+    let effectiveStatus = (sd && sd.status) || state.sdStatus;
+    if ((!effectiveStatus || effectiveStatus === 'Unknown') && d && d.sd_ok !== undefined && d.sd_ok !== null) {
+      effectiveStatus = d.sd_ok ? 'Ready' : 'Error';
+    }
+
     const sdBadge = document.getElementById('sd-status-badge');
+    const sdMeta = document.getElementById('sd-meta');
     if (sdBadge) {
-      if (state.sdStatus === 'Ready') {
+      if (!hasReport) {
+        sdBadge.className = 'badge badge-muted';
+        sdBadge.textContent = 'Awaiting ESP32…';
+      } else if (!isFresh) {
+        sdBadge.className = 'badge badge-muted';
+        sdBadge.textContent = 'Device Offline / Stale';
+      } else if (effectiveStatus === 'Ready') {
         sdBadge.className = 'badge badge-green';
         sdBadge.textContent = '✓ Ready (Mounted)';
-      } else if (state.sdStatus === 'Missing') {
+      } else if (effectiveStatus === 'Missing') {
         sdBadge.className = 'badge badge-warn';
         sdBadge.textContent = '⚠ Missing / No Card';
-      } else if (state.sdStatus === 'Error') {
+      } else if (effectiveStatus === 'Error') {
         sdBadge.className = 'badge badge-danger';
         sdBadge.textContent = '✗ Card Error';
       } else {
         sdBadge.className = 'badge badge-muted';
-        sdBadge.textContent = state.sdStatus || 'Unknown';
+        sdBadge.textContent = effectiveStatus || 'Unknown';
       }
+    }
+    if (sdMeta && sd && sd.cardType && sd.cardType !== 'Unavailable') {
+      sdMeta.textContent = `SPI (CS: 10, MOSI: 11, SCK: 12, MISO: 13) · ${sd.cardType}`;
     }
 
     const backendBadge = document.getElementById('backend-status-badge');
@@ -442,7 +465,7 @@ const PAGES = (() => {
       }
     }
     if (syncTimeDesc) {
-      if (state.lastSyncTs) {
+      if (state.lastSyncTs && state.lastSyncTs > 1000000000000) {
         syncTimeDesc.textContent = `Last sync: ${new Date(state.lastSyncTs).toLocaleTimeString()}`;
       } else {
         syncTimeDesc.textContent = 'Last sync: None yet';
@@ -450,6 +473,173 @@ const PAGES = (() => {
     }
 
     updateDiagnostics(state);
+  }
+
+  /* ── Helper: Format byte counts cleanly ───────────────────── */
+  function formatBytes(bytes) {
+    if (bytes == null || isNaN(bytes) || bytes <= 0) return 'Unavailable';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    let val = Number(bytes);
+    while (val >= 1024 && i < units.length - 1) {
+      val /= 1024;
+      i++;
+    }
+    return `${val.toFixed(i === 0 ? 0 : (val < 10 ? 2 : 1))} ${units[i]}`;
+  }
+
+  /* ── Expandable MicroSD details panel updater ─────────────── */
+  function updateSdDetailsPanel(state) {
+    const sd = state.sdDetails || {};
+    const d = state.diagnostics;
+
+    // 1. Card Type
+    const typeEl = document.getElementById('sd-detail-type');
+    if (typeEl) {
+      typeEl.textContent = (sd.cardType && sd.cardType !== 'Unavailable') ? sd.cardType : 'Unavailable';
+    }
+
+    // 2. Mount Status
+    const mountEl = document.getElementById('sd-detail-mount');
+    if (mountEl) {
+      if (sd.mounted === true) {
+        mountEl.textContent = 'Mounted (Ready)';
+        mountEl.className = 'sd-detail-value color-green';
+      } else if (sd.mounted === false) {
+        mountEl.textContent = 'Not Mounted';
+        mountEl.className = 'sd-detail-value color-warn';
+      } else {
+        mountEl.textContent = 'Unavailable';
+        mountEl.className = 'sd-detail-value';
+      }
+    }
+
+    // 3. Physical Card Capacity
+    const capEl = document.getElementById('sd-detail-capacity');
+    if (capEl) {
+      capEl.textContent = formatBytes(sd.cardSizeBytes);
+    }
+
+    // 4. Filesystem Space & Usage Bar
+    const fsSumEl = document.getElementById('sd-detail-fs-summary');
+    const fsBarEl = document.getElementById('sd-fs-bar');
+    const fsBreakEl = document.getElementById('sd-detail-fs-breakdown');
+    if (sd.totalBytes && sd.totalBytes > 0) {
+      const total = sd.totalBytes;
+      const used = sd.usedBytes || 0;
+      const avail = sd.availableBytes != null ? sd.availableBytes : (sd.freeBytes != null ? sd.freeBytes : Math.max(0, total - used));
+      const pct = Math.min(100, Math.max(0, (used / total) * 100)).toFixed(1);
+      if (fsSumEl) fsSumEl.textContent = `${formatBytes(used)} used of ${formatBytes(total)} (${pct}%)`;
+      if (fsBarEl) {
+        fsBarEl.style.width = `${pct}%`;
+        fsBarEl.className = 'sd-usage-bar-fill' + (pct > 90 ? ' danger' : (pct > 75 ? ' warn' : ''));
+      }
+      if (fsBreakEl) {
+        fsBreakEl.textContent = `Total: ${formatBytes(total)} · Used: ${formatBytes(used)} · Available: ${formatBytes(avail)}`;
+      }
+    } else {
+      if (fsSumEl) fsSumEl.textContent = 'Unavailable';
+      if (fsBarEl) {
+        fsBarEl.style.width = '0%';
+        fsBarEl.className = 'sd-usage-bar-fill';
+      }
+      if (fsBreakEl) fsBreakEl.textContent = 'Total: Unavailable · Used: Unavailable · Available: Unavailable';
+    }
+
+    // 5. SPI Pins & Frequency
+    const spiEl = document.getElementById('sd-detail-spi');
+    if (spiEl) {
+      const cs = sd.csPin || 10;
+      const mosi = sd.mosiPin || 11;
+      const sck = sd.sckPin || 12;
+      const miso = sd.misoPin || 13;
+      const freq = sd.spiFrequencyHz || sd.sdSpiFrequencyHz || state.sdSpiFrequencyHz;
+      let freqStr = 'Unavailable';
+      if (freq && freq > 0) {
+        freqStr = freq >= 1000000 ? `${(freq / 1000000).toFixed(1)} MHz` : `${Math.round(freq / 1000)} kHz`;
+      }
+      spiEl.textContent = `CS: ${cs}, MOSI: ${mosi}, SCK: ${sck}, MISO: ${miso} · ${freqStr}`;
+    }
+
+    // 6. Offline Log Path
+    const pathEl = document.getElementById('sd-detail-log-path');
+    if (pathEl) {
+      pathEl.textContent = sd.logPath || '/ios/offline_readings.jsonl';
+    }
+
+    // 7. Offline Records & Sync State
+    const syncStateEl = document.getElementById('sd-detail-sync-state');
+    const syncSubEl = document.getElementById('sd-detail-sync-sub');
+    if (syncStateEl) {
+      const pending = (sd.pendingCount != null) ? sd.pendingCount : (sd.pendingOfflineCount != null ? sd.pendingOfflineCount : state.pendingOfflineCount);
+      const synced = (sd.syncedCount != null) ? sd.syncedCount : (state.syncedCount != null ? state.syncedCount : null);
+      const pStr = typeof pending === 'number' ? `${pending} pending` : 'Unavailable';
+      const sStr = typeof synced === 'number' ? `${synced} synced` : 'Unavailable';
+      syncStateEl.textContent = `Pending: ${pStr} · Synced: ${sStr}`;
+    }
+    if (syncSubEl) {
+      const inProgress = sd.syncInProgress || state.syncInProgress;
+      const syncState = inProgress ? 'Synchronizing…' : (sd.syncState || 'Idle');
+      const syncTs = (sd.lastSyncTs && sd.lastSyncTs > 1000000000000)
+        ? sd.lastSyncTs
+        : (state.lastSyncTs && state.lastSyncTs > 1000000000000 ? state.lastSyncTs : null);
+      let syncTimeStr = 'None yet';
+      if (syncTs) {
+        syncTimeStr = new Date(syncTs).toLocaleString();
+      } else if (sd.lastSyncTs === null && state.lastSyncTs === null) {
+        syncTimeStr = 'Unavailable';
+      }
+      syncSubEl.textContent = `Sync State: ${syncState} · Last sync: ${syncTimeStr}`;
+    }
+
+    // 8. Latest SD Error & Status Time
+    const errEl = document.getElementById('sd-detail-error');
+    const timeEl = document.getElementById('sd-detail-update-time');
+    if (errEl) {
+      const err = sd.lastError || sd.sdError || state.sdError;
+      errEl.textContent = err ? err : 'None';
+      if (err && err !== 'None') {
+        errEl.className = 'sd-detail-value color-danger';
+      } else {
+        errEl.className = 'sd-detail-value';
+      }
+    }
+    if (timeEl) {
+      const reportTs = (sd.statusTs && sd.statusTs > 1000000000000)
+        ? sd.statusTs
+        : (state.sdLastReportAt && state.sdLastReportAt > 1000000000000 ? state.sdLastReportAt : (d && d.ts && d.ts > 1000000000000 ? d.ts : null));
+      if (reportTs) {
+        timeEl.textContent = `Last update: ${new Date(reportTs).toLocaleTimeString()} (${_timeAgo(reportTs)})`;
+      } else {
+        timeEl.textContent = 'Last update: Unavailable';
+      }
+    }
+
+    // Bind toggle click once
+    const toggleBtn = document.getElementById('sd-details-toggle');
+    if (toggleBtn && !toggleBtn._bound) {
+      toggleBtn._bound = true;
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const panel = document.getElementById('sd-details-panel');
+        const item = document.getElementById('diag-sd');
+        if (!panel || !item) return;
+        const isHidden = panel.classList.contains('hidden');
+        if (isHidden) {
+          panel.classList.remove('hidden');
+          item.classList.add('expanded');
+          toggleBtn.setAttribute('aria-expanded', 'true');
+          const arrow = toggleBtn.querySelector('.sd-toggle-arrow');
+          if (arrow) arrow.textContent = '▴';
+        } else {
+          panel.classList.add('hidden');
+          item.classList.remove('expanded');
+          toggleBtn.setAttribute('aria-expanded', 'false');
+          const arrow = toggleBtn.querySelector('.sd-toggle-arrow');
+          if (arrow) arrow.textContent = '▾';
+        }
+      });
+    }
   }
 
   /* ── Sensor hardware diagnostics badges ──────────────────── */
@@ -461,7 +651,6 @@ const PAGES = (() => {
       { id: 'diag-tank',  key: 'tank_ok',  detailKey: 'tank',    label: 'HC-SR04 Tank (T:5, E:6)'     },
       { id: 'diag-flow',  key: 'flow_ok',  detailKey: 'flow',    label: 'YF-S201B Flow (GPIO 15)'     },
       { id: 'diag-relay', key: 'relay_ok', detailKey: 'relay',   label: 'Relay Driver (GPIO 18)'      },
-      { id: 'diag-sd',    key: 'sd_ok',    detailKey: 'sd',      label: 'MicroSD Storage (SPI)'       },
     ];
 
     sensors.forEach(({ id, key, detailKey }) => {
@@ -497,6 +686,66 @@ const PAGES = (() => {
         descEl.title = detail + (ago ? ` [Tested ${ago}]` : '');
       }
     });
+
+    // ── Dedicated MicroSD Storage Diagnostics Row & Badge ───────
+    const sdRow = document.getElementById('diag-sd');
+    if (sdRow) {
+      const badge = sdRow.querySelector('.diag-badge');
+      const descEl = sdRow.querySelector('.sensor-diag-desc');
+      const sd = state.sdDetails || (d && d.details && d.details.sd_info) || null;
+      const hasReport = !!(sd || (d && (d.sd_ok !== undefined || (d.details && d.details.sd))) || (state.sdStatus && state.sdStatus !== 'Unknown'));
+      const isConnected = state.connected !== false;
+      const lastUpdateTs = (sd && sd.statusTs && sd.statusTs > 1000000000000)
+        ? sd.statusTs
+        : (state.sdLastReportAt && state.sdLastReportAt > 1000000000000 ? state.sdLastReportAt : (d && d.ts && d.ts > 1000000000000 ? d.ts : null));
+      const isFresh = isConnected && (lastUpdateTs ? (Date.now() - lastUpdateTs <= 120000) : isConnected);
+
+      let status = (sd && sd.status) || state.sdStatus;
+      if ((!status || status === 'Unknown') && d && d.sd_ok !== undefined && d.sd_ok !== null) {
+        status = d.sd_ok ? 'Ready' : 'Error';
+      }
+
+      if (badge) {
+        if (!hasReport) {
+          badge.className = 'badge badge-muted diag-badge';
+          badge.textContent = 'Awaiting ESP32…';
+          sdRow.style.borderColor = '';
+        } else if (!isFresh) {
+          badge.className = 'badge badge-muted diag-badge';
+          badge.textContent = 'Device Offline / Stale';
+          sdRow.style.borderColor = 'rgba(139,148,158,0.4)';
+        } else if (status === 'Ready') {
+          badge.className = 'badge badge-green diag-badge';
+          badge.textContent = '✓ Ready';
+          sdRow.style.borderColor = 'rgba(34,197,94,0.4)';
+        } else if (status === 'Missing') {
+          badge.className = 'badge badge-warn diag-badge';
+          badge.textContent = '⚠ Missing';
+          sdRow.style.borderColor = 'rgba(245,158,11,0.4)';
+        } else if (status === 'Error') {
+          badge.className = 'badge badge-danger diag-badge';
+          badge.textContent = '✗ Error';
+          sdRow.style.borderColor = 'rgba(239,68,68,0.4)';
+        } else {
+          badge.className = 'badge badge-muted diag-badge';
+          badge.textContent = status || 'Unknown';
+          sdRow.style.borderColor = '';
+        }
+      }
+
+      if (descEl) {
+        if (sd && sd.cardType && sd.cardType !== 'Unavailable') {
+          descEl.textContent = `${sd.cardType} · ${sd.mounted ? 'Mounted' : 'Unmounted'} (GPIO 10,11,12,13)`;
+        } else if (sd && sd.lastError) {
+          descEl.textContent = sd.lastError.length > 55 ? sd.lastError.slice(0, 52) + '…' : sd.lastError;
+        } else {
+          descEl.textContent = 'Offline JSONL Log (GPIO 10,11,12,13)';
+        }
+      }
+
+      // Update details panel contents
+      updateSdDetailsPanel(state);
+    }
 
     // Show last tested timestamp below the grid
     const grid = document.getElementById('sensor-diag-grid');

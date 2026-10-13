@@ -509,12 +509,63 @@
                 <span class="badge badge-muted diag-badge">Checking…</span>
               </div>
               <div class="sensor-diag-item" id="diag-sd">
-                <div class="sensor-diag-icon">💾</div>
-                <div class="sensor-diag-info">
-                  <div class="sensor-diag-name">MicroSD SPI Storage</div>
-                  <div class="sensor-diag-desc muted small">Offline JSONL Log (GPIO 10,11,12,13)</div>
+                <div class="sd-diag-header">
+                  <div class="sensor-diag-icon">💾</div>
+                  <div class="sensor-diag-info">
+                    <div class="sensor-diag-name">MicroSD SPI Storage</div>
+                    <div class="sensor-diag-desc muted small">Offline JSONL Log (GPIO 10,11,12,13)</div>
+                  </div>
+                  <div class="sd-actions">
+                    <span class="badge badge-muted diag-badge">Checking…</span>
+                    <button type="button" id="sd-details-toggle" class="sd-toggle-btn" aria-expanded="false" title="Toggle MicroSD Details">
+                      <span class="sd-toggle-label">Details</span> <span class="sd-toggle-arrow">▾</span>
+                    </button>
+                  </div>
                 </div>
-                <span class="badge badge-muted diag-badge">Checking…</span>
+                <div id="sd-details-panel" class="sd-details-panel hidden">
+                  <div class="sd-details-grid">
+                    <div class="sd-detail-item">
+                      <div class="sd-detail-label">Card Type</div>
+                      <div class="sd-detail-value" id="sd-detail-type">Unavailable</div>
+                    </div>
+                    <div class="sd-detail-item">
+                      <div class="sd-detail-label">Mount Status</div>
+                      <div class="sd-detail-value" id="sd-detail-mount">Unavailable</div>
+                    </div>
+                    <div class="sd-detail-item">
+                      <div class="sd-detail-label">Physical Card Capacity</div>
+                      <div class="sd-detail-value" id="sd-detail-capacity">Unavailable</div>
+                    </div>
+                    <div class="sd-detail-item">
+                      <div class="sd-detail-label">Filesystem Space (Usage Bar)</div>
+                      <div class="sd-detail-value" id="sd-detail-fs-summary">Unavailable</div>
+                      <div class="sd-usage-bar-wrap">
+                        <div class="sd-usage-bar">
+                          <div class="sd-usage-bar-fill" id="sd-fs-bar" style="width: 0%;"></div>
+                        </div>
+                        <div class="muted smaller mt-4" id="sd-detail-fs-breakdown">Total: Unavailable · Used: Unavailable · Available: Unavailable</div>
+                      </div>
+                    </div>
+                    <div class="sd-detail-item">
+                      <div class="sd-detail-label">SPI Pins &amp; Frequency</div>
+                      <div class="sd-detail-value" id="sd-detail-spi">CS: 10, MOSI: 11, SCK: 12, MISO: 13 · Unavailable</div>
+                    </div>
+                    <div class="sd-detail-item">
+                      <div class="sd-detail-label">Offline Log Path</div>
+                      <div class="sd-detail-value" id="sd-detail-log-path">/ios/offline_readings.jsonl</div>
+                    </div>
+                    <div class="sd-detail-item">
+                      <div class="sd-detail-label">Offline Records &amp; Sync State</div>
+                      <div class="sd-detail-value" id="sd-detail-sync-state">Pending: Unavailable · Synced: Unavailable</div>
+                      <div class="muted smaller mt-4" id="sd-detail-sync-sub">Sync State: Idle · Last sync: Unavailable</div>
+                    </div>
+                    <div class="sd-detail-item">
+                      <div class="sd-detail-label">Latest SD Error &amp; Status Time</div>
+                      <div class="sd-detail-value" id="sd-detail-error">None</div>
+                      <div class="muted smaller mt-4" id="sd-detail-update-time">Last update: Unavailable</div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

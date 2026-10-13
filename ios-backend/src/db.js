@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS sensor_diagnostics (
   tank_ok  INTEGER,
   flow_ok  INTEGER,
   relay_ok INTEGER,
+  sd_ok    INTEGER,
   details  TEXT
 );
 CREATE TABLE IF NOT EXISTS offline_readings (
@@ -109,6 +110,20 @@ CREATE INDEX IF NOT EXISTS idx_offline_ts ON offline_readings(ts);
     COMMIT;
   `);
   console.log('[db] schedules table migrated: type CHECK extended to include mist');
+})();
+
+/* ── Schema migration: ensure sensor_diagnostics has sd_ok column ───────── */
+(function migrateSensorDiagnostics() {
+  const table = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='sensor_diagnostics'`
+  ).get();
+  if (!table) return;
+  const cols = db.prepare(`PRAGMA table_info(sensor_diagnostics)`).all();
+  const hasSdOk = cols.some(c => c.name === 'sd_ok');
+  if (!hasSdOk) {
+    db.exec(`ALTER TABLE sensor_diagnostics ADD COLUMN sd_ok INTEGER;`);
+    console.log('[db] sensor_diagnostics table migrated: added sd_ok column');
+  }
 })();
 
 /* ── Seed defaults (only if empty) ─────────────────────────── */
@@ -246,9 +261,18 @@ function setTHIThresholds({ normalMax, stressMax, extremeMax }) {
 }
 
 /* ── Diagnostics ────────────────────────────────────────── */
-function saveDiagnostics({ dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, details, ts }) {
-  const stmt = db.prepare(`INSERT INTO sensor_diagnostics (ts, dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, details) VALUES (?,?,?,?,?,?,?)`);
-  return stmt.run(ts || Date.now(), dht_ok ? 1 : 0, rtc_ok ? 1 : 0, tank_ok ? 1 : 0, flow_ok ? 1 : 0, relay_ok ? 1 : 0, typeof details === 'object' ? JSON.stringify(details) : String(details || ''));
+function saveDiagnostics({ dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, sd_ok, details, ts }) {
+  const stmt = db.prepare(`INSERT INTO sensor_diagnostics (ts, dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, sd_ok, details) VALUES (?,?,?,?,?,?,?,?)`);
+  return stmt.run(
+    ts || Date.now(),
+    dht_ok ? 1 : 0,
+    rtc_ok ? 1 : 0,
+    tank_ok ? 1 : 0,
+    flow_ok ? 1 : 0,
+    relay_ok ? 1 : 0,
+    sd_ok === null || sd_ok === undefined ? null : (sd_ok ? 1 : 0),
+    typeof details === 'object' ? JSON.stringify(details) : String(details || '')
+  );
 }
 
 function latestDiagnostics() {
@@ -263,6 +287,7 @@ function latestDiagnostics() {
     tank_ok: !!row.tank_ok,
     flow_ok: !!row.flow_ok,
     relay_ok: !!row.relay_ok,
+    sd_ok: row.sd_ok === null || row.sd_ok === undefined ? null : !!row.sd_ok,
     details: parsedDetails
   };
 }
@@ -310,11 +335,18 @@ function insertOfflineBatch(records) {
         continue;
       }
 
-      const ts = typeof r.ts_ms === 'number' ? r.ts_ms
-               : typeof r.ts    === 'number' ? r.ts
-               : null;
+      // ts resolution priority:
+      //   1. ts_ms  — preferred (always written by firmware since the null-ts fix)
+      //   2. ts     — fallback for older firmware builds that wrote epoch-ms here
+      //   3. uptime_ms — firmware uptime when RTC was unavailable (no wall clock)
+      //   4. Date.now() — last resort: import the record with the server's current
+      //                   time rather than silently discard valid sensor data
+      const ts = typeof r.ts_ms    === 'number' ? r.ts_ms
+               : typeof r.ts       === 'number' ? r.ts
+               : typeof r.uptime_ms === 'number' ? r.uptime_ms
+               : Date.now();
 
-      if (ts === null) {
+      if (!ts) {
         skipped++;
         continue;
       }

@@ -14,6 +14,7 @@
 #include "DHT.h"
 #include "secrets.h"
 
+
 // ============================================================
 // WIFI
 // ============================================================
@@ -73,6 +74,8 @@ const float TANK_FULL_CM = 3.0;
 
 const unsigned long DISTANCE_INTERVAL = 2000;
 unsigned long lastDistanceRead = 0;
+unsigned long lastEchoDurationUs = 0;
+float lastDistanceCm = -1.0f;
 
 // ============================================================
 // MISTING RELAY
@@ -340,6 +343,22 @@ enum SdStatus {
 
 SdStatus sdCardStatus = SD_STATUS_UNKNOWN;
 bool sdMounted = false;
+const char* sdLastError = "Not initialized";
+uint32_t sdSpiFrequencyHz = 0;
+unsigned long lastSdMountAttempt = 0;
+const unsigned long SD_RETRY_INTERVAL_MS = 30000;
+
+// MicroSD Card & Filesystem Metrics (cached to minimize SPI traffic on polls)
+String sdCardTypeStr = "Unavailable";
+uint64_t sdCardSizeBytes = 0;
+uint64_t sdTotalBytes = 0;
+uint64_t sdUsedBytes = 0;
+unsigned long lastFsMetricsUpdate = 0;
+const unsigned long FS_METRICS_REFRESH_INTERVAL_MS = 60000;
+
+// Periodic backend diagnostics push
+unsigned long lastDiagnosticsPush = 0;
+const unsigned long DIAGNOSTICS_PUSH_INTERVAL_MS = 60000;
 
 // Backend availability
 bool backendOnline = false;
@@ -366,6 +385,139 @@ const char* getSdStatusString() {
         case SD_STATUS_ERROR:   return "Error";
         default:                return "Unknown";
     }
+}
+
+const char* getSdCardTypeString() {
+    if (!sdMounted) return "Unavailable";
+    switch (SD.cardType()) {
+        case CARD_MMC:     return "MMC";
+        case CARD_SD:      return "SD";
+        case CARD_SDHC:    return "SDHC";
+        case CARD_UNKNOWN: return "UNKNOWN";
+        case CARD_NONE:
+        default:           return "Unavailable";
+    }
+}
+
+void updateSdMetrics(bool force = false) {
+    if (!sdMounted) {
+        sdCardTypeStr = "Unavailable";
+        sdCardSizeBytes = 0;
+        sdTotalBytes = 0;
+        sdUsedBytes = 0;
+        return;
+    }
+
+    if (force || lastFsMetricsUpdate == 0 || millis() - lastFsMetricsUpdate >= FS_METRICS_REFRESH_INTERVAL_MS) {
+        lastFsMetricsUpdate = millis();
+        sdCardTypeStr = getSdCardTypeString();
+        sdCardSizeBytes = SD.cardSize();
+        sdTotalBytes = SD.totalBytes();
+        sdUsedBytes = SD.usedBytes();
+    }
+}
+
+void populateSdInfo(JsonObject sd) {
+    updateSdMetrics(false);
+    bool ok = sdMounted && (sdCardStatus == SD_STATUS_READY);
+    sd["ok"] = ok;
+    sd["status"] = getSdStatusString();
+    sd["sdStatus"] = getSdStatusString();
+    sd["mounted"] = sdMounted;
+    sd["cardType"] = sdMounted ? sdCardTypeStr : "Unavailable";
+    if (sdMounted && sdCardSizeBytes > 0) {
+        sd["cardSizeBytes"] = sdCardSizeBytes;
+    } else {
+        sd["cardSizeBytes"] = nullptr;
+    }
+    if (sdMounted && sdTotalBytes > 0) {
+        sd["totalBytes"] = sdTotalBytes;
+        sd["usedBytes"] = sdUsedBytes;
+        uint64_t avail = (sdTotalBytes > sdUsedBytes) ? (sdTotalBytes - sdUsedBytes) : 0;
+        sd["availableBytes"] = avail;
+        sd["freeBytes"] = avail;
+    } else {
+        sd["totalBytes"] = nullptr;
+        sd["usedBytes"] = nullptr;
+        sd["availableBytes"] = nullptr;
+        sd["freeBytes"] = nullptr;
+    }
+    sd["csPin"] = SD_CS_PIN;
+    sd["mosiPin"] = SD_MOSI_PIN;
+    sd["sckPin"] = SD_SCK_PIN;
+    sd["misoPin"] = SD_MISO_PIN;
+    sd["spiFrequencyHz"] = sdSpiFrequencyHz;
+    sd["sdSpiFrequencyHz"] = sdSpiFrequencyHz;
+    sd["logPath"] = SD_LOG_FILE;
+    sd["pendingCount"] = sdPendingCount;
+    sd["pendingOfflineCount"] = sdPendingCount;
+    sd["syncedCount"] = sdSyncedCount;
+    sd["syncInProgress"] = syncInProgress;
+    sd["syncState"] = syncInProgress ? "Synchronizing" : "Idle";
+    if (lastSyncTs > 0 && rtcOk && rtcTimeValid) {
+        sd["lastSyncTs"] = (unsigned long long)lastSyncTs;
+    } else {
+        sd["lastSyncTs"] = nullptr;
+    }
+    sd["lastError"] = sdLastError;
+    sd["sdError"] = sdLastError;
+    if (rtcOk && rtcTimeValid) {
+        DateTime nowUtc = rtc.now();
+        sd["statusTs"] = (uint64_t)nowUtc.unixtime() * 1000ULL;
+    } else {
+        sd["statusTs"] = nullptr;
+    }
+}
+
+bool sendDiagnosticsToBackend() {
+    if (WiFi.status() != WL_CONNECTED || !backendOnline) {
+        return false;
+    }
+
+    JsonDocument doc;
+    doc["dht_ok"]   = !isnan(lastTemp) && !isnan(lastHum);
+    doc["rtc_ok"]   = rtcOk;
+    doc["tank_ok"]  = (lastWaterLevel >= 0);
+    doc["flow_ok"]  = true;
+    doc["relay_ok"] = true;
+    doc["sd_ok"]    = sdMounted && (sdCardStatus == SD_STATUS_READY);
+    doc["sdStatus"] = getSdStatusString();
+    doc["sdError"]  = sdLastError;
+
+    if (rtcOk && rtcTimeValid) {
+        doc["ts"] = (uint64_t)rtc.now().unixtime() * 1000ULL;
+    } else {
+        doc["ts"] = nullptr;
+    }
+
+    JsonObject details = doc["details"].to<JsonObject>();
+    details["dht"]   = "DHT22 on GPIO 4";
+    details["rtc"]   = rtcOk ? "DS3231 on GPIO 8/9" : "DS3231 Not Detected";
+    details["tank"]  = "HC-SR04 on GPIO 16/17";
+    details["flow"]  = "YF-S201 on GPIO 5";
+    details["relay"] = "Relay on GPIO 18";
+    details["sd"]    = sdMounted ? "MicroSD SPI (CS:10, MOSI:11, SCK:12, MISO:13)" : sdLastError;
+    JsonObject sdInfo = details["sd_info"].to<JsonObject>();
+    populateSdInfo(sdInfo);
+
+    String payload;
+    serializeJson(doc, payload);
+
+    WiFiClient client;
+    HTTPClient http;
+    http.setTimeout(2500);
+    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/diagnostics";
+    if (!http.begin(client, url)) {
+        return false;
+    }
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(payload);
+    bool ok = (code == 200 || code == 201);
+    http.end();
+    if (ok) {
+        Serial.println("Diagnostics: Sent hardware status & MicroSD report to Node backend.");
+    }
+    return ok;
 }
 
 void loadSyncProgress() {
@@ -439,43 +591,110 @@ void calculatePendingRecords() {
     Serial.printf("MicroSD: Found %u pending offline record(s) (file size: %u bytes)\n", sdPendingCount, (unsigned int)fileSize);
 }
 
-void initMicroSD() {
-    Serial.println("Initializing MicroSD SPI bus (CS: 10, MOSI: 11, SCK: 12, MISO: 13)...");
+void setSdMissing(const char* reason) {
+    sdMounted = false;
+    sdCardStatus = SD_STATUS_MISSING;
+    sdLastError = reason;
+    sdSpiFrequencyHz = 0;
+    sdCardTypeStr = "Unavailable";
+    sdCardSizeBytes = 0;
+    sdTotalBytes = 0;
+    sdUsedBytes = 0;
+    lastSdMountAttempt = millis();
+    Serial.printf("MicroSD MISSING: %s\n", reason);
+}
+
+void setSdError(const char* reason) {
+    sdMounted = false;
+    sdCardStatus = SD_STATUS_ERROR;
+    sdLastError = reason;
+    sdSpiFrequencyHz = 0;
+    sdCardTypeStr = "Unavailable";
+    sdCardSizeBytes = 0;
+    sdTotalBytes = 0;
+    sdUsedBytes = 0;
+    lastSdMountAttempt = millis();
+    Serial.printf("MicroSD ERROR: %s\n", reason);
+}
+
+bool tryMountMicroSD(uint32_t frequencyHz) {
+    lastSdMountAttempt = millis();
+    sdMounted = false;
+    sdCardStatus = SD_STATUS_UNKNOWN;
+    sdLastError = "Initializing";
+    sdSpiFrequencyHz = 0;
+
+    // Reset a previous failed mount and explicitly reuse the configured pins.
+    SD.end();
+    SPI.end();
+    digitalWrite(SD_CS_PIN, HIGH);
+    pinMode(SD_CS_PIN, OUTPUT);
     SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+    delay(100);
 
-    // format_if_empty = false to prevent accidental card wipes
-    if (!SD.begin(SD_CS_PIN, SPI, 4000000, "/sd", 5, false)) {
-        uint8_t cardType = SD.cardType();
-        if (cardType == CARD_NONE) {
-            sdCardStatus = SD_STATUS_MISSING;
-            Serial.println("WARNING: MicroSD card not inserted (Missing). Continuing in RAM/LittleFS mode.");
+    Serial.printf("MicroSD: CS=%d, MOSI=%d, SCK=%d, MISO=%d; SPI=%lu Hz\n",
+                  SD_CS_PIN, SD_MOSI_PIN, SD_SCK_PIN, SD_MISO_PIN,
+                  (unsigned long)frequencyHz);
+
+    // Never automatically format: existing readings must be preserved.
+    if (!SD.begin(SD_CS_PIN, SPI, frequencyHz, "/sd", 5, false)) {
+        if (SD.cardType() == CARD_NONE) {
+            setSdMissing("No card detected in slot; check card insertion and contacts");
         } else {
-            sdCardStatus = SD_STATUS_ERROR;
-            Serial.println("ERROR: MicroSD mount or filesystem error. Continuing in RAM/LittleFS mode.");
+            setSdError("Card mount failed; check SPI wiring, power and filesystem");
         }
-        sdMounted = false;
-        return;
+        return false;
+    }
+    if (SD.cardType() == CARD_NONE) {
+        SD.end();
+        setSdMissing("No responsive card detected after mount");
+        return false;
+    }
+    if (!SD.exists("/ios") && !SD.mkdir("/ios")) {
+        SD.end();
+        setSdError("Cannot create /ios directory");
+        return false;
     }
 
-    uint8_t cardType = SD.cardType();
-    if (cardType == CARD_NONE) {
-        sdCardStatus = SD_STATUS_MISSING;
-        sdMounted = false;
-        Serial.println("WARNING: MicroSD card type is CARD_NONE.");
-        return;
+    // Opening the log in append mode preserves existing records and checks
+    // that the logging path is accessible.
+    File log = SD.open(SD_LOG_FILE, FILE_APPEND);
+    if (!log) {
+        SD.end();
+        setSdError("Cannot open offline log for appending");
+        return false;
     }
+    log.close();
 
-    sdCardStatus = SD_STATUS_READY;
     sdMounted = true;
-    uint64_t cardSizeMB = SD.cardSize() / (1024 * 1024);
-    Serial.printf("MicroSD mounted successfully. Card Size: %llu MB\n", cardSizeMB);
-
-    if (!SD.exists("/ios")) {
-        SD.mkdir("/ios");
-    }
-
+    sdCardStatus = SD_STATUS_READY;
+    sdLastError = "";
+    sdSpiFrequencyHz = frequencyHz;
+    updateSdMetrics(true);
+    Serial.printf("MicroSD READY: %s, %llu MB; SPI=%lu Hz\n",
+                  sdCardTypeStr.c_str(),
+                  (unsigned long long)(sdCardSizeBytes / (1024ULL * 1024ULL)),
+                  (unsigned long)frequencyHz);
     loadSyncProgress();
     calculatePendingRecords();
+    return true;
+}
+
+void initMicroSD() {
+    // Lower speeds improve the chances of reliable breadboard operation.
+    if (!tryMountMicroSD(1000000)) {
+        delay(200);
+        tryMountMicroSD(400000);
+    }
+}
+
+void serviceMicroSD() {
+    // One attempt per interval; avoid repeated startup retries in each loop.
+    if (!sdMounted && !syncInProgress &&
+        millis() - lastSdMountAttempt >= SD_RETRY_INTERVAL_MS) {
+        Serial.println("MicroSD: retrying mount at 400 kHz...");
+        tryMountMicroSD(400000);
+    }
 }
 
 bool checkBackendHealth() {
@@ -522,7 +741,7 @@ bool logOfflineReading(float temp, float hum, float thi,
     File f = SD.open(SD_LOG_FILE, FILE_APPEND);
     if (!f) {
         Serial.println("ERROR: Failed to open " SD_LOG_FILE " for appending.");
-        sdCardStatus = SD_STATUS_ERROR;
+        setSdError("Offline log could not be opened; retry scheduled");
         return false;
     }
 
@@ -536,28 +755,28 @@ bool logOfflineReading(float temp, float hum, float thi,
         tsMs = (uint64_t)nowUtc.unixtime() * 1000ULL;
         snprintf(recordId, sizeof(recordId), "esp32-%lu-%u", (unsigned long)nowUtc.unixtime(), recordSeq);
     } else {
-        snprintf(recordId, sizeof(recordId), "esp32-up%lu-%u", millis(), recordSeq);
+        // RTC unavailable: use uptime as a monotone proxy timestamp so the
+        // backend can still import the record (ts=null is skipped by the DB).
+        // Marked rtc_valid:false so the server knows the time is approximate.
+        tsMs = (uint64_t)millis();
+        snprintf(recordId, sizeof(recordId), "esp32-up%llu-%u", (unsigned long long)tsMs, recordSeq);
     }
 
     const char* thiLabel = "Normal";
     if (!isnan(thi)) {
-        if (thi < thiNormalMax)       thiLabel = "Normal";
-        else if (thi <= thiStressMax) thiLabel = "Stressful";
+        if (thi < thiNormalMax)        thiLabel = "Normal";
+        else if (thi <= thiStressMax)  thiLabel = "Stressful";
         else if (thi <= thiExtremeMax) thiLabel = "Extreme Heat";
-        else                           thiLabel = "Danger Zone";
+        else                            thiLabel = "Danger Zone";
     }
 
     JsonDocument doc;
-    doc["id"] = recordId;
-    if (hasValidRtc) {
-        doc["ts"] = tsMs;
-        doc["ts_ms"] = tsMs;
-        doc["rtc_valid"] = true;
-    } else {
-        doc["ts"] = nullptr;
-        doc["ts_ms"] = nullptr;
-        doc["rtc_valid"] = false;
-        doc["uptime_ms"] = millis();
+    doc["id"]        = recordId;
+    doc["ts"]        = tsMs;   // always non-null: RTC epoch ms or uptime ms
+    doc["ts_ms"]     = tsMs;
+    doc["rtc_valid"] = hasValidRtc;
+    if (!hasValidRtc) {
+        doc["uptime_ms"] = tsMs; // alias so recipient can distinguish
     }
 
     if (!isnan(temp)) doc["temp"] = temp; else doc["temp"] = nullptr;
@@ -566,23 +785,30 @@ bool logOfflineReading(float temp, float hum, float thi,
     doc["thi_label"] = thiLabel;
 
     if (waterLevel >= 0) {
-        doc["water_level"] = waterLevel;
+        doc["water_level"]     = waterLevel;
         doc["water_level_pct"] = waterLevel;
     } else {
-        doc["water_level"] = nullptr;
+        doc["water_level"]     = nullptr;
         doc["water_level_pct"] = nullptr;
     }
 
-    doc["flow_lpm"] = flowRate;
-    doc["water_used"] = waterUsed;
+    doc["flow_lpm"]    = flowRate;
+    doc["water_used"]  = waterUsed;
     doc["water_used_l"] = waterUsed;
-    doc["pump_on"] = pumpOn;
+    doc["pump_on"]     = pumpOn;
     doc["pump_reason"] = pumpReason ? pumpReason : "idle";
 
-    serializeJson(doc, f);
-    f.print('\n');
+    const size_t expectedBytes = measureJson(doc);
+    const size_t writtenBytes = serializeJson(doc, f);
+    const size_t newlineBytes = f.print('\n');
     f.flush();
+    const int writeError = f.getWriteError();
     f.close();
+
+    if (writtenBytes != expectedBytes || newlineBytes != 1 || writeError != 0) {
+        setSdError("Offline log write failed; check card space, power and contacts");
+        return false;
+    }
 
     sdPendingCount++;
     Serial.printf("MicroSD: Logged reading %s. Pending sync: %u\n", recordId, sdPendingCount);
@@ -607,30 +833,29 @@ bool sendTelemetryDirect(float temp, float hum, float thi,
         tsMs = (uint64_t)nowUtc.unixtime() * 1000ULL;
         snprintf(recordId, sizeof(recordId), "esp32-%lu-%u", (unsigned long)nowUtc.unixtime(), recordSeq);
     } else {
-        snprintf(recordId, sizeof(recordId), "esp32-up%lu-%u", millis(), recordSeq);
+        // RTC unavailable: use uptime as a proxy so the backend doesn't drop
+        // the record due to a null ts. Marked rtc_valid:false for transparency.
+        tsMs = (uint64_t)millis();
+        snprintf(recordId, sizeof(recordId), "esp32-up%llu-%u", (unsigned long long)tsMs, recordSeq);
     }
 
     const char* thiLabel = "Normal";
     if (!isnan(thi)) {
-        if (thi < thiNormalMax)       thiLabel = "Normal";
-        else if (thi <= thiStressMax) thiLabel = "Stressful";
+        if (thi < thiNormalMax)        thiLabel = "Normal";
+        else if (thi <= thiStressMax)  thiLabel = "Stressful";
         else if (thi <= thiExtremeMax) thiLabel = "Extreme Heat";
-        else                           thiLabel = "Danger Zone";
+        else                            thiLabel = "Danger Zone";
     }
 
     JsonDocument doc;
     JsonArray arr = doc.to<JsonArray>();
     JsonObject obj = arr.add<JsonObject>();
-    obj["id"] = recordId;
-    if (hasValidRtc) {
-        obj["ts"] = tsMs;
-        obj["ts_ms"] = tsMs;
-        obj["rtc_valid"] = true;
-    } else {
-        obj["ts"] = nullptr;
-        obj["ts_ms"] = nullptr;
-        obj["rtc_valid"] = false;
-        obj["uptime_ms"] = millis();
+    obj["id"]        = recordId;
+    obj["ts"]        = tsMs;   // always non-null: RTC epoch ms or uptime ms
+    obj["ts_ms"]     = tsMs;
+    obj["rtc_valid"] = hasValidRtc;
+    if (!hasValidRtc) {
+        obj["uptime_ms"] = tsMs; // alias so recipient can distinguish
     }
     if (!isnan(temp)) obj["temp"] = temp; else obj["temp"] = nullptr;
     if (!isnan(hum))  obj["humidity"] = hum; else obj["humidity"] = nullptr;
@@ -1587,7 +1812,16 @@ void handleStatus(AsyncWebServerRequest *request)
     opDurations["mistPauseSec"] = mistPauseSec;
 
     doc["malfunctions"].to<JsonArray>();
-    doc["diagnostics"] = nullptr;
+    JsonObject diagnostics = doc["diagnostics"].to<JsonObject>();
+    diagnostics["dht_ok"] = !isnan(lastTemp) && !isnan(lastHum);
+    diagnostics["rtc_ok"] = rtcOk;
+    diagnostics["tank_ok"] = (lastWaterLevel >= 0);
+    diagnostics["flow_ok"] = true;   // Existing behavior: no flow self-test.
+    diagnostics["relay_ok"] = true;  // Existing behavior: no relay feedback.
+    diagnostics["sd_ok"] = sdMounted && sdCardStatus == SD_STATUS_READY;
+    doc["waterSensorOk"] = (lastWaterLevel >= 0);
+    doc["distanceCm"] = lastDistanceCm >= 0 ? lastDistanceCm : -1.0f;
+    doc["echoDurationUs"] = lastEchoDurationUs;
 
     // RTC status and current UTC epoch
     doc["rtcOk"] = rtcOk;
@@ -1626,14 +1860,19 @@ void handleStatus(AsyncWebServerRequest *request)
 
     // MicroSD and Backend Sync Status
     doc["sdStatus"] = getSdStatusString();
+    doc["sdError"] = sdLastError;
+    doc["sdSpiFrequencyHz"] = sdSpiFrequencyHz;
     doc["backendOnline"] = backendOnline;
     doc["pendingOfflineCount"] = sdPendingCount;
-    if (lastSyncTs > 0) {
+    doc["syncedCount"] = sdSyncedCount;
+    if (lastSyncTs > 0 && rtcOk && rtcTimeValid) {
         doc["lastSyncTs"] = (unsigned long long)lastSyncTs;
     } else {
         doc["lastSyncTs"] = nullptr;
     }
     doc["syncInProgress"] = syncInProgress;
+    JsonObject sdObj = doc["sd"].to<JsonObject>();
+    populateSdInfo(sdObj);
 
     String json;
     serializeJson(doc, json);
@@ -1955,15 +2194,21 @@ void setupAuxRoutes(AsyncWebServer &srv) {
         doc["tank_ok"]  = (lastWaterLevel >= 0);
         doc["flow_ok"]  = true;
         doc["relay_ok"] = true;
-        doc["sd_ok"]    = (sdCardStatus == SD_STATUS_READY);
+        doc["sd_ok"]    = sdMounted && (sdCardStatus == SD_STATUS_READY);
+        doc["sdStatus"] = getSdStatusString();
+        doc["echoDurationUs"] = lastEchoDurationUs;
+        doc["distanceCm"] = lastDistanceCm;
+        doc["sdError"] = sdLastError;
         JsonObject details = doc["details"].to<JsonObject>();
         details["dht"]   = "DHT22 on GPIO 4";
         details["rtc"]   = rtcOk ? "DS3231 on GPIO 8/9" : "DS3231 Not Detected";
         details["tank"]  = "HC-SR04 on GPIO 16/17";
         details["flow"]  = "YF-S201 on GPIO 5";
         details["relay"] = "Relay on GPIO 18";
-        details["sd"]    = (sdCardStatus == SD_STATUS_READY) ? "MicroSD SPI (CS:10, MOSI:11, SCK:12, MISO:13)" :
-                           (sdCardStatus == SD_STATUS_MISSING) ? "MicroSD Card Not Inserted" : "MicroSD Card Init/Mount Error";
+        details["sd"] = sdMounted ? "MicroSD SPI (CS:10, MOSI:11, SCK:12, MISO:13)" : sdLastError;
+        JsonObject sdInfo = details["sd_info"].to<JsonObject>();
+        populateSdInfo(sdInfo);
+        doc["sd"].set(sdInfo);
 
         String json;
         serializeJson(doc, json);
@@ -1973,13 +2218,28 @@ void setupAuxRoutes(AsyncWebServer &srv) {
     // GET /api/sd/status
     srv.on("/api/sd/status", HTTP_GET, [](AsyncWebServerRequest *request) {
         JsonDocument doc;
+        doc["ok"] = true;
         doc["sdStatus"] = getSdStatusString();
         doc["mounted"] = sdMounted;
+        doc["sdError"] = sdLastError;
+        doc["sdSpiFrequencyHz"] = sdSpiFrequencyHz;
         doc["backendOnline"] = backendOnline;
         doc["pendingOfflineCount"] = sdPendingCount;
         doc["syncedCount"] = sdSyncedCount;
-        doc["lastSyncTs"] = lastSyncTs > 0 ? (unsigned long long)lastSyncTs : 0;
+        doc["lastSyncTs"] = (lastSyncTs > 0 && rtcOk && rtcTimeValid) ? (unsigned long long)lastSyncTs : 0;
         doc["syncInProgress"] = syncInProgress;
+        doc["cardType"] = sdMounted ? sdCardTypeStr : "Unavailable";
+        doc["cardSizeBytes"] = (sdMounted && sdCardSizeBytes > 0) ? sdCardSizeBytes : 0;
+        doc["totalBytes"] = (sdMounted && sdTotalBytes > 0) ? sdTotalBytes : 0;
+        doc["usedBytes"] = (sdMounted && sdTotalBytes > 0) ? sdUsedBytes : 0;
+        doc["availableBytes"] = (sdMounted && sdTotalBytes > sdUsedBytes) ? (sdTotalBytes - sdUsedBytes) : 0;
+        doc["csPin"] = SD_CS_PIN;
+        doc["mosiPin"] = SD_MOSI_PIN;
+        doc["sckPin"] = SD_SCK_PIN;
+        doc["misoPin"] = SD_MISO_PIN;
+        doc["logPath"] = SD_LOG_FILE;
+        JsonObject sdObj = doc["sd"].to<JsonObject>();
+        populateSdInfo(sdObj);
         String json;
         serializeJson(doc, json);
         request->send(200, "application/json", json);
@@ -1993,8 +2253,11 @@ void setupAuxRoutes(AsyncWebServer &srv) {
         doc["backendOnline"] = backendOnline;
         doc["pendingOfflineCount"] = sdPendingCount;
         doc["totalSynced"] = sdSyncedCount;
-        doc["lastSyncTs"] = lastSyncTs > 0 ? (unsigned long long)lastSyncTs : 0;
+        doc["syncedCount"] = sdSyncedCount;
+        doc["lastSyncTs"] = (lastSyncTs > 0 && rtcOk && rtcTimeValid) ? (unsigned long long)lastSyncTs : 0;
         doc["syncInProgress"] = syncInProgress;
+        JsonObject sdObj = doc["sd"].to<JsonObject>();
+        populateSdInfo(sdObj);
         String json;
         serializeJson(doc, json);
         request->send(200, "application/json", json);
@@ -2218,38 +2481,28 @@ void setupWebServer()
 
 float readDistance()
 {
-    // Clean LOW state before trigger pulse
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(4);
-
-    // 10us trigger pulse to start ranging
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
-
-    // Timeout: 30000us (~5.1 meters max range)
-    unsigned long duration = pulseIn(ECHO_PIN, HIGH, 30000);
-
-    // If initial pulse returned 0, do a single quick retry after 1ms
-    if (duration == 0)
-    {
-        delayMicroseconds(1000);
+    lastEchoDurationUs = 0;
+    lastDistanceCm = -1.0f;
+    for (uint8_t attempt = 0; attempt < 2; attempt++) {
+        // Give the module time to finish the preceding measurement.
+        if (attempt > 0) delay(65);
         digitalWrite(TRIG_PIN, LOW);
         delayMicroseconds(4);
         digitalWrite(TRIG_PIN, HIGH);
         delayMicroseconds(10);
         digitalWrite(TRIG_PIN, LOW);
-        duration = pulseIn(ECHO_PIN, HIGH, 30000);
-    }
+        lastEchoDurationUs = pulseIn(ECHO_PIN, HIGH, 30000UL);
+        if (lastEchoDurationUs == 0) continue;
 
-    if (duration == 0)
-    {
-        return -1.0;
+        const float distance = (float)lastEchoDurationUs * 0.0343f / 2.0f;
+        // Reject the sensor's blind zone and readings outside its rated range.
+        // Invalid readings stay invalid so the pump water-protection remains.
+        if (distance >= 2.0f && distance <= 400.0f) {
+            lastDistanceCm = distance;
+            return distance;
+        }
     }
-
-    // Speed of sound = 343 m/s = 0.0343 cm/us (divided by 2 for round-trip)
-    float distance = (float)duration * 0.0343f / 2.0f;
-    return distance;
+    return -1.0f;
 }
 
 // ============================================================
@@ -2371,7 +2624,12 @@ void printStatusToSerial()
     }
     else
     {
-        Serial.println("Water Level: SENSOR ERROR");
+        Serial.printf("Water Level: SENSOR ERROR (TRIG=%d, ECHO=%d, echo=%lu us)\n",
+                      TRIG_PIN, ECHO_PIN, lastEchoDurationUs);
+    }
+    if (lastDistanceCm >= 0) {
+        Serial.printf("HC-SR04 Distance: %.2f cm | Echo: %lu us\n",
+                      lastDistanceCm, lastEchoDurationUs);
     }
 
     Serial.print("Flow Rate: ");
@@ -2424,6 +2682,7 @@ void printStatusToSerial()
     Serial.print(getSdStatusString());
     Serial.print(" | PENDING SYNC: ");
     Serial.println(sdPendingCount);
+    if (!sdMounted) Serial.printf("MicroSD detail: %s\n", sdLastError);
     Serial.print("BACKEND: ");
     Serial.println(backendOnline ? "ONLINE" : "OFFLINE");
 
@@ -2479,6 +2738,7 @@ void setup()
 
     pinMode(TRIG_PIN, OUTPUT);
     pinMode(ECHO_PIN, INPUT);
+    digitalWrite(TRIG_PIN, LOW);
 
     // --------------------------------------------------------
     // MISTING RELAY
@@ -2563,6 +2823,9 @@ void loop()
 
     reconnectWiFi();
 
+    // Retry a failed SD mount or write after wiring/card issues are corrected.
+    serviceMicroSD();
+
     // --------------------------------------------------------
     // BACKEND SERVER HEALTH CHECK (non-blocking 20s interval)
     // --------------------------------------------------------
@@ -2585,6 +2848,16 @@ void loop()
             lastSyncBatchAttempt = millis();
             syncBatch();
         }
+    }
+
+    // --------------------------------------------------------
+    // PERIODIC HARDWARE DIAGNOSTICS & SD REPORT PUSH TO NODE
+    // --------------------------------------------------------
+
+    if (backendOnline && (lastDiagnosticsPush == 0 || millis() - lastDiagnosticsPush >= DIAGNOSTICS_PUSH_INTERVAL_MS))
+    {
+        lastDiagnosticsPush = millis();
+        sendDiagnosticsToBackend();
     }
 
     // --------------------------------------------------------

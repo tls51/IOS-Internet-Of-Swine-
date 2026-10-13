@@ -53,10 +53,15 @@ const DATA = (() => {
     connected: false,
     // MicroSD / offline sync status (populated by ESP32 firmware or backend)
     sdStatus: 'Unknown',          // 'Ready' | 'Missing' | 'Error' | 'Unknown'
+    sdError: '',
+    sdSpiFrequencyHz: 0,
     backendOnline: false,          // whether the ESP32 can reach the backend
     pendingOfflineCount: 0,        // number of unsynced offline readings on SD
+    syncedCount: 0,
     lastSyncTs: null,              // unix ms of last successful sync
     syncInProgress: false,         // true while a sync batch is being uploaded
+    sdDetails: null,               // comprehensive SD details
+    sdLastReportAt: null,          // timestamp of last valid report from ESP32
   };
 
   let _listeners = [];
@@ -116,19 +121,39 @@ const DATA = (() => {
       }
       state.malfunctions    = s.malfunctions || [];
       // Diagnostics embedded in status response
-      if (s.diagnostics) state.diagnostics = s.diagnostics;
+      if (s.diagnostics) {
+        state.diagnostics = s.diagnostics;
+        if (s.diagnostics.sd_ok !== undefined && s.diagnostics.sd_ok !== null) {
+          state.sdOk = !!s.diagnostics.sd_ok;
+        }
+      }
       if (s.rtcOk !== undefined) state.rtcOk = !!s.rtcOk;
       if (s.epoch !== undefined && s.epoch !== null) {
         state.epoch = s.epoch;
         state.epochReceivedAt = Date.now();
       }
       state.connected       = true;
-      // MicroSD / offline sync status (sent by ESP32 firmware in /api/status)
+      // MicroSD / offline sync status (sent by ESP32 firmware or backend in /api/status)
       if (s.sdStatus !== undefined)             state.sdStatus             = s.sdStatus;
+      if (s.sdError !== undefined)              state.sdError              = s.sdError;
+      if (s.sdSpiFrequencyHz !== undefined)      state.sdSpiFrequencyHz     = s.sdSpiFrequencyHz;
       if (s.backendOnline !== undefined)         state.backendOnline         = !!s.backendOnline;
       if (s.pendingOfflineCount !== undefined)   state.pendingOfflineCount   = s.pendingOfflineCount || 0;
-      if (s.lastSyncTs !== undefined)            state.lastSyncTs            = s.lastSyncTs || null;
+      if (s.syncedCount !== undefined)           state.syncedCount           = s.syncedCount || 0;
+      if (s.lastSyncTs !== undefined)            state.lastSyncTs            = (s.lastSyncTs && s.lastSyncTs > 1000000000000) ? s.lastSyncTs : (s.lastSyncTs === 0 ? 0 : null);
       if (s.syncInProgress !== undefined)        state.syncInProgress        = !!s.syncInProgress;
+      if (s.sd) {
+        state.sdDetails = Object.assign({}, state.sdDetails || {}, s.sd);
+        if (s.sd.status) state.sdStatus = s.sd.status;
+        const ts = s.sd.statusTs;
+        if (ts && ts > 1000000000000) {
+          state.sdLastReportAt = ts;
+        } else {
+          state.sdLastReportAt = Date.now();
+        }
+      } else if (s.sdStatus && s.sdStatus !== 'Unknown') {
+        state.sdLastReportAt = Date.now();
+      }
     } catch (err) {
       state.connected = false;
       console.warn('IoS backend unreachable — is `npm start` running in ios-backend/?', err.message);
@@ -141,9 +166,59 @@ const DATA = (() => {
     try {
       const d = await getJSON('/api/diagnostics');
       state.diagnostics = d;
+      if (d) {
+        if (d.sd_ok !== undefined && d.sd_ok !== null) {
+          state.sdOk = !!d.sd_ok;
+        }
+        if (d.sdStatus) {
+          state.sdStatus = d.sdStatus;
+        }
+        if (d.sdError !== undefined) {
+          state.sdError = d.sdError;
+        }
+        const sdInfo = (d.details && d.details.sd_info) || d.sd;
+        if (sdInfo) {
+          state.sdDetails = Object.assign({}, state.sdDetails || {}, sdInfo);
+          if (sdInfo.status) state.sdStatus = sdInfo.status;
+          const ts = sdInfo.statusTs || d.ts;
+          if (ts && ts > 1000000000000) {
+            state.sdLastReportAt = ts;
+          } else {
+            state.sdLastReportAt = Date.now();
+          }
+        } else if (d.ts && d.ts > 1000000000000) {
+          state.sdLastReportAt = d.ts;
+        }
+      }
     } catch (err) {
       // Diagnostics are non-critical — keep last known values
       if (!state.diagnostics) state.diagnostics = null;
+    }
+    notify();
+  }
+
+  /* ── Poll /api/sd/status: dedicated MicroSD status route ── */
+  async function refreshSdStatus() {
+    try {
+      const s = await getJSON('/api/sd/status');
+      if (s) {
+        if (s.sdStatus !== undefined) state.sdStatus = s.sdStatus;
+        if (s.sdError !== undefined)  state.sdError = s.sdError;
+        if (s.pendingOfflineCount !== undefined) state.pendingOfflineCount = s.pendingOfflineCount || 0;
+        if (s.syncedCount !== undefined) state.syncedCount = s.syncedCount || 0;
+        if (s.lastSyncTs !== undefined) state.lastSyncTs = (s.lastSyncTs && s.lastSyncTs > 1000000000000) ? s.lastSyncTs : (s.lastSyncTs === 0 ? 0 : null);
+        if (s.syncInProgress !== undefined) state.syncInProgress = !!s.syncInProgress;
+        const detailsObj = s.sd || s;
+        state.sdDetails = Object.assign({}, state.sdDetails || {}, detailsObj);
+        const ts = detailsObj.statusTs;
+        if (ts && ts > 1000000000000) {
+          state.sdLastReportAt = ts;
+        } else {
+          state.sdLastReportAt = Date.now();
+        }
+      }
+    } catch (_) {
+      // Non-critical — keep last known details
     }
     notify();
   }
@@ -187,20 +262,24 @@ const DATA = (() => {
   let _statusTimer = null;
   let _historyTimer = null;
   let _diagTimer = null;
+  let _sdTimer = null;
 
   function start() {
     refreshStatus();
     refreshHistory();
     refreshDiagnostics();
+    refreshSdStatus();
     _statusTimer  = setInterval(refreshStatus, POLL_MS);
     _historyTimer = setInterval(refreshHistory, HISTORY_POLL_MS);
     _diagTimer    = setInterval(refreshDiagnostics, 60000); // refresh diagnostics every 60s
+    _sdTimer      = setInterval(refreshSdStatus, 15000);    // refresh SD status every 15s
   }
 
   function stop() {
     clearInterval(_statusTimer);
     clearInterval(_historyTimer);
     clearInterval(_diagTimer);
+    clearInterval(_sdTimer);
   }
 
   /* ── RTC Time Synchronization ────────────────────────────── */
@@ -238,6 +317,7 @@ const DATA = (() => {
     refreshStatus,
     refreshHistory,
     refreshDiagnostics,
+    refreshSdStatus,
     testPump,
     controlPump,
     setManual,

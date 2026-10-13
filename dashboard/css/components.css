@@ -408,6 +408,104 @@
   white-space: nowrap;
 }
 
+/* ── MicroSD Hardware Diagnostics Component ──────────────── */
+.sensor-diag-item#diag-sd {
+  flex-direction: column;
+  align-items: stretch;
+  transition: all 0.2s ease;
+}
+.sensor-diag-item#diag-sd.expanded {
+  grid-column: 1 / -1;
+  background: var(--surface);
+  border-color: rgba(74, 222, 128, 0.4);
+}
+.sd-diag-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+.sd-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.sd-toggle-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
+  color: var(--text-soft);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+.sd-toggle-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+  border-color: var(--primary);
+}
+.sd-details-panel {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.sd-details-panel.hidden {
+  display: none !important;
+}
+.sd-details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+.sd-detail-item {
+  background: var(--card);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-soft);
+}
+.sd-detail-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.sd-detail-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+}
+.sd-usage-bar-wrap {
+  margin-top: 6px;
+}
+.sd-usage-bar {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+}
+.sd-usage-bar-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.sd-usage-bar-fill.warn {
+  background: var(--warn);
+}
+.sd-usage-bar-fill.danger {
+  background: var(--danger);
+}
+
 /* ── Schedule list ───────────────────────────────────────── */
 .sched-topbar {
   display: flex;

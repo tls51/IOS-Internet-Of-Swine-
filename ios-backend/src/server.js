@@ -554,6 +554,13 @@ app.get('/api/status', (req, res) => {
   const diagnostics =
     db.latestDiagnostics();
 
+  const sdDetails = (diagnostics && diagnostics.details && diagnostics.details.sd_info)
+    ? diagnostics.details.sd_info
+    : null;
+  const sdStatus = (sdDetails && sdDetails.status)
+    ? sdDetails.status
+    : (diagnostics && diagnostics.sd_ok != null ? (diagnostics.sd_ok ? 'Ready' : 'Error') : 'Unknown');
+
 
   // Existing temperature-based misting
   const mistActive =
@@ -611,6 +618,22 @@ app.get('/api/status', (req, res) => {
     malfunctions,
 
     diagnostics,
+
+    // MicroSD storage & sync fields consistent with ESP32 firmware
+    sdStatus,
+    sdError: sdDetails ? (sdDetails.lastError || '') : '',
+    sdSpiFrequencyHz: sdDetails ? (sdDetails.spiFrequencyHz || 0) : 0,
+    backendOnline: true,
+    pendingOfflineCount: sdDetails ? (sdDetails.pendingCount || 0) : 0,
+    syncedCount: db.pendingOfflineCount ? db.pendingOfflineCount() : (sdDetails ? (sdDetails.syncedCount || 0) : 0),
+    lastSyncTs: db.latestSyncTs ? db.latestSyncTs() : (sdDetails ? (sdDetails.lastSyncTs || null) : null),
+    syncInProgress: sdDetails ? !!sdDetails.syncInProgress : false,
+    sd: sdDetails || {
+      ok: diagnostics ? diagnostics.sd_ok : null,
+      status: sdStatus,
+      mounted: diagnostics && diagnostics.sd_ok != null ? !!diagnostics.sd_ok : null,
+      lastError: sdDetails ? (sdDetails.lastError || '') : ''
+    },
 
     waterLevel:
       water
@@ -1390,7 +1413,9 @@ app.post('/api/diagnostics', (req, res) => {
     tank_ok,
     flow_ok,
     relay_ok,
-    details
+    sd_ok,
+    details,
+    ts
   } = req.body;
 
 
@@ -1406,13 +1431,18 @@ app.post('/api/diagnostics', (req, res) => {
 
     relay_ok,
 
-    details
+    sd_ok,
+
+    details,
+
+    ts
   });
 
+  const sdStr = sd_ok === true ? 'PASS' : (sd_ok === false ? 'FAIL' : 'UNKNOWN');
 
   db.logActivity(
     'Info',
-    `ESP32 completed hardware self-test: DHT:${dht_ok ? 'PASS' : 'FAIL'}, RTC:${rtc_ok ? 'PASS' : 'FAIL'}, Tank:${tank_ok ? 'PASS' : 'FAIL'}, Flow:${flow_ok ? 'PASS' : 'FAIL'}, Relay:${relay_ok ? 'PASS' : 'FAIL'}`
+    `ESP32 hardware status update: DHT:${dht_ok ? 'PASS' : 'FAIL'}, RTC:${rtc_ok ? 'PASS' : 'FAIL'}, Tank:${tank_ok ? 'PASS' : 'FAIL'}, Flow:${flow_ok ? 'PASS' : 'FAIL'}, Relay:${relay_ok ? 'PASS' : 'FAIL'}, SD:${sdStr}`
   );
 
 
@@ -1427,14 +1457,63 @@ app.post('/api/diagnostics', (req, res) => {
 
 
 app.get('/api/diagnostics', (req, res) => {
-
-  res.json(
-    db.latestDiagnostics() || {
+  const latest = db.latestDiagnostics();
+  if (!latest) {
+    return res.json({
       ok: false,
-      msg:
-        'No diagnostics recorded yet'
-    }
-  );
+      msg: 'No diagnostics recorded yet'
+    });
+  }
+  const sdDetails = (latest.details && latest.details.sd_info) ? latest.details.sd_info : null;
+  res.json({
+    ...latest,
+    ok: true,
+    sdStatus: (sdDetails && sdDetails.status) || (latest.sd_ok != null ? (latest.sd_ok ? 'Ready' : 'Error') : 'Unknown'),
+    sdError: (sdDetails && sdDetails.lastError) || '',
+    sd: sdDetails
+  });
+});
+
+
+/* ============================================================
+   MICROSD STATUS
+   GET /api/sd/status
+   Returns live/cached MicroSD status and details from diagnostics.
+   ============================================================ */
+app.get('/api/sd/status', (req, res) => {
+  const diagnostics = db.latestDiagnostics();
+  const sdDetails = (diagnostics && diagnostics.details && diagnostics.details.sd_info)
+    ? diagnostics.details.sd_info
+    : null;
+  const sdStatus = (sdDetails && sdDetails.status)
+    ? sdDetails.status
+    : (diagnostics && diagnostics.sd_ok != null ? (diagnostics.sd_ok ? 'Ready' : 'Error') : 'Unknown');
+
+  res.json({
+    ok: true,
+    sdStatus,
+    mounted: sdDetails ? !!sdDetails.mounted : (diagnostics && diagnostics.sd_ok != null ? !!diagnostics.sd_ok : false),
+    sdError: sdDetails ? (sdDetails.lastError || '') : '',
+    sdSpiFrequencyHz: sdDetails ? (sdDetails.spiFrequencyHz || 0) : 0,
+    backendOnline: true,
+    pendingOfflineCount: sdDetails ? (sdDetails.pendingCount || 0) : 0,
+    syncedCount: db.pendingOfflineCount ? db.pendingOfflineCount() : (sdDetails ? (sdDetails.syncedCount || 0) : 0),
+    lastSyncTs: db.latestSyncTs ? db.latestSyncTs() : (sdDetails ? (sdDetails.lastSyncTs || 0) : 0),
+    syncInProgress: sdDetails ? !!sdDetails.syncInProgress : false,
+    cardType: sdDetails ? (sdDetails.cardType || 'Unavailable') : 'Unavailable',
+    cardSizeBytes: sdDetails ? sdDetails.cardSizeBytes : null,
+    totalBytes: sdDetails ? sdDetails.totalBytes : null,
+    usedBytes: sdDetails ? sdDetails.usedBytes : null,
+    availableBytes: sdDetails ? (sdDetails.availableBytes != null ? sdDetails.availableBytes : sdDetails.freeBytes) : null,
+    freeBytes: sdDetails ? (sdDetails.freeBytes != null ? sdDetails.freeBytes : sdDetails.availableBytes) : null,
+    csPin: sdDetails ? sdDetails.csPin : 10,
+    mosiPin: sdDetails ? sdDetails.mosiPin : 11,
+    sckPin: sdDetails ? sdDetails.sckPin : 12,
+    misoPin: sdDetails ? sdDetails.misoPin : 13,
+    logPath: sdDetails ? (sdDetails.logPath || '/ios/offline_readings.jsonl') : '/ios/offline_readings.jsonl',
+    statusTs: (diagnostics && diagnostics.ts) || null,
+    sd: sdDetails
+  });
 });
 
 
