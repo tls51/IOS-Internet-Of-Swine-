@@ -164,7 +164,12 @@ const SCHEDULE = (() => {
   }
 
   async function reloadList(type) {
-    const [listId, countId] = type === 'bath' ? ['bath-list', 'bath-count'] : ['clean-list', 'clean-count'];
+    const map = {
+      mist:  ['mist-list',  'mist-count'],
+      bath:  ['bath-list',  'bath-count'],
+      clean: ['clean-list', 'clean-count'],
+    };
+    const [listId, countId] = map[type] || [`${type}-list`, `${type}-count`];
     try {
       const schedules = await fetchSchedules(type);
       renderList(listId, countId, schedules, type);
@@ -198,9 +203,10 @@ const SCHEDULE = (() => {
   function openModal(type) {
     _modalType     = type;
     _selectedDays  = ['Mon','Wed','Fri'];
-    document.getElementById('modal-title').textContent = `Add ${type === 'bath' ? 'Bathing' : 'Cleaning'} Schedule`;
-    document.getElementById('modal-time').value = '06:00';
-    document.getElementById('modal-dur').value  = '15';
+    const titleType = type === 'mist' ? 'Misting' : type === 'bath' ? 'Bathing' : 'Cleaning';
+    document.getElementById('modal-title').textContent = `Add ${titleType} Schedule`;
+    document.getElementById('modal-time').value = type === 'mist' ? '11:00' : '06:00';
+    document.getElementById('modal-dur').value  = type === 'mist' ? '5' : '15';
     buildDayPicker();
     document.getElementById('sched-modal').classList.remove('hidden');
   }
@@ -242,8 +248,9 @@ const SCHEDULE = (() => {
       return;
     }
 
-    const typeLabel = _modalType === 'bath' ? 'Bathing' : 'Cleaning';
-    const label = `${_modalType === 'bath' ? 'Bath' : 'Clean'} ${time}`;
+    const typeLabel = _modalType === 'mist' ? 'Misting' : _modalType === 'bath' ? 'Bathing' : 'Cleaning';
+    const prefix = _modalType === 'mist' ? 'Mist' : _modalType === 'bath' ? 'Bath' : 'Clean';
+    const label = `${prefix} ${time}`;
     const entry = { type: _modalType, label, time, duration: dur, days: [..._selectedDays] };
 
     try {
@@ -251,7 +258,7 @@ const SCHEDULE = (() => {
       await reloadList(_modalType);
 
       if (typeof NOTIFY !== 'undefined') {
-        const icon = _modalType === 'bath' ? '🚿' : '🧹';
+        const icon = _modalType === 'mist' ? '🌫️' : _modalType === 'bath' ? '🚿' : '🧹';
         NOTIFY.show({
           title: `${typeLabel} Schedule Scheduled!`,
           message: `${label} (${entry.days.join(', ')}) set for ${dur} minutes.`,
@@ -276,11 +283,19 @@ const SCHEDULE = (() => {
 
   /* ── Init ────────────────────────────────────────────────── */
   function init() {
+    reloadList('mist');
     reloadList('bath');
     reloadList('clean');
 
-    document.getElementById('btn-add-bath') .addEventListener('click', () => openModal('bath'));
-    document.getElementById('btn-add-clean').addEventListener('click', () => openModal('clean'));
+    const btnMist = document.getElementById('btn-add-mist');
+    if (btnMist) btnMist.addEventListener('click', () => openModal('mist'));
+
+    const btnBath = document.getElementById('btn-add-bath');
+    if (btnBath) btnBath.addEventListener('click', () => openModal('bath'));
+
+    const btnClean = document.getElementById('btn-add-clean');
+    if (btnClean) btnClean.addEventListener('click', () => openModal('clean'));
+
     document.getElementById('modal-close')  .addEventListener('click', closeModal);
     document.getElementById('modal-cancel') .addEventListener('click', closeModal);
     document.getElementById('modal-save')   .addEventListener('click', saveModal);

@@ -51,6 +51,12 @@ const DATA = (() => {
     epoch: null,
     epochReceivedAt: null,
     connected: false,
+    // MicroSD / offline sync status (populated by ESP32 firmware or backend)
+    sdStatus: 'Unknown',          // 'Ready' | 'Missing' | 'Error' | 'Unknown'
+    backendOnline: false,          // whether the ESP32 can reach the backend
+    pendingOfflineCount: 0,        // number of unsynced offline readings on SD
+    lastSyncTs: null,              // unix ms of last successful sync
+    syncInProgress: false,         // true while a sync batch is being uploaded
   };
 
   let _listeners = [];
@@ -117,6 +123,12 @@ const DATA = (() => {
         state.epochReceivedAt = Date.now();
       }
       state.connected       = true;
+      // MicroSD / offline sync status (sent by ESP32 firmware in /api/status)
+      if (s.sdStatus !== undefined)             state.sdStatus             = s.sdStatus;
+      if (s.backendOnline !== undefined)         state.backendOnline         = !!s.backendOnline;
+      if (s.pendingOfflineCount !== undefined)   state.pendingOfflineCount   = s.pendingOfflineCount || 0;
+      if (s.lastSyncTs !== undefined)            state.lastSyncTs            = s.lastSyncTs || null;
+      if (s.syncInProgress !== undefined)        state.syncInProgress        = !!s.syncInProgress;
     } catch (err) {
       state.connected = false;
       console.warn('IoS backend unreachable — is `npm start` running in ios-backend/?', err.message);

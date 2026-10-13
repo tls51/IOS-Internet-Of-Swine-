@@ -79,9 +79,21 @@ const PAGES = (() => {
     const dot   = document.getElementById('conn-dot');
     const label = document.getElementById('conn-label');
     if (dot && label) {
-      dot.style.background   = state.connected ? 'var(--primary)' : 'var(--danger)';
-      dot.style.boxShadow    = state.connected ? '0 0 6px var(--primary)' : '0 0 6px var(--danger)';
-      label.textContent      = state.connected ? 'Online · ESP32 Active' : 'Offline · Backend unreachable';
+      if (state.connected) {
+        if (state.backendOnline) {
+          dot.style.background   = 'var(--primary)';
+          dot.style.boxShadow    = '0 0 6px var(--primary)';
+          label.textContent      = 'Online · Backend Connected';
+        } else {
+          dot.style.background   = '#F59E0B';
+          dot.style.boxShadow    = '0 0 6px #F59E0B';
+          label.textContent      = 'Offline Mode · Backend Unreachable';
+        }
+      } else {
+        dot.style.background   = 'var(--danger)';
+        dot.style.boxShadow    = '0 0 6px var(--danger)';
+        label.textContent      = 'Disconnected · Device Unreachable';
+      }
     }
   }
 
@@ -374,6 +386,69 @@ const PAGES = (() => {
       }
     }
 
+    /* Update MicroSD Storage & Backend Sync Card */
+    const sdBadge = document.getElementById('sd-status-badge');
+    if (sdBadge) {
+      if (state.sdStatus === 'Ready') {
+        sdBadge.className = 'badge badge-green';
+        sdBadge.textContent = '✓ Ready (Mounted)';
+      } else if (state.sdStatus === 'Missing') {
+        sdBadge.className = 'badge badge-warn';
+        sdBadge.textContent = '⚠ Missing / No Card';
+      } else if (state.sdStatus === 'Error') {
+        sdBadge.className = 'badge badge-danger';
+        sdBadge.textContent = '✗ Card Error';
+      } else {
+        sdBadge.className = 'badge badge-muted';
+        sdBadge.textContent = state.sdStatus || 'Unknown';
+      }
+    }
+
+    const backendBadge = document.getElementById('backend-status-badge');
+    const backendDesc = document.getElementById('backend-status-desc');
+    if (backendBadge) {
+      if (state.backendOnline) {
+        backendBadge.className = 'badge badge-green';
+        backendBadge.textContent = '✓ Online (Connected)';
+        if (backendDesc) backendDesc.textContent = 'Windows Laptop SQLite (Reachable)';
+      } else {
+        backendBadge.className = 'badge badge-danger';
+        backendBadge.textContent = '✗ Offline (Unreachable)';
+        if (backendDesc) backendDesc.textContent = 'Windows Laptop SQLite (Offline)';
+      }
+    }
+
+    const pendingEl = document.getElementById('pending-records-count');
+    if (pendingEl) {
+      const pCount = state.pendingOfflineCount || 0;
+      if (pCount === 0) {
+        pendingEl.className = 'badge badge-muted';
+        pendingEl.textContent = '0 pending';
+      } else {
+        pendingEl.className = 'badge badge-warn';
+        pendingEl.textContent = `${pCount} pending`;
+      }
+    }
+
+    const syncBadge = document.getElementById('sync-state-badge');
+    const syncTimeDesc = document.getElementById('last-sync-time-desc');
+    if (syncBadge) {
+      if (state.syncInProgress) {
+        syncBadge.className = 'badge badge-blue';
+        syncBadge.textContent = '🔄 Synchronizing…';
+      } else {
+        syncBadge.className = 'badge badge-muted';
+        syncBadge.textContent = 'Idle';
+      }
+    }
+    if (syncTimeDesc) {
+      if (state.lastSyncTs) {
+        syncTimeDesc.textContent = `Last sync: ${new Date(state.lastSyncTs).toLocaleTimeString()}`;
+      } else {
+        syncTimeDesc.textContent = 'Last sync: None yet';
+      }
+    }
+
     updateDiagnostics(state);
   }
 
@@ -385,7 +460,8 @@ const PAGES = (() => {
       { id: 'diag-rtc',   key: 'rtc_ok',   detailKey: 'rtc',     label: 'DS3231 RTC (I2C 8,9)'        },
       { id: 'diag-tank',  key: 'tank_ok',  detailKey: 'tank',    label: 'HC-SR04 Tank (T:5, E:6)'     },
       { id: 'diag-flow',  key: 'flow_ok',  detailKey: 'flow',    label: 'YF-S201B Flow (GPIO 15)'     },
-      { id: 'diag-relay', key: 'relay_ok', detailKey: 'relay',   label: 'Relay Driver (GPIO 7)'       },
+      { id: 'diag-relay', key: 'relay_ok', detailKey: 'relay',   label: 'Relay Driver (GPIO 18)'      },
+      { id: 'diag-sd',    key: 'sd_ok',    detailKey: 'sd',      label: 'MicroSD Storage (SPI)'       },
     ];
 
     sensors.forEach(({ id, key, detailKey }) => {

@@ -7,6 +7,10 @@
 #include <ArduinoJson.h>
 #include <RTClib.h>
 #include <Preferences.h>
+#include <SPI.h>
+#include <SD.h>
+#include <HTTPClient.h>
+#include <WiFiClient.h>
 #include "DHT.h"
 #include "secrets.h"
 
@@ -316,6 +320,500 @@ void saveHistory() {
 }
 
 // ============================================================
+// MICROSD OFFLINE STORAGE & AUTOMATIC DATABASE SYNCHRONIZATION
+// ============================================================
+
+#define SD_CS_PIN   10
+#define SD_MOSI_PIN 11
+#define SD_SCK_PIN  12
+#define SD_MISO_PIN 13
+
+#define SD_LOG_FILE  "/ios/offline_readings.jsonl"
+#define SD_SYNC_FILE "/ios/sync_pos.json"
+
+enum SdStatus {
+    SD_STATUS_UNKNOWN,
+    SD_STATUS_READY,
+    SD_STATUS_MISSING,
+    SD_STATUS_ERROR
+};
+
+SdStatus sdCardStatus = SD_STATUS_UNKNOWN;
+bool sdMounted = false;
+
+// Backend availability
+bool backendOnline = false;
+unsigned long lastBackendHealthCheck = 0;
+const unsigned long BACKEND_HEALTH_CHECK_INTERVAL_MS = 20000; // 20s non-blocking interval
+
+// Sync progress tracking
+uint32_t sdSyncedOffset = 0;     // byte offset in offline_readings.jsonl confirmed synced
+uint32_t sdSyncedCount = 0;      // total records confirmed synced
+uint32_t sdPendingCount = 0;     // number of records awaiting sync
+uint64_t lastSyncTs = 0;         // UTC timestamp (ms) of last successful sync
+bool syncInProgress = false;
+unsigned long lastSyncBatchAttempt = 0;
+const unsigned long SYNC_BATCH_INTERVAL_MS = 500; // delay between batches
+const size_t SYNC_BATCH_SIZE = 15;                // 15 records per batch
+
+// Sequence counter for deterministic unique record IDs
+static uint32_t recordSeq = 0;
+
+const char* getSdStatusString() {
+    switch (sdCardStatus) {
+        case SD_STATUS_READY:   return "Ready";
+        case SD_STATUS_MISSING: return "Missing";
+        case SD_STATUS_ERROR:   return "Error";
+        default:                return "Unknown";
+    }
+}
+
+void loadSyncProgress() {
+    sdSyncedOffset = 0;
+    sdSyncedCount  = 0;
+    lastSyncTs     = 0;
+
+    if (!sdMounted || !SD.exists(SD_SYNC_FILE)) {
+        return;
+    }
+
+    File f = SD.open(SD_SYNC_FILE, FILE_READ);
+    if (!f) return;
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, f);
+    f.close();
+
+    if (!err) {
+        sdSyncedOffset = doc["synced_offset"] | 0;
+        sdSyncedCount  = doc["synced_count"]  | 0;
+        lastSyncTs     = doc["last_sync_ts"]   | 0ULL;
+        Serial.printf("MicroSD: Loaded sync progress — offset: %u, syncedCount: %u\n", sdSyncedOffset, sdSyncedCount);
+    }
+}
+
+void saveSyncProgress() {
+    if (!sdMounted) return;
+
+    File f = SD.open(SD_SYNC_FILE, FILE_WRITE);
+    if (!f) {
+        Serial.println("ERROR: Could not open sync_pos.json for writing.");
+        return;
+    }
+
+    JsonDocument doc;
+    doc["synced_offset"] = sdSyncedOffset;
+    doc["synced_count"]  = sdSyncedCount;
+    doc["last_sync_ts"]   = lastSyncTs;
+
+    serializeJson(doc, f);
+    f.close();
+}
+
+void calculatePendingRecords() {
+    sdPendingCount = 0;
+    if (!sdMounted || !SD.exists(SD_LOG_FILE)) {
+        return;
+    }
+
+    File f = SD.open(SD_LOG_FILE, FILE_READ);
+    if (!f) return;
+
+    size_t fileSize = f.size();
+    if (sdSyncedOffset > fileSize) {
+        sdSyncedOffset = 0;
+    }
+
+    if (f.seek(sdSyncedOffset)) {
+        uint32_t count = 0;
+        uint8_t buf[256];
+        while (f.available()) {
+            int n = f.read(buf, sizeof(buf));
+            for (int i = 0; i < n; i++) {
+                if (buf[i] == '\n') count++;
+            }
+        }
+        sdPendingCount = count;
+    }
+    f.close();
+    Serial.printf("MicroSD: Found %u pending offline record(s) (file size: %u bytes)\n", sdPendingCount, (unsigned int)fileSize);
+}
+
+void initMicroSD() {
+    Serial.println("Initializing MicroSD SPI bus (CS: 10, MOSI: 11, SCK: 12, MISO: 13)...");
+    SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
+
+    // format_if_empty = false to prevent accidental card wipes
+    if (!SD.begin(SD_CS_PIN, SPI, 4000000, "/sd", 5, false)) {
+        uint8_t cardType = SD.cardType();
+        if (cardType == CARD_NONE) {
+            sdCardStatus = SD_STATUS_MISSING;
+            Serial.println("WARNING: MicroSD card not inserted (Missing). Continuing in RAM/LittleFS mode.");
+        } else {
+            sdCardStatus = SD_STATUS_ERROR;
+            Serial.println("ERROR: MicroSD mount or filesystem error. Continuing in RAM/LittleFS mode.");
+        }
+        sdMounted = false;
+        return;
+    }
+
+    uint8_t cardType = SD.cardType();
+    if (cardType == CARD_NONE) {
+        sdCardStatus = SD_STATUS_MISSING;
+        sdMounted = false;
+        Serial.println("WARNING: MicroSD card type is CARD_NONE.");
+        return;
+    }
+
+    sdCardStatus = SD_STATUS_READY;
+    sdMounted = true;
+    uint64_t cardSizeMB = SD.cardSize() / (1024 * 1024);
+    Serial.printf("MicroSD mounted successfully. Card Size: %llu MB\n", cardSizeMB);
+
+    if (!SD.exists("/ios")) {
+        SD.mkdir("/ios");
+    }
+
+    loadSyncProgress();
+    calculatePendingRecords();
+}
+
+bool checkBackendHealth() {
+    if (WiFi.status() != WL_CONNECTED) {
+        backendOnline = false;
+        return false;
+    }
+
+    WiFiClient client;
+    HTTPClient http;
+    http.setTimeout(1500); // 1.5s non-blocking timeout
+
+    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/health";
+    if (!http.begin(client, url)) {
+        backendOnline = false;
+        return false;
+    }
+
+    int httpCode = http.GET();
+    bool ok = false;
+    if (httpCode == HTTP_CODE_OK) {
+        String payload = http.getString();
+        if (payload.indexOf("\"ok\":true") >= 0 || payload.indexOf("\"ok\": true") >= 0) {
+            ok = true;
+        }
+    }
+    http.end();
+
+    if (ok != backendOnline) {
+        backendOnline = ok;
+        Serial.printf("Backend connection status changed: %s\n", backendOnline ? "ONLINE" : "OFFLINE");
+    }
+    return backendOnline;
+}
+
+bool logOfflineReading(float temp, float hum, float thi,
+                       float waterLevel, float flowRate, float waterUsed,
+                       bool pumpOn, const char* pumpReason) {
+    if (!sdMounted) {
+        Serial.println("WARNING: MicroSD not mounted — offline reading cannot be logged to SD.");
+        return false;
+    }
+
+    File f = SD.open(SD_LOG_FILE, FILE_APPEND);
+    if (!f) {
+        Serial.println("ERROR: Failed to open " SD_LOG_FILE " for appending.");
+        sdCardStatus = SD_STATUS_ERROR;
+        return false;
+    }
+
+    recordSeq++;
+    char recordId[36];
+    uint64_t tsMs = 0;
+    bool hasValidRtc = (rtcOk && rtcTimeValid);
+
+    if (hasValidRtc) {
+        DateTime nowUtc = rtc.now();
+        tsMs = (uint64_t)nowUtc.unixtime() * 1000ULL;
+        snprintf(recordId, sizeof(recordId), "esp32-%lu-%u", (unsigned long)nowUtc.unixtime(), recordSeq);
+    } else {
+        snprintf(recordId, sizeof(recordId), "esp32-up%lu-%u", millis(), recordSeq);
+    }
+
+    const char* thiLabel = "Normal";
+    if (!isnan(thi)) {
+        if (thi < thiNormalMax)       thiLabel = "Normal";
+        else if (thi <= thiStressMax) thiLabel = "Stressful";
+        else if (thi <= thiExtremeMax) thiLabel = "Extreme Heat";
+        else                           thiLabel = "Danger Zone";
+    }
+
+    JsonDocument doc;
+    doc["id"] = recordId;
+    if (hasValidRtc) {
+        doc["ts"] = tsMs;
+        doc["ts_ms"] = tsMs;
+        doc["rtc_valid"] = true;
+    } else {
+        doc["ts"] = nullptr;
+        doc["ts_ms"] = nullptr;
+        doc["rtc_valid"] = false;
+        doc["uptime_ms"] = millis();
+    }
+
+    if (!isnan(temp)) doc["temp"] = temp; else doc["temp"] = nullptr;
+    if (!isnan(hum))  doc["humidity"] = hum; else doc["humidity"] = nullptr;
+    if (!isnan(thi))  doc["thi"] = thi; else doc["thi"] = nullptr;
+    doc["thi_label"] = thiLabel;
+
+    if (waterLevel >= 0) {
+        doc["water_level"] = waterLevel;
+        doc["water_level_pct"] = waterLevel;
+    } else {
+        doc["water_level"] = nullptr;
+        doc["water_level_pct"] = nullptr;
+    }
+
+    doc["flow_lpm"] = flowRate;
+    doc["water_used"] = waterUsed;
+    doc["water_used_l"] = waterUsed;
+    doc["pump_on"] = pumpOn;
+    doc["pump_reason"] = pumpReason ? pumpReason : "idle";
+
+    serializeJson(doc, f);
+    f.print('\n');
+    f.flush();
+    f.close();
+
+    sdPendingCount++;
+    Serial.printf("MicroSD: Logged reading %s. Pending sync: %u\n", recordId, sdPendingCount);
+    return true;
+}
+
+bool sendTelemetryDirect(float temp, float hum, float thi,
+                         float waterLevel, float flowRate, float waterUsed,
+                         bool pumpOn, const char* pumpReason) {
+    if (WiFi.status() != WL_CONNECTED) {
+        backendOnline = false;
+        return false;
+    }
+
+    recordSeq++;
+    char recordId[36];
+    uint64_t tsMs = 0;
+    bool hasValidRtc = (rtcOk && rtcTimeValid);
+
+    if (hasValidRtc) {
+        DateTime nowUtc = rtc.now();
+        tsMs = (uint64_t)nowUtc.unixtime() * 1000ULL;
+        snprintf(recordId, sizeof(recordId), "esp32-%lu-%u", (unsigned long)nowUtc.unixtime(), recordSeq);
+    } else {
+        snprintf(recordId, sizeof(recordId), "esp32-up%lu-%u", millis(), recordSeq);
+    }
+
+    const char* thiLabel = "Normal";
+    if (!isnan(thi)) {
+        if (thi < thiNormalMax)       thiLabel = "Normal";
+        else if (thi <= thiStressMax) thiLabel = "Stressful";
+        else if (thi <= thiExtremeMax) thiLabel = "Extreme Heat";
+        else                           thiLabel = "Danger Zone";
+    }
+
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    JsonObject obj = arr.add<JsonObject>();
+    obj["id"] = recordId;
+    if (hasValidRtc) {
+        obj["ts"] = tsMs;
+        obj["ts_ms"] = tsMs;
+        obj["rtc_valid"] = true;
+    } else {
+        obj["ts"] = nullptr;
+        obj["ts_ms"] = nullptr;
+        obj["rtc_valid"] = false;
+        obj["uptime_ms"] = millis();
+    }
+    if (!isnan(temp)) obj["temp"] = temp; else obj["temp"] = nullptr;
+    if (!isnan(hum))  obj["humidity"] = hum; else obj["humidity"] = nullptr;
+    if (!isnan(thi))  obj["thi"] = thi; else obj["thi"] = nullptr;
+    obj["thi_label"] = thiLabel;
+    if (waterLevel >= 0) {
+        obj["water_level"] = waterLevel;
+        obj["water_level_pct"] = waterLevel;
+    } else {
+        obj["water_level"] = nullptr;
+        obj["water_level_pct"] = nullptr;
+    }
+    obj["flow_lpm"] = flowRate;
+    obj["water_used"] = waterUsed;
+    obj["water_used_l"] = waterUsed;
+    obj["pump_on"] = pumpOn;
+    obj["pump_reason"] = pumpReason ? pumpReason : "idle";
+
+    String payload;
+    serializeJson(arr, payload);
+
+    WiFiClient client;
+    HTTPClient http;
+    http.setTimeout(2500);
+    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/readings/batch";
+    if (!http.begin(client, url)) {
+        backendOnline = false;
+        return false;
+    }
+    http.addHeader("Content-Type", "application/json");
+
+    int code = http.POST(payload);
+    bool success = false;
+    if (code == 200 || code == 201) {
+        backendOnline = true;
+        if (hasValidRtc) lastSyncTs = tsMs;
+        else lastSyncTs = (uint64_t)millis();
+        success = true;
+    } else {
+        backendOnline = false;
+        Serial.printf("Direct telemetry push failed (HTTP %d).\n", code);
+    }
+    http.end();
+    return success;
+}
+
+void handleTelemetrySample(float temp, float hum, float thi,
+                           float waterLevel, float flowRate, float waterUsed,
+                           bool pumpOn, const char* pumpReason) {
+    if (backendOnline && sdPendingCount == 0) {
+        if (sendTelemetryDirect(temp, hum, thi, waterLevel, flowRate, waterUsed, pumpOn, pumpReason)) {
+            Serial.println("Telemetry: Sent live reading to backend database.");
+            return;
+        }
+    }
+
+    logOfflineReading(temp, hum, thi, waterLevel, flowRate, waterUsed, pumpOn, pumpReason);
+}
+
+void syncBatch() {
+    if (!backendOnline || !sdMounted || sdPendingCount == 0 || syncInProgress) {
+        return;
+    }
+
+    if (!SD.exists(SD_LOG_FILE)) {
+        sdPendingCount = 0;
+        return;
+    }
+
+    File f = SD.open(SD_LOG_FILE, FILE_READ);
+    if (!f) {
+        Serial.println("ERROR: Could not open offline_readings.jsonl for reading.");
+        return;
+    }
+
+    size_t fileSize = f.size();
+    if (sdSyncedOffset >= fileSize) {
+        f.close();
+        sdPendingCount = 0;
+        return;
+    }
+
+    if (!f.seek(sdSyncedOffset)) {
+        Serial.println("ERROR: Could not seek to sdSyncedOffset.");
+        f.close();
+        return;
+    }
+
+    syncInProgress = true;
+
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    size_t batchCount = 0;
+    uint32_t nextOffset = sdSyncedOffset;
+
+    while (f.available() && batchCount < SYNC_BATCH_SIZE) {
+        String line = f.readStringUntil('\n');
+        uint32_t currentPos = f.position();
+        line.trim();
+        if (line.length() == 0) {
+            nextOffset = currentPos;
+            continue;
+        }
+
+        JsonDocument lineDoc;
+        DeserializationError err = deserializeJson(lineDoc, line);
+        if (err) {
+            Serial.printf("WARNING: Corrupt JSONL record at offset %u, skipping line.\n", nextOffset);
+            nextOffset = currentPos;
+            continue;
+        }
+
+        arr.add(lineDoc.as<JsonObject>());
+        batchCount++;
+        nextOffset = currentPos;
+    }
+    f.close();
+
+    if (batchCount == 0) {
+        sdSyncedOffset = nextOffset;
+        saveSyncProgress();
+        sdPendingCount = 0;
+        syncInProgress = false;
+        return;
+    }
+
+    String payload;
+    serializeJson(arr, payload);
+
+    WiFiClient client;
+    HTTPClient http;
+    http.setTimeout(3500);
+    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/readings/batch";
+    if (!http.begin(client, url)) {
+        backendOnline = false;
+        syncInProgress = false;
+        return;
+    }
+    http.addHeader("Content-Type", "application/json");
+
+    int code = http.POST(payload);
+    if (code == 200 || code == 201) {
+        String resStr = http.getString();
+        JsonDocument resDoc;
+        DeserializationError resErr = deserializeJson(resDoc, resStr);
+
+        bool accepted = false;
+        if (!resErr && resDoc["ok"].as<bool>()) {
+            JsonArray acceptedArr = resDoc["accepted_ids"].as<JsonArray>();
+            if (acceptedArr.size() >= batchCount) {
+                accepted = true;
+            }
+        }
+
+        if (accepted) {
+            sdSyncedOffset = nextOffset;
+            sdSyncedCount += batchCount;
+            if (sdPendingCount >= batchCount) {
+                sdPendingCount -= batchCount;
+            } else {
+                sdPendingCount = 0;
+            }
+
+            if (rtcOk && rtcTimeValid) {
+                lastSyncTs = (uint64_t)rtc.now().unixtime() * 1000ULL;
+            } else {
+                lastSyncTs = (uint64_t)millis();
+            }
+
+            saveSyncProgress();
+            Serial.printf("SYNC SUCCESS: Uploaded %u records. Remaining: %u\n", (unsigned int)batchCount, (unsigned int)sdPendingCount);
+        } else {
+            Serial.println("WARNING: Batch response did not confirm all accepted IDs. Will retry.");
+        }
+    } else {
+        Serial.printf("SYNC FAILED: HTTP %d. Pausing sync.\n", code);
+        backendOnline = false;
+    }
+    http.end();
+    syncInProgress = false;
+}
+
+// ============================================================
 // PUMP CONTROL & RUNTIME LIMITS
 // ============================================================
 
@@ -331,8 +829,8 @@ unsigned long manualExpiryTime = 0;
 // Current pump reason string for /api/status and logging
 const char* currentPumpReason = "idle";
 
-// Type of the first currently-active schedule ("bath", "clean", or "")
-const char* activeScheduleType = "";
+// Type of the first currently-active schedule ("bath", "clean", "mist", or "")
+static char activeScheduleType[8] = "";
 
 // ============================================================
 // SCHEDULE ENGINE (LittleFS-backed, matches dashboard JSON shape)
@@ -428,11 +926,12 @@ bool isScheduleActiveNow(const Schedule &s) {
 bool anyScheduleActive() {
     for (uint8_t i = 0; i < scheduleCount; i++) {
         if (isScheduleActiveNow(schedules[i])) {
-            activeScheduleType = schedules[i].type;
+            strncpy(activeScheduleType, schedules[i].type, sizeof(activeScheduleType) - 1);
+            activeScheduleType[sizeof(activeScheduleType) - 1] = '\0';
             return true;
         }
     }
-    activeScheduleType = "";
+    activeScheduleType[0] = '\0';
     return false;
 }
 
@@ -519,9 +1018,10 @@ void loadSchedules() {
 
 // ── Persist all schedules to LittleFS (called only when data changes) ─────
 void saveSchedules() {
-    File f = LittleFS.open(SCHEDULES_FILE, "w");
+    const char *tmpFile = "/schedules.tmp";
+    File f = LittleFS.open(tmpFile, "w");
     if (!f) {
-        Serial.println("ERROR: Could not open schedules.json for writing.");
+        Serial.println("ERROR: Could not open /schedules.tmp for writing.");
         return;
     }
 
@@ -531,9 +1031,23 @@ void saveSchedules() {
         scheduleToJson(arr.add<JsonObject>(), schedules[i]);
     }
 
-    serializeJson(doc, f);
+    if (serializeJson(doc, f) == 0) {
+        Serial.println("ERROR: Failed to serialize schedules to /schedules.tmp");
+        f.close();
+        LittleFS.remove(tmpFile);
+        return;
+    }
     f.close();
-    Serial.println("schedules.json saved.");
+
+    // Atomic replacement: remove old file and rename tmp
+    if (LittleFS.exists(SCHEDULES_FILE)) {
+        LittleFS.remove(SCHEDULES_FILE);
+    }
+    if (LittleFS.rename(tmpFile, SCHEDULES_FILE)) {
+        Serial.println("schedules.json saved safely.");
+    } else {
+        Serial.println("ERROR: Failed to rename /schedules.tmp to /schedules.json");
+    }
 }
 
 // ============================================================
@@ -808,6 +1322,17 @@ void pumpOff()
     pumpIsOn = false;
 }
 
+// ── Bathing relay (BATH_RELAY_PIN = GPIO 7, active-LOW) ───────────────────
+void bathOn()
+{
+    digitalWrite(BATH_RELAY_PIN, RELAY_ON);
+}
+
+void bathOff()
+{
+    digitalWrite(BATH_RELAY_PIN, RELAY_OFF);
+}
+
 // ============================================================
 // PUMP LOGIC ENGINE (called every loop)
 // pumpOn = waterOk AND (thiTrigger OR scheduled OR manual)
@@ -827,7 +1352,13 @@ void updatePump()
     bool manual = manualActive;
 
     // 2. Scheduled: evaluate all stored schedules against current RTC local time
+    //    anyScheduleActive() writes the matched type into activeScheduleType[].
     bool scheduled = anyScheduleActive();
+
+    // Classify what kind of scheduled operation is active
+    bool schedMist  = scheduled && (strcmp(activeScheduleType, "mist")  == 0);
+    bool schedBath  = scheduled && (strcmp(activeScheduleType, "bath")  == 0);
+    bool schedClean = scheduled && (strcmp(activeScheduleType, "clean") == 0);
 
     // 3. THI trigger with mist on/off cycle
     bool thiCondition = (!isnan(lastThi) && lastThi >= thiThreshold);
@@ -874,54 +1405,61 @@ void updatePump()
     bool thiTrigger = mistInOnPhase;
 
     // 4. Water level gate: waterOk = water level >= minWaterLevelPct
-    bool waterOk = (lastWaterLevel >= minWaterLevelPct);
+    //    If sensor reads -1 (error), treat as 0% (no water) to prevent unsafe operation.
+    float effectiveLevel = (lastWaterLevel >= 0) ? lastWaterLevel : 0.0f;
+    bool waterOk = (effectiveLevel >= minWaterLevelPct);
 
-    // 5. Single decision formula:
-    // pumpOn = waterOk AND (thiTrigger OR scheduled OR manual)
-    bool shouldPump = waterOk && (thiTrigger || scheduled || manual);
+    // 5. Misting relay (GPIO 18): THI cooling, mist schedule, or manual override
+    bool shouldMist = waterOk && (thiTrigger || schedMist || manual);
 
-    // 6. Track state reason
-    if (shouldPump)
+    // 6. Bathing relay (GPIO 7): bath schedule only (water safety gate applies)
+    bool shouldBath = waterOk && schedBath;
+
+    // 7. Cleaning (no dedicated hardware relay yet):
+    //    We log the intent but do not activate any other relay to avoid incorrect
+    //    operation. If a hardware output is wired in the future, add it here.
+    // (schedClean is tracked in currentPumpReason but drives nothing)
+
+    // 8. Overall "something is pumping" for status / data logging
+    bool shouldPump = shouldMist || shouldBath;
+
+    // 9. Track state reason (priority: manual > bath > mist_sched > thi > clean > low_water > idle)
+    if (shouldMist && manual)
     {
-        if (manual)
-        {
-            currentPumpReason = "manual";
-        }
-        else if (scheduled)
-        {
-            currentPumpReason = "scheduled";
-        }
-        else if (thiTrigger)
-        {
-            currentPumpReason = "thi_cooling";
-        }
-        else
-        {
-            currentPumpReason = "active";
-        }
+        currentPumpReason = "manual";
+    }
+    else if (shouldBath)
+    {
+        currentPumpReason = "scheduled";
+    }
+    else if (shouldMist && schedMist)
+    {
+        currentPumpReason = "scheduled";
+    }
+    else if (shouldMist && thiTrigger)
+    {
+        currentPumpReason = "thi_cooling";
+    }
+    else if (schedClean)
+    {
+        // Clean schedule is active but has no hardware relay yet
+        currentPumpReason = "idle";
+    }
+    else if (!waterOk && (manual || scheduled || thiTrigger || thiCondition))
+    {
+        currentPumpReason = "low_water";
+    }
+    else if (thiCondition && !thiTrigger)
+    {
+        currentPumpReason = "mist_pause";
     }
     else
     {
-        if (!waterOk && (manual || scheduled || thiTrigger || thiCondition))
-        {
-            currentPumpReason = "low_water";
-        }
-        else if (!waterOk)
-        {
-            currentPumpReason = "low_water";
-        }
-        else if (thiCondition && !thiTrigger)
-        {
-            currentPumpReason = "mist_pause";
-        }
-        else
-        {
-            currentPumpReason = "idle";
-        }
+        currentPumpReason = "idle";
     }
 
-    // 7. Apply relay state
-    if (shouldPump)
+    // 10. Apply misting relay state (GPIO 18)
+    if (shouldMist)
     {
         pumpOn();
     }
@@ -929,6 +1467,20 @@ void updatePump()
     {
         pumpOff();
     }
+
+    // 11. Apply bathing relay state (GPIO 7)
+    if (shouldBath)
+    {
+        bathOn();
+    }
+    else
+    {
+        bathOff();
+    }
+
+    // pumpIsOn reflects the misting relay (used in legacy status/logging)
+    // bathActive / cleanActive are derived in /api/status from activeScheduleType
+    (void)shouldPump; // suppress unused warning if needed
 }
 
 // ============================================================
@@ -1063,13 +1615,25 @@ void handleStatus(AsyncWebServerRequest *request)
     doc["pumpReason"] = currentPumpReason;
     doc["reason"] = currentPumpReason;
     doc["relayState"] = pumpIsOn;
-    doc["mistActive"] = (strcmp(currentPumpReason, "thi_cooling") == 0);
+    doc["mistActive"] = (strcmp(currentPumpReason, "thi_cooling") == 0) || 
+                        ((strcmp(currentPumpReason, "scheduled") == 0) && (strcmp(activeScheduleType, "mist") == 0)) ||
+                        (manualActive);
     doc["bathActive"]  = (strcmp(currentPumpReason, "scheduled") == 0) && (strcmp(activeScheduleType, "bath")  == 0);
-    doc["cleanActive"] = (strcmp(currentPumpReason, "scheduled") == 0) && (strcmp(activeScheduleType, "clean") == 0);
+    doc["cleanActive"] = (strcmp(activeScheduleType, "clean") == 0);
     doc["manualPumpActive"] = manualActive;
-    doc["lastPumpTest"] = nullptr;
     doc["threshold"] = tempThreshold;
     doc["thiThreshold"] = thiThreshold;
+
+    // MicroSD and Backend Sync Status
+    doc["sdStatus"] = getSdStatusString();
+    doc["backendOnline"] = backendOnline;
+    doc["pendingOfflineCount"] = sdPendingCount;
+    if (lastSyncTs > 0) {
+        doc["lastSyncTs"] = (unsigned long long)lastSyncTs;
+    } else {
+        doc["lastSyncTs"] = nullptr;
+    }
+    doc["syncInProgress"] = syncInProgress;
 
     String json;
     serializeJson(doc, json);
@@ -1391,13 +1955,46 @@ void setupAuxRoutes(AsyncWebServer &srv) {
         doc["tank_ok"]  = (lastWaterLevel >= 0);
         doc["flow_ok"]  = true;
         doc["relay_ok"] = true;
+        doc["sd_ok"]    = (sdCardStatus == SD_STATUS_READY);
         JsonObject details = doc["details"].to<JsonObject>();
         details["dht"]   = "DHT22 on GPIO 4";
         details["rtc"]   = rtcOk ? "DS3231 on GPIO 8/9" : "DS3231 Not Detected";
         details["tank"]  = "HC-SR04 on GPIO 16/17";
         details["flow"]  = "YF-S201 on GPIO 5";
         details["relay"] = "Relay on GPIO 18";
+        details["sd"]    = (sdCardStatus == SD_STATUS_READY) ? "MicroSD SPI (CS:10, MOSI:11, SCK:12, MISO:13)" :
+                           (sdCardStatus == SD_STATUS_MISSING) ? "MicroSD Card Not Inserted" : "MicroSD Card Init/Mount Error";
 
+        String json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json);
+    });
+
+    // GET /api/sd/status
+    srv.on("/api/sd/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        doc["sdStatus"] = getSdStatusString();
+        doc["mounted"] = sdMounted;
+        doc["backendOnline"] = backendOnline;
+        doc["pendingOfflineCount"] = sdPendingCount;
+        doc["syncedCount"] = sdSyncedCount;
+        doc["lastSyncTs"] = lastSyncTs > 0 ? (unsigned long long)lastSyncTs : 0;
+        doc["syncInProgress"] = syncInProgress;
+        String json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json);
+    });
+
+    // GET /api/offline/status (mirrors backend offline status endpoint)
+    srv.on("/api/offline/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        doc["ok"] = true;
+        doc["sdStatus"] = getSdStatusString();
+        doc["backendOnline"] = backendOnline;
+        doc["pendingOfflineCount"] = sdPendingCount;
+        doc["totalSynced"] = sdSyncedCount;
+        doc["lastSyncTs"] = lastSyncTs > 0 ? (unsigned long long)lastSyncTs : 0;
+        doc["syncInProgress"] = syncInProgress;
         String json;
         serializeJson(doc, json);
         request->send(200, "application/json", json);
@@ -1621,25 +2218,37 @@ void setupWebServer()
 
 float readDistance()
 {
+    // Clean LOW state before trigger pulse
     digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(2);
+    delayMicroseconds(4);
 
+    // 10us trigger pulse to start ranging
     digitalWrite(TRIG_PIN, HIGH);
     delayMicroseconds(10);
-
     digitalWrite(TRIG_PIN, LOW);
 
-    unsigned long duration =
-        pulseIn(ECHO_PIN, HIGH, 30000);
+    // Timeout: 30000us (~5.1 meters max range)
+    unsigned long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+
+    // If initial pulse returned 0, do a single quick retry after 1ms
+    if (duration == 0)
+    {
+        delayMicroseconds(1000);
+        digitalWrite(TRIG_PIN, LOW);
+        delayMicroseconds(4);
+        digitalWrite(TRIG_PIN, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(TRIG_PIN, LOW);
+        duration = pulseIn(ECHO_PIN, HIGH, 30000);
+    }
 
     if (duration == 0)
     {
         return -1.0;
     }
 
-    float distance =
-        duration * 0.0343 / 2.0;
-
+    // Speed of sound = 343 m/s = 0.0343 cm/us (divided by 2 for round-trip)
+    float distance = (float)duration * 0.0343f / 2.0f;
     return distance;
 }
 
@@ -1649,26 +2258,28 @@ float readDistance()
 
 float calculateWaterLevel(float distance)
 {
-    if (distance < 0)
+    if (distance < 0.0f)
     {
-        return -1.0;
+        return -1.0f;
     }
 
-    // Empty
+    // Empty or sensor placed higher than empty mark
     if (distance >= TANK_EMPTY_CM)
     {
-        return 0.0;
+        return 0.0f;
     }
 
-    // Full
+    // Full or closer than full mark
     if (distance <= TANK_FULL_CM)
     {
-        return 100.0;
+        return 100.0f;
     }
 
-    float level =
-        ((TANK_EMPTY_CM - distance) /
-         (TANK_EMPTY_CM - TANK_FULL_CM)) * 100.0;
+    float level = ((TANK_EMPTY_CM - distance) / (TANK_EMPTY_CM - TANK_FULL_CM)) * 100.0f;
+
+    // Strict clamping to 0.0% - 100.0%
+    if (level < 0.0f) level = 0.0f;
+    if (level > 100.0f) level = 100.0f;
 
     return level;
 }
@@ -1809,6 +2420,13 @@ void printStatusToSerial()
     Serial.print(currentPumpReason);
     Serial.println(")");
 
+    Serial.print("MICROSD: ");
+    Serial.print(getSdStatusString());
+    Serial.print(" | PENDING SYNC: ");
+    Serial.println(sdPendingCount);
+    Serial.print("BACKEND: ");
+    Serial.println(backendOnline ? "ONLINE" : "OFFLINE");
+
     Serial.println("------------------------------");
 }
 
@@ -1907,10 +2525,21 @@ void setup()
     }
 
     // --------------------------------------------------------
+    // MICROSD STORAGE (6-pin SPI: CS=10, MOSI=11, SCK=12, MISO=13)
+    // --------------------------------------------------------
+
+    initMicroSD();
+
+    // --------------------------------------------------------
     // WIFI
     // --------------------------------------------------------
 
     setupWiFi();
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        checkBackendHealth();
+    }
 
     // --------------------------------------------------------
     // HTTP SERVER
@@ -1933,6 +2562,30 @@ void loop()
     // --------------------------------------------------------
 
     reconnectWiFi();
+
+    // --------------------------------------------------------
+    // BACKEND SERVER HEALTH CHECK (non-blocking 20s interval)
+    // --------------------------------------------------------
+
+    if (WiFi.status() == WL_CONNECTED && (millis() - lastBackendHealthCheck >= BACKEND_HEALTH_CHECK_INTERVAL_MS))
+    {
+        lastBackendHealthCheck = millis();
+        checkBackendHealth();
+    }
+
+    // --------------------------------------------------------
+    // AUTOMATIC MICROSD BATCH SYNCHRONIZATION
+    // Drains pending offline readings to backend in small batches
+    // --------------------------------------------------------
+
+    if (backendOnline && sdMounted && sdPendingCount > 0 && !syncInProgress)
+    {
+        if (millis() - lastSyncBatchAttempt >= SYNC_BATCH_INTERVAL_MS)
+        {
+            lastSyncBatchAttempt = millis();
+            syncBatch();
+        }
+    }
 
     // --------------------------------------------------------
     // CALCULATE WATER FLOW (YF-S201)
@@ -1980,7 +2633,7 @@ void loop()
     }
 
     // --------------------------------------------------------
-    // READINGS HISTORY BUFFER & LITTLEFS FLUSH
+    // READINGS HISTORY BUFFER, TELEMETRY PUSH & MICROSD OFFLINE LOG
     // --------------------------------------------------------
 
     // Sample into RAM ring buffer every 5 minutes (or immediately on first valid reading)
@@ -1990,6 +2643,7 @@ void loop()
         {
             lastHistorySample = millis();
             addHistorySample(lastTemp, lastHum, lastThi);
+            handleTelemetrySample(lastTemp, lastHum, lastThi, lastWaterLevel, flowRateLPM, totalWaterUsedL, pumpIsOn, currentPumpReason);
         }
     }
 

@@ -130,6 +130,7 @@
     dashboard: 'Dashboard',
     env:       'Environmental Data',
     water:     'Water Management',
+    mist:      'Misting Schedule',
     bath:      'Bathing Schedule',
     clean:     'Cleaning Schedule',
     auto:      'Automatic Systems',

@@ -742,13 +742,13 @@ app.get('/api/schedules', (req, res) => {
 
 
   if (
-    !['bath', 'clean']
+    !['bath', 'clean', 'mist']
       .includes(type)
   ) {
 
     return res.status(400).json({
       error:
-        'type must be bath or clean'
+        'type must be bath, clean, or mist'
     });
   }
 
@@ -775,13 +775,13 @@ app.post('/api/schedules', (req, res) => {
 
 
   if (
-    !['bath', 'clean']
+    !['bath', 'clean', 'mist']
       .includes(type)
   ) {
 
     return res.status(400).json({
       error:
-        'type must be bath or clean'
+        'type must be bath, clean, or mist'
     });
   }
 
@@ -810,8 +810,9 @@ app.post('/api/schedules', (req, res) => {
     });
 
 
+  const typeLabel = type === 'bath' ? 'Bath' : type === 'clean' ? 'Clean' : 'Mist';
   db.logActivity(
-    type === 'bath' ? 'Bath' : 'Clean',
+    typeLabel,
     `New ${type} schedule created: "${row.label}" at ${row.time} for ${row.duration} min on ${JSON.parse(row.days).join(', ')}`
   );
 
@@ -917,7 +918,8 @@ app.get('/api/schedules/debug', (req, res) => {
     today,
     nowMin,
     bath: db.listSchedules('bath').map(annotate),
-    clean: db.listSchedules('clean').map(annotate)
+    clean: db.listSchedules('clean').map(annotate),
+    mist: db.listSchedules('mist').map(annotate)
   });
 });
 
@@ -1433,6 +1435,78 @@ app.get('/api/diagnostics', (req, res) => {
         'No diagnostics recorded yet'
     }
   );
+});
+
+
+/* ============================================================
+   OFFLINE READINGS BATCH SYNC
+   POST /api/readings/batch
+   Accepts an array of offline JSONL records from the ESP32 SD card.
+   Uses INSERT OR IGNORE on stable ESP32-assigned IDs to prevent duplicates.
+   Also mirrors accepted records into readings + water_readings tables
+   so they appear in history charts.
+   ============================================================ */
+
+app.post('/api/readings/batch', (req, res) => {
+
+  const records = req.body;
+
+  if (!Array.isArray(records)) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Expected a JSON array of readings'
+    });
+  }
+
+  if (records.length === 0) {
+    return res.status(200).json({
+      ok: true,
+      inserted: 0,
+      skipped: 0,
+      failed: 0,
+      accepted_ids: []
+    });
+  }
+
+  if (records.length > 100) {
+    return res.status(400).json({
+      ok: false,
+      error: 'Batch size exceeds maximum of 100 records'
+    });
+  }
+
+  const result = db.insertOfflineBatch(records);
+
+  if (result.inserted > 0) {
+    db.logActivity(
+      'Info',
+      `Offline sync: ${result.inserted} record(s) inserted, ${result.skipped} skipped (duplicate/invalid)`
+    );
+  }
+
+  res.status(result.inserted > 0 ? 201 : 200).json({
+    ok: true,
+    inserted: result.inserted,
+    skipped:  result.skipped,
+    failed:   result.failed || 0,
+    accepted_ids: result.accepted_ids
+  });
+});
+
+
+/* ============================================================
+   OFFLINE SYNC STATUS
+   GET /api/offline/status
+   Returns current pending count and last sync timestamp.
+   ============================================================ */
+
+app.get('/api/offline/status', (req, res) => {
+
+  res.json({
+    ok:           true,
+    totalSynced:  db.pendingOfflineCount(),
+    lastSyncTs:   db.latestSyncTs()
+  });
 });
 
 

@@ -56,6 +56,7 @@
           <li><button class="nav-btn active" data-page="dashboard"><span>📊</span> Dashboard</button></li>
           <li><button class="nav-btn" data-page="env"><span>🌡️</span> Environmental</button></li>
           <li><button class="nav-btn" data-page="water"><span>💧</span> Water Mgmt</button></li>
+          <li><button class="nav-btn" data-page="mist"><span>🌫️</span> Misting Schedule</button></li>
           <li><button class="nav-btn" data-page="bath"><span>🚿</span> Bathing Schedule</button></li>
           <li><button class="nav-btn" data-page="clean"><span>🧹</span> Cleaning Schedule</button></li>
           <li><button class="nav-btn" data-page="auto"><span>⚙️</span> Auto Systems</button></li>
@@ -300,6 +301,15 @@
           </div>
         </section>
 
+        <!-- MISTING SCHEDULE -->
+        <section id="page-mist" class="page">
+          <div class="sched-topbar mb-20">
+            <span id="mist-count" class="muted small">— schedules active</span>
+            <button class="btn btn-primary" id="btn-add-mist">+ Add Schedule</button>
+          </div>
+          <div class="sched-list" id="mist-list"></div>
+        </section>
+
         <!-- BATHING SCHEDULE -->
         <section id="page-bath" class="page">
           <div class="sched-topbar mb-20">
@@ -345,6 +355,51 @@
             </div>
             <p id="time-sync-status" class="muted smaller mt-8 hidden" style="color:var(--primary)">Clock synchronized successfully.</p>
           </div>
+
+          <!-- MicroSD Storage & Backend Synchronization Card -->
+          <div class="card mb-20">
+            <div class="field-label mb-14">MicroSD Offline Storage &amp; Automatic Synchronization</div>
+            <p class="muted small mb-14">Persistent local logging to 6-pin SPI MicroSD card when Windows backend is unreachable, with automatic batch synchronization upon reconnection.</p>
+            <div class="grid-2 mb-10">
+              <div class="sys-list">
+                <div class="sys-row">
+                  <span class="sys-icon">💾</span>
+                  <div class="sys-info">
+                    <div class="sys-name">MicroSD Card</div>
+                    <div class="sys-desc" id="sd-meta">SPI (CS: 10, MOSI: 11, SCK: 12, MISO: 13)</div>
+                  </div>
+                  <span id="sd-status-badge" class="badge badge-muted">Checking…</span>
+                </div>
+                <div class="sys-row">
+                  <span class="sys-icon">💻</span>
+                  <div class="sys-info">
+                    <div class="sys-name">Backend Database</div>
+                    <div class="sys-desc" id="backend-status-desc">Windows Laptop SQLite</div>
+                  </div>
+                  <span id="backend-status-badge" class="badge badge-muted">Checking…</span>
+                </div>
+              </div>
+              <div class="sys-list">
+                <div class="sys-row">
+                  <span class="sys-icon">📋</span>
+                  <div class="sys-info">
+                    <div class="sys-name">Pending Offline Records</div>
+                    <div class="sys-desc">Unsynchronized readings on MicroSD</div>
+                  </div>
+                  <span id="pending-records-count" class="badge badge-blue">0 pending</span>
+                </div>
+                <div class="sys-row">
+                  <span class="sys-icon">🔄</span>
+                  <div class="sys-info">
+                    <div class="sys-name">Sync Status</div>
+                    <div class="sys-desc" id="last-sync-time-desc">Last sync: None yet</div>
+                  </div>
+                  <span id="sync-state-badge" class="badge badge-muted">Idle</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="card mb-20">
             <div class="field-label mb-14">Mist Cooling Temperature Threshold</div>
             <div class="threshold-row">
@@ -386,7 +441,7 @@
                   <div class="pump-indicator-icon" id="pump-indicator-icon">⚡</div>
                   <div>
                     <div class="pump-title" id="pump-current-title">Relay / Pump Status: <span id="pump-relay-text" class="color-blue">Standby (OFF)</span></div>
-                    <div class="pump-meta muted small" id="pump-relay-meta">GPIO 7 (Active-LOW) · Controls Barn Misting &amp; Bathing Water Pump</div>
+                    <div class="pump-meta muted small" id="pump-relay-meta">GPIO 18 (Misting) &amp; GPIO 7 (Bathing) · Active-LOW Relays</div>
                   </div>
                 </div>
                 <div class="pump-badge-wrap">
@@ -448,8 +503,16 @@
               <div class="sensor-diag-item" id="diag-relay">
                 <div class="sensor-diag-icon">⚡</div>
                 <div class="sensor-diag-info">
-                  <div class="sensor-diag-name">Relay &amp; Water Pump (GPIO 7)</div>
+                  <div class="sensor-diag-name">Relay &amp; Water Pump (GPIO 18)</div>
                   <div class="sensor-diag-desc muted small">Misting &amp; Pump Switch</div>
+                </div>
+                <span class="badge badge-muted diag-badge">Checking…</span>
+              </div>
+              <div class="sensor-diag-item" id="diag-sd">
+                <div class="sensor-diag-icon">💾</div>
+                <div class="sensor-diag-info">
+                  <div class="sensor-diag-name">MicroSD SPI Storage</div>
+                  <div class="sensor-diag-desc muted small">Offline JSONL Log (GPIO 10,11,12,13)</div>
                 </div>
                 <span class="badge badge-muted diag-badge">Checking…</span>
               </div>

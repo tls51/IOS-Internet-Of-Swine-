@@ -734,3 +734,135 @@ Done:
 - Built cleanly in release mode: SUCCESS (24.52 s).
 - RAM: 17.1% (used 56,120 bytes from 327,680 bytes — +0 bytes vs Part 7; auth is pure logic, no heap).
 - Flash: 26.9% (used 900,609 bytes from 3,342,336 bytes — +2,164 bytes for auth helpers and CORS/404 handlers).
+
+### 2026-10-13 — Part 9 (MicroSD Offline Storage & Automatic Backend Database Synchronization)
+
+**Goal**: Integrate a 6-pin SPI MicroSD card module (CS: GPIO 10, MOSI: GPIO 11, SCK: GPIO 12, MISO: GPIO 13) for persistent offline data logging whenever the ESP32-S3 cannot reach the Windows laptop backend server. Automatically synchronize pending offline readings with the Node.js/Express SQLite database once the server reconnects, with zero data loss, duplicate prevention, and zero disruption to real-time pump controls.
+
+**Hardware & SPI Wiring**:
+- Module: 6-pin SPI MicroSD breakout module.
+- ESP32-S3 GPIO Mapping:
+  - `CS`: GPIO 10 (Chip Select)
+  - `MOSI`: GPIO 11 (SPI Data Output)
+  - `SCK`: GPIO 12 (SPI Clock)
+  - `MISO`: GPIO 13 (SPI Data Input)
+  - `VCC`: 3.3V or 5V (ESP32-S3 GPIO pins are 3.3V; modules with onboard AMS1117-3.3V regulators and level shifters can take 5V, while bare 3.3V breakout boards must be connected to 3.3V).
+  - `GND`: Common ground.
+- SPI initialization: `SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN)`.
+- Mount options: `SD.begin(SD_CS_PIN, SPI, 4000000, "/sd", 5, false)`. `format_if_empty` is strictly `false` to prevent accidental card formatting.
+
+**Firmware (`main.cpp`)**:
+- **Offline / Online State Machine**:
+  - `backendOnline` flag determined via non-blocking health check (`GET http://<BACKEND_HOST>:<PORT>/api/health`) every 20 seconds (`BACKEND_HEALTH_CHECK_INTERVAL_MS = 20000`).
+  - Fast 1,500 ms connection timeout avoids blocking sensor sampling or pump control loops.
+  - If Wi-Fi is disconnected or health check fails, `backendOnline` transitions to `false`.
+- **MicroSD Data Logging (`/ios/offline_readings.jsonl`)**:
+  - Automatically triggered on the 5-minute telemetry interval (`handleTelemetrySample()`) whenever offline or whenever unsynchronized pending records exist.
+  - Appends independent, single-line JSONL records containing:
+    - Stable record ID: `esp32-<epoch>-<seq>`
+    - Original DS3231 UTC timestamp: `ts` / `ts_ms` (milliseconds)
+    - Validated RTC status: `rtc_valid: true/false`. If RTC is invalid/lost power, `ts` is explicitly `null` (not fabricated uptime) and `uptime_ms` is recorded.
+    - Sensor data: `temp` (°C), `humidity` (% RH), `thi` (swine index), `thi_label` (Normal, Stressful, Extreme Heat, Danger Zone)
+    - Water management: `water_level` / `water_level_pct` (%), `flow_lpm` (L/min), `water_used` / `water_used_l` (L)
+    - Pump control: `pump_on` (boolean), `pump_reason` (thi_cooling, manual, scheduled, low_water, mist_pause, idle).
+  - File is append-only; full file is never loaded into RAM.
+- **Crash-Resilient Progress Tracking (`/ios/sync_pos.json`)**:
+  - Tracks confirmed synchronized byte offset (`synced_offset`), total synced records (`synced_count`), and last sync timestamp (`last_sync_ts`).
+  - Saved to SD card only after server acknowledgment.
+  - Boot recovery: `calculatePendingRecords()` seeks to `synced_offset` and counts remaining `\n` to end of file, accurately calculating `sdPendingCount` without loading records into memory.
+- **Automatic Batch Synchronization (`syncBatch()`)**:
+  - When `backendOnline == true && sdPendingCount > 0`:
+    - Reads small batch of 15 records (`SYNC_BATCH_SIZE = 15`) from `sdSyncedOffset`.
+    - Dispatches HTTP `POST /api/readings/batch` with 3,500 ms timeout.
+    - Runs once every 500 ms (`SYNC_BATCH_INTERVAL_MS`), yielding CPU to main loop so pump control and sensor sampling never stall.
+    - On HTTP 200/201 response with matching `accepted_ids`: advances `sdSyncedOffset`, decrements `sdPendingCount`, updates `lastSyncTs`, and saves `sync_pos.json`.
+    - On failure: marks `backendOnline = false` and pauses sync without advancing offset.
+- **Diagnostics & Status Endpoints**:
+  - Enhanced `/api/status`: includes `sdStatus` ("Ready" | "Missing" | "Error"), `backendOnline`, `pendingOfflineCount`, `lastSyncTs`, `syncInProgress`.
+  - Enhanced `/api/diagnostics`: includes `sd_ok` and hardware details.
+  - Added `/api/sd/status` and `/api/offline/status`.
+  - Serial monitor output periodically logs MicroSD state, pending queue count, and backend online/offline mode.
+
+**Backend (`ios-backend/src/db.js` & `src/server.js`)**:
+- `POST /api/readings/batch`: accepts up to 100 JSON records within a single SQLite transaction.
+- `insertOfflineBatch(records)`:
+  - Uses `INSERT OR IGNORE INTO offline_readings` keyed by stable `id`.
+  - Auto-mirrors valid records into `readings` and `water_readings` tables so historical trend charts reflect offline periods.
+  - Idempotency & Retry Safety: duplicate records from retransmissions (when acknowledgments are dropped) are acknowledged in `accepted_ids` without inserting duplicate rows.
+  - Accepts both field naming variants (`water_level` / `water_level_pct`, `water_used` / `water_used_l`).
+- `GET /api/offline/status`: returns total synced records and latest sync timestamp.
+- `GET /api/health`: lightweight ping returning `{"ok":true,"time":...}`.
+
+**Dashboard Frontend**:
+- Topbar & Sidebar: connection dot and label reflect both ESP32 connectivity and backend status:
+  - Green: "Online · Backend Connected"
+  - Amber: "Offline Mode · Backend Unreachable" (local AP active, monitoring continuing)
+  - Red: "Disconnected · Device Unreachable"
+- Automation page (`#page-auto`): added dedicated "MicroSD Offline Storage & Automatic Synchronization" status card:
+  - MicroSD Card: Ready (Mounted) / Missing / Error badge
+  - Backend Database: Online (Connected) / Offline (Unreachable) badge
+  - Pending Offline Records: realtime counter (e.g. "0 pending" or "N pending")
+  - Sync Status: "Idle" or "🔄 Synchronizing…" with timestamp of last successful sync.
+- Diagnostics grid: added MicroSD SPI Storage status item.
+
+**`pio run` result**:
+- Built cleanly in release mode: SUCCESS (32.30 s).
+- RAM: 17.6% (used 57,732 bytes of 327,680 bytes — +1,612 bytes for SD/SPI + HTTPClient).
+- Flash: 29.8% (used 997,477 bytes of 3,342,336 bytes — +96,868 bytes for SPI, SD, and HTTPClient libraries).
+
+---
+
+### Part 10: Schedule and Configuration Saving Fixes, Misting Schedules, and Water-Level Sensor Enhancements
+
+#### 1. Diagnosis & Fixes for "Failed to Save"
+- **Root Cause 1 (Backend SQLite CHECK constraint)**: The `schedules` table schema originally had `CHECK(type IN ('bath','clean'))`. Any attempt to create or query a schedule outside of these two types rejected the operation.
+  - *Fix*: In [db.js](file:///c:/Users/vinch/IOS-Internet-Of-Swine-/ios-backend/src/db.js), extended the table schema to `CHECK(type IN ('bath','clean','mist'))` and implemented an automatic startup table migration `migrateSchedulesType()` using `ALTER TABLE ... RENAME` + recreation to preserve existing user schedules without database reset.
+  - *Fix*: In [server.js](file:///c:/Users/vinch/IOS-Internet-Of-Swine-/ios-backend/src/server.js), updated `GET /api/schedules`, `POST /api/schedules`, and `GET /api/schedules/debug` type validation from `['bath','clean']` to `['bath','clean','mist']`.
+- **Root Cause 2 (Dashboard DOM Mapping)**: In `schedule.js`, `reloadList()` had hardcoded element lookups assuming only `bath` and `clean`. Creating a schedule of another type failed silently or threw errors when updating count badges.
+  - *Fix*: Added dynamic ID mapping in [schedule.js](file:///c:/Users/vinch/IOS-Internet-Of-Swine-/dashboard/js/schedule.js) supporting `mist`, `bath`, and `clean` with dedicated toast alerts, icons (`🌫️`, `🚿`, `🧹`), and list views.
+- **Root Cause 3 (Corruptible LittleFS File Writes on ESP32)**: Direct writes to `/schedules.json` could leave zero-byte or corrupt files if interrupted by a power cut.
+  - *Fix*: In [main.cpp](file:///c:/Users/vinch/IOS-Internet-Of-Swine-/arduino/ios_sensor_node/ios-sensor-node/src/main.cpp), changed `saveSchedules()` to use atomic file replacement: write to `/schedules.tmp`, verify serialization, close, remove old file, and rename to `/schedules.json`.
+
+#### 2. Multi-Relay Operation Logic
+- **Misting (GPIO 18, Active-LOW)**:
+  - Activates when THI exceeds threshold (`thi_cooling`), during active misting schedules (`type: "mist"`), or via manual pump override.
+  - Subject to water level gate: automatically shuts off when water level is below `minWaterLevelPct`.
+- **Bathing (GPIO 7, Active-LOW)**:
+  - Activates strictly during scheduled bathing windows (`type: "bath"`).
+  - Controlled by dedicated `bathOn()` and `bathOff()` routines on `BATH_RELAY_PIN` (GPIO 7).
+  - Subject to water level gate to prevent dry pump running.
+- **Cleaning (No Physical Hardware Assigned Yet)**:
+  - Schedules can be created, edited, toggled, and persisted safely in LittleFS and SQLite.
+  - The firmware tracks active cleaning periods and logs them, but intentionally leaves both GPIO 18 and GPIO 7 in their OFF states to prevent cross-activating the wrong line.
+- **Relay Safety & Priority**:
+  - `updatePump()` evaluates operations independently rather than collapsing them into a single relay.
+  - Reason strings in `/api/status`: `manual` > `scheduled` > `thi_cooling` > `low_water` > `mist_pause` > `idle`.
+
+#### 3. HC-SR04 Water-Level Sensor Repairs
+- **Root Cause for `null`**: In the API, `waterLevel` was serialized as `null` whenever `lastWaterLevel < 0.0`. When `pulseIn()` timed out or returned `0` (no echo pulse received within 30ms), `readDistance()` immediately returned `-1.0`, keeping `lastWaterLevel` at `-1.0` indefinitely.
+- **Software Enhancements**:
+  - In [main.cpp](file:///c:/Users/vinch/IOS-Internet-Of-Swine-/arduino/ios_sensor_node/ios-sensor-node/src/main.cpp):
+    - Added clean 4µs pre-trigger LOW grounding and clean 10µs trigger pulse.
+    - Added an automatic 1ms retry if the first pulse return is 0 to filter transient noise.
+    - Clamped calculated water level percentage strictly between `0.0%` and `100.0%`.
+    - In `updatePump()`, when `lastWaterLevel < 0.0` (sensor error), effective water level is treated as `0.0%` (safe state) so the system defaults to low-water protection instead of risking dry pump damage.
+- **Hardware Notes for Users**:
+  - HC-SR04 operates at 5V VCC and outputs a 5V logic ECHO pulse. The ESP32-S3 GPIO pins operate at 3.3V logic.
+  - If the water level remains `null` on hardware, ensure a voltage divider (e.g. 1kΩ / 2kΩ resistors) or a 5V-to-3.3V logic level shifter is installed on the HC-SR04 ECHO line (GPIO 17).
+  - Verify that HC-SR04 VCC is connected to 5V (not 3.3V, as HC-SR04 requires 5V to fire ultrasonic transducers properly).
+
+#### 4. Dashboard Enhancements
+- Added **"🌫️ Misting Schedule"** tab to sidebar navigation and page view in [index.html](file:///c:/Users/vinch/IOS-Internet-Of-Swine-/dashboard/index.html).
+- Added `page-mist` container with schedule counter and "+ Add Schedule" modal launcher.
+- Updated `schedule.js` modal logic with preset defaults (11:00 AM, 5 min duration, Mon/Wed/Fri) and dynamic icons.
+- Updated pump status description to list both GPIO 18 (Misting) and GPIO 7 (Bathing).
+
+#### 5. Verification Results
+- **PlatformIO Compilation (`pio run`)**:
+  - Status: **SUCCESS** (28.59 s)
+  - RAM: 17.6% (57,740 bytes of 327,680 bytes)
+  - Flash: 29.9% (998,093 bytes of 3,342,336 bytes)
+- **Backend Node.js Verification**:
+  - SQLite table auto-migration executed cleanly.
+  - Schedule CRUD unit test for `type: "mist"` (create, update, toggle active, list, delete) executed with 100% pass rate.
+

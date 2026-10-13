@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_water_ts ON water_readings(ts);
 
 CREATE TABLE IF NOT EXISTS schedules (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
-  type     TEXT NOT NULL CHECK(type IN ('bath','clean')),
+  type     TEXT NOT NULL CHECK(type IN ('bath','clean','mist')),
   label    TEXT NOT NULL,
   time     TEXT NOT NULL,              -- 'HH:MM'
   duration INTEGER NOT NULL,           -- minutes
@@ -64,7 +64,52 @@ CREATE TABLE IF NOT EXISTS sensor_diagnostics (
   relay_ok INTEGER,
   details  TEXT
 );
+CREATE TABLE IF NOT EXISTS offline_readings (
+  id          TEXT PRIMARY KEY,        -- stable esp32-XXXXXXXX id from firmware
+  ts          INTEGER NOT NULL,         -- original unix ms from RTC
+  temp        REAL,
+  humidity    REAL,
+  thi         REAL,
+  thi_label   TEXT,
+  water_level REAL,
+  flow_lpm    REAL,
+  water_used  REAL,
+  pump_on     INTEGER,
+  pump_reason TEXT,
+  synced_at   INTEGER NOT NULL          -- unix ms when backend received it
+);
+CREATE INDEX IF NOT EXISTS idx_offline_ts ON offline_readings(ts);
 `);
+
+/* ── Schema migration: extend schedules.type to allow 'mist' ──────────────
+   SQLite does not support ALTER COLUMN for CHECK constraints, so we detect
+   the old table definition and recreate it if needed, preserving all rows.  */
+(function migrateSchedulesType() {
+  const row = db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='schedules'`
+  ).get();
+  if (!row) return; // table doesn't exist yet — nothing to migrate
+  // Old constraint only listed 'bath','clean' — if 'mist' is absent, migrate.
+  if (row.sql && row.sql.includes("'mist'")) return; // already up-to-date
+
+  db.exec(`
+    BEGIN;
+    ALTER TABLE schedules RENAME TO _schedules_old;
+    CREATE TABLE schedules (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      type     TEXT NOT NULL CHECK(type IN ('bath','clean','mist')),
+      label    TEXT NOT NULL,
+      time     TEXT NOT NULL,
+      duration INTEGER NOT NULL,
+      days     TEXT NOT NULL,
+      active   INTEGER NOT NULL DEFAULT 1
+    );
+    INSERT INTO schedules SELECT * FROM _schedules_old;
+    DROP TABLE _schedules_old;
+    COMMIT;
+  `);
+  console.log('[db] schedules table migrated: type CHECK extended to include mist');
+})();
 
 /* ── Seed defaults (only if empty) ─────────────────────────── */
 const seedSchedules = db.prepare(`SELECT COUNT(*) AS n FROM schedules`).get();
@@ -243,6 +288,106 @@ function recentActivity(limit = 50) {
   `).all(limit);
 }
 
+/* ── Offline Batch Readings ─────────────────────────────── */
+
+// Insert a batch of offline readings, skipping duplicates by id.
+// Returns { inserted, skipped, failed, accepted_ids }.
+function insertOfflineBatch(records) {
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO offline_readings
+      (id, ts, temp, humidity, thi, thi_label, water_level, flow_lpm, water_used, pump_on, pump_reason, synced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const insertMany = db.transaction((rows) => {
+    let inserted = 0;
+    let skipped  = 0;
+    const accepted_ids = [];
+
+    for (const r of rows) {
+      if (!r.id || typeof r.id !== 'string') {
+        skipped++;
+        continue;
+      }
+
+      const ts = typeof r.ts_ms === 'number' ? r.ts_ms
+               : typeof r.ts    === 'number' ? r.ts
+               : null;
+
+      if (ts === null) {
+        skipped++;
+        continue;
+      }
+
+      const temp        = typeof r.temp_c    === 'number' ? r.temp_c    : (typeof r.temp     === 'number' ? r.temp     : null);
+      const humidity    = typeof r.humidity  === 'number' ? r.humidity  : null;
+      const thi         = typeof r.thi       === 'number' ? r.thi       : null;
+      const thi_label   = typeof r.thi_label === 'string' ? r.thi_label : null;
+      const water_level = typeof r.water_level_pct === 'number' ? r.water_level_pct : (typeof r.water_level === 'number' ? r.water_level : null);
+      const flow_lpm    = typeof r.flow_lpm  === 'number' ? r.flow_lpm  : null;
+      const water_used  = typeof r.water_used_l === 'number' ? r.water_used_l : (typeof r.water_used === 'number' ? r.water_used : null);
+      const pump_on     = r.pump_on != null ? (r.pump_on ? 1 : 0) : null;
+      const pump_reason = typeof r.pump_reason === 'string' ? r.pump_reason : null;
+
+      const info = stmt.run(
+        r.id, ts, temp, humidity, thi, thi_label,
+        water_level, flow_lpm, water_used, pump_on, pump_reason,
+        Date.now()
+      );
+
+      if (info.changes > 0) {
+        inserted++;
+        accepted_ids.push(r.id);
+
+        // Also mirror into the main readings table if we have temp+humidity
+        if (temp !== null && humidity !== null) {
+          const calcTHI = (t, h) => parseFloat(
+            (0.8 * t + (h / 100.0) * (t - 14.4) + 46.4).toFixed(1)
+          );
+          const thiVal = (thi !== null) ? thi : calcTHI(temp, humidity);
+          db.prepare(`INSERT OR IGNORE INTO readings (ts,temp,humidity,thi,device_id) VALUES (?,?,?,?,?)`)
+            .run(ts, temp, humidity, thiVal, 'esp32-offline');
+        }
+
+        // Mirror water data if available
+        if (water_level !== null || flow_lpm !== null || water_used !== null) {
+          db.prepare(`INSERT OR IGNORE INTO water_readings (ts,level_pct,used_l,flow_lpm,device_id) VALUES (?,?,?,?,?)`)
+            .run(ts,
+              water_level !== null ? water_level : 0,
+              water_used  !== null ? water_used  : 0,
+              flow_lpm    !== null ? flow_lpm    : 0,
+              'esp32-offline');
+        }
+
+      } else {
+        // Record already exists in offline_readings (idempotent retransmission).
+        // Still include in accepted_ids so client knows server has it and can advance progress.
+        skipped++;
+        accepted_ids.push(r.id);
+      }
+    }
+
+    return { inserted, skipped, accepted_ids };
+  });
+
+  try {
+    const result = insertMany(records);
+    return { ...result, failed: 0 };
+  } catch (err) {
+    return { inserted: 0, skipped: 0, failed: records.length, accepted_ids: [], error: err.message };
+  }
+}
+
+function pendingOfflineCount() {
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM offline_readings`).get();
+  return row ? row.n : 0;
+}
+
+function latestSyncTs() {
+  const row = db.prepare(`SELECT MAX(synced_at) AS ts FROM offline_readings`).get();
+  return row ? row.ts : null;
+}
+
 module.exports = {
   db,
   insertReading, latestReading, readingsSince,
@@ -252,4 +397,5 @@ module.exports = {
   getOperationDurations, setOperationDurations,
   logActivity, recentActivity,
   saveDiagnostics, latestDiagnostics,
+  insertOfflineBatch, pendingOfflineCount, latestSyncTs,
 };
