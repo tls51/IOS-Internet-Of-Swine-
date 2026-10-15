@@ -13,10 +13,31 @@
     sessionStorage.setItem(PAGE_KEY, activePage);
   }
 
-  function clearSession() {
+  function clearSession(keepPage = false) {
     sessionStorage.removeItem(SESSION_KEY);
-    sessionStorage.removeItem(PAGE_KEY);
+    if (!keepPage) {
+      sessionStorage.removeItem(PAGE_KEY);
+    }
   }
+
+  function handleSessionExpired(message) {
+    DATA.stop();
+    // Wipe token from every storage location
+    if (typeof setAuthToken === 'function') setAuthToken(null);
+    sessionStorage.removeItem('ios_session_token');
+    clearSession(true);
+    const loginScreen = document.getElementById('login-screen');
+    const appShell    = document.getElementById('app-shell');
+    const errEl       = document.getElementById('login-err');
+
+    if (appShell) appShell.classList.add('hidden');
+    if (loginScreen) loginScreen.classList.remove('hidden');
+    if (errEl) {
+      errEl.textContent = message || 'Session expired. Please sign in again.';
+      errEl.classList.remove('hidden');
+    }
+  }
+  window.handleSessionExpired = handleSessionExpired;
 
   function isSessionActive() {
     return sessionStorage.getItem(SESSION_KEY) === '1';
@@ -164,6 +185,7 @@
 
     /* render page immediately on switch */
     PAGES.update(DATA.state, activePage);
+    if (key === 'reports') DATA.refreshReports();
   }
 
   function initNav() {
@@ -344,9 +366,10 @@
   /* ── Range tabs (reports) & CSV Export ───────────────────── */
   function initRangeTabs() {
     document.querySelectorAll('.range-tab').forEach(btn => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', async () => {
         document.querySelectorAll('.range-tab').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
+        await DATA.refreshReports(btn.dataset.range);
         PAGES.updateReports(DATA.state);
       });
     });
@@ -358,10 +381,26 @@
 
     const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
 
-    btnExport.addEventListener('click', () => {
+    btnExport.addEventListener('click', async () => {
       const activeTab = document.querySelector('.range-tab.active');
       const range = activeTab ? activeTab.dataset.range : '24h';
-      window.location.href = `${API}/api/reports/export?range=${range}`;
+      const base = IOS_CONFIG.reportApiBase || API;
+      btnExport.disabled = true;
+      try {
+        const res = await fetch(`${base}/api/reports/export?range=${range}`);
+        if (!res.ok) throw new Error(`Export failed: HTTP ${res.status}`);
+        const blob = await res.blob();
+        const href = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = `ios_system_report_${range}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(href), 1000);
+      } catch (err) {
+        NOTIFY.show({ title: 'Report export failed', message: err.message, type: 'error' });
+      } finally { btnExport.disabled = false; }
     });
   }
 
@@ -370,18 +409,59 @@
     const loginScreen = document.getElementById('login-screen');
     const appShell    = document.getElementById('app-shell');
     const errEl       = document.getElementById('login-err');
+    const btnLogin    = document.getElementById('btn-login');
 
-    function tryLogin() {
+    async function tryLogin() {
       const user = document.getElementById('inp-user').value.trim();
       const pass = document.getElementById('inp-pass').value;
-      if (user === 'admin' && pass === 'ios2024') {
-        loginScreen.classList.add('hidden');
-        appShell.classList.remove('hidden');
-        saveSession();
-        boot();
-      } else {
-        errEl.textContent = 'Invalid credentials. Try admin / ios2024';
+
+      if (!user || !pass) {
+        errEl.textContent = 'Please enter both username and password.';
         errEl.classList.remove('hidden');
+        return;
+      }
+
+      btnLogin.disabled = true;
+      btnLogin.textContent = 'Signing in…';
+      errEl.classList.add('hidden');
+
+      try {
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        const res = await fetch(`${API}/api/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ username: user, password: pass })
+        });
+
+        let data = {};
+        try { data = await res.json(); } catch (_) {}
+
+        if (res.ok && data.ok) {
+          if (data.token) {
+            // persist token durably so it survives page refresh
+            if (typeof setAuthToken === 'function') {
+              setAuthToken(data.token);
+            } else {
+              sessionStorage.setItem('ios_session_token', data.token);
+              localStorage.setItem('ios_session_token', data.token);
+            }
+          }
+          saveSession();
+          loginScreen.classList.add('hidden');
+          appShell.classList.remove('hidden');
+          errEl.classList.add('hidden');
+          await boot();
+        } else {
+          errEl.textContent = (data && (data.error || data.msg)) || 'Invalid credentials. Try admin / ios2024';
+          errEl.classList.remove('hidden');
+        }
+      } catch (err) {
+        errEl.textContent = 'Login failed: ' + (err.message || 'Cannot reach server');
+        errEl.classList.remove('hidden');
+      } finally {
+        btnLogin.disabled = false;
+        btnLogin.textContent = 'Sign In';
       }
     }
 
@@ -392,8 +472,16 @@
       });
     });
 
-    document.getElementById('btn-logout').addEventListener('click', () => {
+    document.getElementById('btn-logout').addEventListener('click', async () => {
       DATA.stop();
+      try {
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        await fetch(`${API}/api/logout`, {
+          method: 'POST',
+          credentials: 'include'
+        });
+      } catch (_) {}
+      sessionStorage.removeItem('ios_session_token');
       clearSession();
       appShell.classList.add('hidden');
       loginScreen.classList.remove('hidden');
@@ -537,26 +625,26 @@
     const btnToken = document.getElementById('btn-token-top');
     if (!btnToken) return;
     btnToken.addEventListener('click', () => {
-      const cur = (typeof getAuthToken === 'function') ? getAuthToken() : (localStorage.getItem('ios_auth_token') || '');
-      const val = prompt('Device Access Token for control actions:\n(Saved locally in your browser)', cur);
-      if (val !== null) {
-        if (typeof setAuthToken === 'function') setAuthToken(val);
-        else if (val.trim()) localStorage.setItem('ios_auth_token', val.trim());
-        else localStorage.removeItem('ios_auth_token');
-        if (typeof NOTIFY !== 'undefined') {
-          NOTIFY.show({
-            title: 'Token Updated',
-            message: val.trim() ? 'Device access token saved in browser.' : 'Device access token cleared.',
-            type: 'info',
-            icon: '🔑'
-          });
-        }
+      if (typeof NOTIFY !== 'undefined') {
+        NOTIFY.show({
+          title: 'Session Active',
+          message: 'Authenticated as admin. All control and schedule actions are authorized.',
+          type: 'info',
+          icon: '🔑'
+        });
       }
     });
   }
 
   /* ── Boot (called after login) ───────────────────────────── */
   async function boot() {
+    await IOS_CONFIG.ready;
+    if (boot.initialized) {
+      DATA.start();
+      showPage(savedPage());
+      return;
+    }
+    boot.initialized = true;
     startClock();
     initNav();
     SCHEDULE.init();
@@ -572,21 +660,46 @@
     /* fetch real data once before first paint, then start polling */
     await DATA.refreshStatus();
     await DATA.refreshHistory();
+    await DATA.refreshReports();
     showPage(savedPage());
     initTicker();
   }
 
   /* ── Entry point ─────────────────────────────────────────── */
-  document.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('DOMContentLoaded', async () => {
     initLogin();
 
-    /* Auto-resume session after a page refresh */
+    /* Auto-resume session after a page refresh if session is valid */
     if (isSessionActive()) {
       const loginScreen = document.getElementById('login-screen');
       const appShell    = document.getElementById('app-shell');
-      loginScreen.classList.add('hidden');
-      appShell.classList.remove('hidden');
-      boot();
+      const errEl       = document.getElementById('login-err');
+      const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+
+      try {
+        const res = await authFetch(`${API}/api/session`);
+        if (res.ok) {
+          loginScreen.classList.add('hidden');
+          appShell.classList.remove('hidden');
+          boot();
+        } else {
+          DATA.stop();
+          if (typeof setAuthToken === 'function') setAuthToken(null);
+          sessionStorage.removeItem('ios_session_token');
+          clearSession(true);
+          loginScreen.classList.remove('hidden');
+          appShell.classList.add('hidden');
+          if (errEl) {
+            errEl.textContent = 'Your session has expired. Please sign in again.';
+            errEl.classList.remove('hidden');
+          }
+        }
+      } catch (_) {
+        // Standalone or offline fallback
+        loginScreen.classList.add('hidden');
+        appShell.classList.remove('hidden');
+        boot();
+      }
     }
   });
 

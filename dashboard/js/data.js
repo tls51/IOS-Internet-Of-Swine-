@@ -41,6 +41,10 @@ const DATA = (() => {
     pumpState: 'OFF', pumpReason: 'idle',
     lastPumpTest: null,
     history: [],
+    reportHistory: [],
+    reportRange: '24h',
+    reportSummary: null,
+    reportError: '',
     weeklyWater: [],
     threshold: 32,
     thiThresholds: { normalMax: 74, stressMax: 78, extremeMax: 83 },
@@ -247,7 +251,7 @@ const DATA = (() => {
   async function refreshHistory() {
     try {
       const rows = await getJSON('/api/readings/history?range=24h');
-      if (rows.length) state.history = rows;
+      state.history = Array.isArray(rows) ? rows : [];
     } catch (err) { /* keep last-known history on failure */ }
 
     try {
@@ -258,6 +262,32 @@ const DATA = (() => {
     notify();
   }
 
+  let _reportRequest = 0;
+  async function refreshReports(range = state.reportRange) {
+    state.reportRange = ['24h', '7d', '30d', 'all'].includes(range) ? range : '24h';
+    const selectedRange = state.reportRange;
+    const requestId = ++_reportRequest;
+    const base = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.reportApiBase || API : API;
+    try {
+      const res = await fetch(`${base}/api/readings/history?range=${selectedRange}`);
+      if (!res.ok) throw new Error(`Report history: HTTP ${res.status}`);
+      const rows = await res.json();
+      if (!Array.isArray(rows)) throw new Error('Report history is not an array');
+      if (requestId !== _reportRequest) return;
+      state.reportHistory = rows;
+      state.reportError = '';
+      const summary = await fetch(`${base}/api/reports/summary`);
+      if (summary.ok) {
+        const info = await summary.json();
+        if (requestId === _reportRequest) state.reportSummary = info;
+      }
+    } catch (err) {
+      if (requestId !== _reportRequest) return;
+      state.reportError = err.message;
+    }
+    if (requestId === _reportRequest) notify();
+  }
+
   /* ── Intervals ──────────────────────────────────────────── */
   let _statusTimer = null;
   let _historyTimer = null;
@@ -265,12 +295,14 @@ const DATA = (() => {
   let _sdTimer = null;
 
   function start() {
+    stop();
     refreshStatus();
     refreshHistory();
+    refreshReports();
     refreshDiagnostics();
     refreshSdStatus();
     _statusTimer  = setInterval(refreshStatus, POLL_MS);
-    _historyTimer = setInterval(refreshHistory, HISTORY_POLL_MS);
+    _historyTimer = setInterval(() => { refreshHistory(); refreshReports(); }, HISTORY_POLL_MS);
     _diagTimer    = setInterval(refreshDiagnostics, 60000); // refresh diagnostics every 60s
     _sdTimer      = setInterval(refreshSdStatus, 15000);    // refresh SD status every 15s
   }
@@ -316,6 +348,7 @@ const DATA = (() => {
     calcTHI,
     refreshStatus,
     refreshHistory,
+    refreshReports,
     refreshDiagnostics,
     refreshSdStatus,
     testPump,

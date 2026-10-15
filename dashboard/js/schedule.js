@@ -12,11 +12,31 @@ const SCHEDULE = (() => {
 
   let _modalType = 'bath';
   let _selectedDays = ['Mon','Wed','Fri'];
+  let _saving = false;
+  let _initialized = false;
+  function showError(message) {
+    const el = document.getElementById('modal-error');
+    if (el) { el.textContent = message; el.hidden = !message; }
+  }
+  async function responseError(res, action) {
+    let detail = '';
+    try {
+      const cloned = res.clone();
+      const body = await cloned.json();
+      detail = body.error || body.msg || '';
+    } catch (_) {
+      try {
+        const text = await res.text();
+        if (text && text.length < 120) detail = text;
+      } catch (_) {}
+    }
+    return new Error(`${action} (HTTP ${res.status})${detail ? ': ' + detail : ''}`);
+  }
 
   /* ── API helpers ─────────────────────────────────────────── */
   async function fetchSchedules(type) {
-    const res = await fetch(`${API}/api/schedules?type=${type}`);
-    if (!res.ok) throw new Error(`Failed to load ${type} schedules`);
+    const res = await fetch(`${API}/api/schedules?type=${type}`, { credentials: 'include' });
+    if (!res.ok) throw await responseError(res, `Could not load ${type} schedules`);
     return res.json();
   }
 
@@ -28,9 +48,7 @@ const SCHEDULE = (() => {
       body: JSON.stringify(entry),
     });
     if (!res.ok) {
-      let msg = 'Failed to create schedule';
-      try { const err = await res.json(); if (err && (err.error || err.msg)) msg = err.error || err.msg; } catch (_) {}
-      throw new Error(msg);
+      throw await responseError(res, 'Could not save schedule');
     }
     return res.json();
   }
@@ -43,9 +61,7 @@ const SCHEDULE = (() => {
       body: JSON.stringify({ active }),
     });
     if (!res.ok) {
-      let msg = 'Failed to update schedule';
-      try { const err = await res.json(); if (err && (err.error || err.msg)) msg = err.error || err.msg; } catch (_) {}
-      throw new Error(msg);
+      throw await responseError(res, 'Failed to update schedule');
     }
     return res.json();
   }
@@ -54,9 +70,7 @@ const SCHEDULE = (() => {
     const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
     const res = await fetchFn(`${API}/api/schedules/${id}`, { method: 'DELETE' });
     if (!res.ok && res.status !== 204) {
-      let msg = 'Failed to delete schedule';
-      try { const err = await res.json(); if (err && (err.error || err.msg)) msg = err.error || err.msg; } catch (_) {}
-      throw new Error(msg);
+      throw await responseError(res, 'Failed to delete schedule');
     }
   }
 
@@ -80,7 +94,7 @@ const SCHEDULE = (() => {
 
     listEl.innerHTML = '';
     const active = schedules.filter(s => s.active).length;
-    countEl.textContent = `${active} of ${schedules.length} schedule${schedules.length !== 1 ? 's' : ''} active`;
+    if (countEl) countEl.textContent = `${active} of ${schedules.length} schedule${schedules.length !== 1 ? 's' : ''} active`;
 
     schedules.forEach(s => {
       const row = document.createElement('div');
@@ -117,8 +131,11 @@ const SCHEDULE = (() => {
       /* info */
       const info = document.createElement('div');
       info.className = 'sched-info';
-      info.innerHTML = `<div class="sched-name">${s.label}</div>
-        <div class="sched-meta">${s.days.join(', ')} · ${s.time} · ${s.duration} min</div>`;
+      const name = document.createElement('div');
+      name.className = 'sched-name'; name.textContent = s.label;
+      const meta = document.createElement('div');
+      meta.className = 'sched-meta'; meta.textContent = `${s.days.join(', ')} · ${s.time} · ${s.duration} min`;
+      info.append(name, meta);
 
       /* badge */
       const badge = document.createElement('span');
@@ -175,6 +192,8 @@ const SCHEDULE = (() => {
       renderList(listId, countId, schedules, type);
     } catch (err) {
       console.warn(`Could not load ${type} schedules — is the backend running?`, err.message);
+      const countEl = document.getElementById(countId);
+      if (countEl) countEl.textContent = err.message;
     }
   }
 
@@ -201,6 +220,7 @@ const SCHEDULE = (() => {
 
   /* ── Open modal ──────────────────────────────────────────── */
   function openModal(type) {
+    showError('');
     _modalType     = type;
     _selectedDays  = ['Mon','Wed','Fri'];
     const titleType = type === 'mist' ? 'Misting' : type === 'bath' ? 'Bathing' : 'Cleaning';
@@ -217,8 +237,14 @@ const SCHEDULE = (() => {
 
   /* ── Save ────────────────────────────────────────────────── */
   async function saveModal() {
+    if (_saving) return;
+    showError('');
     const time  = document.getElementById('modal-time').value;
-    const dur   = parseInt(document.getElementById('modal-dur').value) || 15;
+    const dur   = Number(document.getElementById('modal-dur').value);
+    if (!Number.isInteger(dur) || dur < 1 || dur > 60) {
+      showError('Duration must be a whole number from 1 to 60 minutes.');
+      return;
+    }
 
     if (!_selectedDays.length) {
       if (typeof NOTIFY !== 'undefined') {
@@ -253,9 +279,15 @@ const SCHEDULE = (() => {
     const label = `${prefix} ${time}`;
     const entry = { type: _modalType, label, time, duration: dur, days: [..._selectedDays] };
 
+    _saving = true;
+    const saveButton = document.getElementById('modal-save');
+    saveButton.disabled = true;
+    saveButton.textContent = 'Saving…';
+
     try {
       await createSchedule(entry);
       await reloadList(_modalType);
+      closeModal();
 
       if (typeof NOTIFY !== 'undefined') {
         const icon = _modalType === 'mist' ? '🌫️' : _modalType === 'bath' ? '🚿' : '🧹';
@@ -269,6 +301,7 @@ const SCHEDULE = (() => {
       }
     } catch (err) {
       console.error(err);
+      showError(err.message || 'Could not reach the schedule server. Check its address and connection.');
       if (typeof NOTIFY !== 'undefined') {
         NOTIFY.show({
           title: 'Scheduling Failed',
@@ -277,12 +310,17 @@ const SCHEDULE = (() => {
           icon: '❌'
         });
       }
+    } finally {
+      _saving = false;
+      saveButton.disabled = false;
+      saveButton.textContent = 'Add Schedule';
     }
-    closeModal();
   }
 
   /* ── Init ────────────────────────────────────────────────── */
   function init() {
+    if (_initialized) return;
+    _initialized = true;
     reloadList('mist');
     reloadList('bath');
     reloadList('clean');

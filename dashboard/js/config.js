@@ -14,25 +14,39 @@ const IOS_CONFIG = {
 
   pollMs: 3000,        // how often the dashboard polls /api/status
   historyPollMs: 30000, // how often chart history/weekly data refreshes
-  mode: 'device'       // 'device' | 'cloud' — from GET /api/info
+  mode: 'device',      // 'device' | 'cloud' — from GET /api/info
+  authRequired: true,
+  reportApiBase: '',   // Node archive when discovered from the ESP32
+  reportSource: 'device',
 };
 
-/* ── Access Token Storage & Prompt ────────────────────────── */
+/* ── Access Token Storage & Compatibility ────────────────────── */
 const AUTH_STORAGE_KEY = 'ios_auth_token';
+const SESSION_STORAGE_KEY = 'ios_session_token';
 
 function getAuthToken() {
-  return localStorage.getItem(AUTH_STORAGE_KEY) || '';
+  // localStorage survives page refresh and tab close; sessionStorage is a live-session cache
+  return localStorage.getItem(SESSION_STORAGE_KEY)
+    || sessionStorage.getItem(SESSION_STORAGE_KEY)
+    || localStorage.getItem(AUTH_STORAGE_KEY)
+    || '';
 }
 
 function setAuthToken(token) {
   if (token) {
-    localStorage.setItem(AUTH_STORAGE_KEY, token.trim());
+    const t = token.trim();
+    localStorage.setItem(SESSION_STORAGE_KEY, t);   // durable across refreshes
+    sessionStorage.setItem(SESSION_STORAGE_KEY, t); // fast live-session access
+    localStorage.setItem(AUTH_STORAGE_KEY, t);      // backward compat key
   } else {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
     localStorage.removeItem(AUTH_STORAGE_KEY);
   }
 }
 
 function promptForToken(message) {
+  // Maintained for backward compatibility, not used in control flow
   const msg = message || 'Control operations require authorization.\nPlease enter the device access token:';
   const entered = window.prompt(msg, getAuthToken());
   if (entered !== null && entered.trim() !== '') {
@@ -45,28 +59,23 @@ function promptForToken(message) {
 
 /* ── Auth Fetch Wrapper for Control Routes ─────────────────── */
 async function authFetch(url, options = {}) {
-  const method = (options.method || 'GET').toUpperCase();
-  const isControl = ['POST', 'PATCH', 'PUT', 'DELETE'].includes(method);
-
   const opts = { ...options };
   opts.headers = { ...(options.headers || {}) };
+  opts.credentials = opts.credentials || 'include';
 
-  if (isControl) {
-    let token = getAuthToken();
-    if (!token) {
-      token = promptForToken('Enter device access token to perform this control action:');
-    }
-    if (token) {
-      opts.headers['X-Auth-Token'] = token;
-      opts.headers['Authorization'] = `Bearer ${token}`;
-    }
+  // Automatically attach active session token if present
+  const token = getAuthToken();
+  if (token) {
+    opts.headers['X-Session-Token'] = token;
+    opts.headers['X-Auth-Token'] = token;
+    opts.headers['Authorization'] = `Bearer ${token}`;
   }
 
-  let res = await fetch(url, opts);
+  const res = await fetch(url, opts);
 
-  // If 401 Unauthorized, prompt the user with server message and retry once
-  if (res.status === 401 && isControl) {
-    let errMsg = 'Unauthorized: Invalid or missing access token.';
+  // If 401 Unauthorized, notify dashboard to show login screen with error, without prompt() popup
+  if (res.status === 401) {
+    let errMsg = 'Unauthorized: Invalid or expired session.';
     try {
       const cloned = res.clone();
       const data = await cloned.json();
@@ -75,11 +84,8 @@ async function authFetch(url, options = {}) {
       }
     } catch (_) {}
 
-    const newToken = promptForToken(`${errMsg}\n\nPlease enter the correct access token:`);
-    if (newToken) {
-      opts.headers['X-Auth-Token'] = newToken;
-      opts.headers['Authorization'] = `Bearer ${newToken}`;
-      res = await fetch(url, opts);
+    if (typeof window.handleSessionExpired === 'function') {
+      window.handleSessionExpired(errMsg);
     }
   }
 
@@ -110,9 +116,20 @@ async function fetchHostMode() {
     if (!res.ok) throw new Error('GET /api/info failed');
     const data = await res.json();
     applyDataMode(data && data.mode);
+    IOS_CONFIG.authRequired = !!data.authRequired;
+    IOS_CONFIG.reportSource = IOS_CONFIG.mode;
+    if (data.backendUrl) {
+      try {
+        const health = await fetch(data.backendUrl + '/api/health', { signal: AbortSignal.timeout(3000) });
+        if (health.ok && (await health.json()).ok) {
+          IOS_CONFIG.reportApiBase = data.backendUrl;
+          IOS_CONFIG.reportSource = 'cloud';
+        }
+      } catch (_) { /* Standalone device history is still available. */ }
+    }
   } catch (err) {
     applyDataMode('device');
   }
 }
 
-fetchHostMode();
+IOS_CONFIG.ready = fetchHostMode();

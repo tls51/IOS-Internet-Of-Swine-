@@ -12,10 +12,128 @@ const db = require('./db');
 const app = express();
 
 app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, '../../dashboard')));
+app.use(express.json({ limit: '256kb' }));
+app.use(express.static(process.env.IOS_DASHBOARD_PATH || path.join(__dirname, '../../dashboard')));
 
 const PORT = process.env.PORT || 3000;
+// The barn and the firmware both use UTC+8, regardless of the laptop's timezone.
+const BARN_TIMEZONE = 'Asia/Manila';
+function barnTime(date = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: BARN_TIMEZONE, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date).map(p => [p.type, p.value]));
+  return { day: parts.weekday, minutes: Number(parts.hour) * 60 + Number(parts.minute) };
+}
+const REPORT_RANGES = { '24h': 24 * 3600e3, '7d': 7 * 24 * 3600e3, '30d': 30 * 24 * 3600e3, all: Infinity };
+function reportSince(range = '24h') {
+  return range === 'all' ? 0 : Date.now() - (REPORT_RANGES[range] || REPORT_RANGES['24h']);
+}
+const crypto = require('crypto');
+
+const ADMIN_USER = process.env.IOS_ADMIN_USER || 'admin';
+const ADMIN_PASSWORD = process.env.IOS_ADMIN_PASS || 'ios2024';
+const AUTH_TOKEN = process.env.IOS_AUTH_TOKEN || 'ios-control-secret-token';
+const SESSION_TTL_MS = 24 * 3600 * 1000; // 24 hours
+
+const sessions = new Map();
+
+function createSession() {
+  const token = crypto.randomBytes(16).toString('hex');
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  sessions.set(token, { expiresAt });
+  return { token, expiresIn: Math.floor(SESSION_TTL_MS / 1000) };
+}
+
+function isValidSession(token) {
+  if (!token) return false;
+  const s = sessions.get(token);
+  if (!s) return false;
+  if (Date.now() > s.expiresAt) {
+    sessions.delete(token);
+    return false;
+  }
+  return true;
+}
+
+function destroySession(token) {
+  if (token) sessions.delete(token);
+}
+
+function getSessionTokenFromReq(req) {
+  if (req.headers.cookie) {
+    const match = req.headers.cookie.match(/(?:^|;\s*)ios_session=([^;]+)/);
+    if (match) return match[1];
+  }
+  if (req.headers['x-session-token']) {
+    return req.headers['x-session-token'];
+  }
+  if (req.headers['x-auth-token']) {
+    return req.headers['x-auth-token'];
+  }
+  if (req.headers.authorization) {
+    const auth = req.headers.authorization;
+    if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
+  }
+  return null;
+}
+
+function isAuthorized(req) {
+  const token = getSessionTokenFromReq(req);
+  if (!token) return false;
+  if (isValidSession(token)) return true;
+  if (AUTH_TOKEN && token === AUTH_TOKEN) return true;
+  return false;
+}
+
+function requireAuth(req, res, next) {
+  if (isAuthorized(req)) {
+    return next();
+  }
+  return res.status(401).json({
+    ok: false,
+    error: 'Unauthorized: Invalid or expired session'
+  });
+}
+
+app.get('/api/info', (req, res) => res.json({ mode: 'cloud', authRequired: true, reports: 'sqlite' }));
+
+app.post('/api/login', (req, res) => {
+  const { username, password, user, pass } = req.body || {};
+  const u = (username !== undefined ? username : user || '').trim();
+  const p = (password !== undefined ? password : pass || '');
+
+  if (u === ADMIN_USER && p === ADMIN_PASSWORD) {
+    const { token, expiresIn } = createSession();
+    res.setHeader('Set-Cookie', `ios_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${expiresIn}`);
+    return res.json({ ok: true, token, expiresIn });
+  }
+
+  return res.status(401).json({
+    ok: false,
+    error: 'Invalid credentials. Try admin / ios2024'
+  });
+});
+
+app.post('/api/logout', (req, res) => {
+  const token = getSessionTokenFromReq(req);
+  if (token) destroySession(token);
+  res.setHeader('Set-Cookie', 'ios_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  return res.json({ ok: true });
+});
+
+app.get('/api/session', (req, res) => {
+  if (isAuthorized(req)) {
+    return res.json({ ok: true, authenticated: true });
+  }
+  return res.status(401).json({ ok: false, authenticated: false, error: 'Unauthorized: Invalid or expired session' });
+});
+
+app.post('/api/time', requireAuth, (req, res) => {
+  const epoch = (req.body && req.body.epoch) || Math.floor(Date.now() / 1000);
+  return res.json({ ok: true, epoch, rtcOk: true });
+});
+
+app.get('/api/reports/summary', (req, res) => res.json({ ...db.reportSummary(), source: 'sqlite', supportedRanges: Object.keys(REPORT_RANGES) }));
 
 
 /* ============================================================
@@ -121,6 +239,7 @@ function normalizeDays(days) {
 // Validates + normalizes a schedule payload from the dashboard.
 // Returns { ok: true, value } or { ok: false, error }.
 function parseScheduleInput(body, { partial = false } = {}) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Expected a schedule object' };
   const out = {};
 
   if (body.label !== undefined) {
@@ -143,7 +262,7 @@ function parseScheduleInput(body, { partial = false } = {}) {
 
   if (body.duration !== undefined) {
     const duration = parseInt(body.duration, 10);
-    if (!Number.isFinite(duration) || duration <= 0) {
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 1440) {
       return { ok: false, error: `duration must be a positive number of minutes, got "${body.duration}"` };
     }
     out.duration = duration;
@@ -183,12 +302,12 @@ function isScheduleActiveNow(sched) {
   const now = new Date();
 
   // Current day
-  const today = DAY_NAMES[now.getDay()];
+  const local = barnTime(now);
+  const today = local.day;
 
   // Current time in minutes
   const nowMin =
-    now.getHours() * 60 +
-    now.getMinutes();
+    local.minutes;
 
   // Convert schedule start time to minutes
   const [h, m] = sched.time
@@ -210,7 +329,7 @@ function isScheduleActiveNow(sched) {
 
   // Window crosses midnight (e.g. 23:50 for 20 min -> ends 00:10 next day)
   const wrappedEnd = end - 1440;
-  const yesterday = DAY_NAMES[(now.getDay() + 6) % 7];
+  const yesterday = DAY_NAMES[(DAY_NAMES.indexOf(today) + 6) % 7];
 
   // Either: today is a scheduled day and we're after start (pre-midnight part)
   if (sched.days.includes(today) && nowMin >= start) {
@@ -624,7 +743,7 @@ app.get('/api/status', (req, res) => {
     sdError: sdDetails ? (sdDetails.lastError || '') : '',
     sdSpiFrequencyHz: sdDetails ? (sdDetails.spiFrequencyHz || 0) : 0,
     backendOnline: true,
-    pendingOfflineCount: sdDetails ? (sdDetails.pendingCount || 0) : 0,
+    pendingOfflineCount: sdDetails ? (sdDetails.pendingCount ?? sdDetails.pendingOfflineCount ?? 0) : 0,
     syncedCount: db.pendingOfflineCount ? db.pendingOfflineCount() : (sdDetails ? (sdDetails.syncedCount || 0) : 0),
     lastSyncTs: db.latestSyncTs ? db.latestSyncTs() : (sdDetails ? (sdDetails.lastSyncTs || null) : null),
     syncInProgress: sdDetails ? !!sdDetails.syncInProgress : false,
@@ -692,23 +811,9 @@ app.get('/api/readings/history', (req, res) => {
   const range =
     req.query.range || '24h';
 
-  const ms = {
-
-    '24h':
-      24 * 3600e3,
-
-    '7d':
-      7 * 24 * 3600e3,
-
-    '30d':
-      30 * 24 * 3600e3
-
-  }[range] || 24 * 3600e3;
-
-
   const rows =
     db.readingsSince(
-      Date.now() - ms
+      reportSince(range)
     );
 
 
@@ -717,8 +822,7 @@ app.get('/api/readings/history', (req, res) => {
 
       time:
         new Date(r.ts)
-          .toTimeString()
-          .slice(0, 5),
+          .toLocaleTimeString('en-GB', { timeZone: BARN_TIMEZONE, hour: '2-digit', minute: '2-digit' }),
 
       ts: r.ts,
 
@@ -763,6 +867,9 @@ app.get('/api/schedules', (req, res) => {
   const type =
     req.query.type;
 
+  // The ESP32 polls this snapshot and caches it for operation without Node.
+  if (type === 'all') return res.json(['mist', 'bath', 'clean'].flatMap(t => db.listSchedules(t)));
+
 
   if (
     !['bath', 'clean', 'mist']
@@ -790,7 +897,9 @@ app.get('/api/schedules', (req, res) => {
    normalized to the canonical 3-letter form) before saving.
 */
 
-app.post('/api/schedules', (req, res) => {
+app.post('/api/schedules', requireAuth, (req, res) => {
+
+  if (!req.body || typeof req.body !== 'object') return res.status(400).json({ error: 'Expected a schedule object' });
 
   const {
     type
@@ -815,6 +924,10 @@ app.post('/api/schedules', (req, res) => {
     return res.status(400).json({
       error: parsed.error
     });
+  }
+
+  if (db.db.prepare('SELECT COUNT(*) AS n FROM schedules').get().n >= 20) {
+    return res.status(409).json({ error: 'Maximum of 20 backend schedules reached. Delete an unused schedule first.' });
   }
 
 
@@ -861,8 +974,7 @@ app.post('/api/schedules', (req, res) => {
    dropped time/duration/days edits — that's fixed here.
 */
 
-app.patch('/api/schedules/:id', (req, res) => {
-
+const handleUpdateSchedule = (req, res) => {
   const parsed = parseScheduleInput(req.body, { partial: true });
 
   if (!parsed.ok) {
@@ -880,28 +992,26 @@ app.patch('/api/schedules/:id', (req, res) => {
   }
 
   db.logActivity(
-    row.type === 'bath' ? 'Bath' : 'Clean',
+    row.type === 'bath' ? 'Bath' : row.type === 'mist' ? 'Mist' : 'Clean',
     `Schedule "${row.label}" updated: ${row.time}, ${row.duration} min, ${JSON.parse(row.days).join(', ')}, ${row.active ? 'enabled' : 'disabled'}`
   );
 
   res.json({
-
     ...row,
-
-    days:
-      JSON.parse(row.days),
-
-    active:
-      !!row.active
+    days: JSON.parse(row.days),
+    active: !!row.active
   });
-});
+};
+
+app.patch('/api/schedules/:id', requireAuth, handleUpdateSchedule);
+app.put('/api/schedules/:id', requireAuth, handleUpdateSchedule);
 
 
 /*
    DELETE SCHEDULE
 */
 
-app.delete('/api/schedules/:id', (req, res) => {
+app.delete('/api/schedules/:id', requireAuth, (req, res) => {
 
   db.deleteSchedule(
     req.params.id
@@ -921,9 +1031,10 @@ app.get('/api/schedules/debug', (req, res) => {
 
   const now = new Date();
 
-  const today = DAY_NAMES[now.getDay()];
+  const local = barnTime(now);
+  const today = local.day;
 
-  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const nowMin = local.minutes;
 
   const annotate = (s) => ({
     id: s.id,
@@ -938,6 +1049,7 @@ app.get('/api/schedules/debug', (req, res) => {
   res.json({
     serverTime: now.toString(),
     serverTimezoneOffsetMinutes: now.getTimezoneOffset(),
+    scheduleTimezone: BARN_TIMEZONE,
     today,
     nowMin,
     bath: db.listSchedules('bath').map(annotate),
@@ -966,7 +1078,7 @@ app.get('/api/settings/threshold', (req, res) => {
 });
 
 
-app.post('/api/settings/threshold', (req, res) => {
+app.post('/api/settings/threshold', requireAuth, (req, res) => {
 
   const {
     value
@@ -1016,7 +1128,7 @@ app.get('/api/settings/durations', (req, res) => {
 });
 
 
-app.post('/api/settings/durations', (req, res) => {
+app.post('/api/settings/durations', requireAuth, (req, res) => {
 
   const {
     mistDurationMin,
@@ -1061,7 +1173,7 @@ app.get('/api/settings/thi', (req, res) => {
 });
 
 
-app.post('/api/settings/thi', (req, res) => {
+app.post('/api/settings/thi', requireAuth, (req, res) => {
 
   const {
     normalMax,
@@ -1110,23 +1222,9 @@ app.get('/api/reports/export', (req, res) => {
     req.query.range || '24h';
 
 
-  const ms = {
-
-    '24h':
-      24 * 3600e3,
-
-    '7d':
-      7 * 24 * 3600e3,
-
-    '30d':
-      30 * 24 * 3600e3
-
-  }[range] || 24 * 3600e3;
-
-
   const rows =
     db.readingsSince(
-      Date.now() - ms
+      reportSince(range)
     );
 
 
@@ -1180,13 +1278,13 @@ app.get('/api/reports/export', (req, res) => {
 app.get('/api/activity', (req, res) => {
 
   const limit =
-    parseInt(
+    Math.min(500, Math.max(1, parseInt(
       req.query.limit
-    ) || 30;
+    ) || 30));
 
 
   res.json(
-    db.recentActivity(limit)
+    db.recentActivity(limit, reportSince(req.query.range || 'all'))
   );
 });
 
@@ -1208,7 +1306,7 @@ let pendingRelayCommand = null;
    RELAY TEST
    ------------------------------------------------------------ */
 
-app.post('/api/relay/test', (req, res) => {
+app.post('/api/relay/test', requireAuth, (req, res) => {
 
   const duration_ms =
     parseInt(
@@ -1277,7 +1375,7 @@ app.post('/api/relay/test', (req, res) => {
    MANUAL PUMP CONTROL
    ------------------------------------------------------------ */
 
-app.post('/api/relay/control', (req, res) => {
+app.post('/api/relay/control', requireAuth, (req, res) => {
 
   const active =
     !!req.body.active;
@@ -1315,6 +1413,26 @@ app.post('/api/relay/control', (req, res) => {
     manualPumpActive,
 
     relayState
+  });
+});
+
+app.post('/api/manual', requireAuth, (req, res) => {
+  const active = req.body && req.body.active !== undefined ? !!req.body.active : true;
+  manualPumpActive = active;
+  relayState = active;
+  pendingRelayCommand = {
+    command: active ? 'pump_on' : 'pump_off',
+    ts: Date.now()
+  };
+  db.logActivity(
+    'Mist',
+    `Water pump manual override switched ${active ? 'ON' : 'OFF'}`
+  );
+  res.json({
+    ok: true,
+    manual: manualPumpActive,
+    duration_ms: active ? 60000 : 0,
+    max_run_ms: 300000
   });
 });
 
@@ -1496,7 +1614,7 @@ app.get('/api/sd/status', (req, res) => {
     sdError: sdDetails ? (sdDetails.lastError || '') : '',
     sdSpiFrequencyHz: sdDetails ? (sdDetails.spiFrequencyHz || 0) : 0,
     backendOnline: true,
-    pendingOfflineCount: sdDetails ? (sdDetails.pendingCount || 0) : 0,
+    pendingOfflineCount: sdDetails ? (sdDetails.pendingCount ?? sdDetails.pendingOfflineCount ?? 0) : 0,
     syncedCount: db.pendingOfflineCount ? db.pendingOfflineCount() : (sdDetails ? (sdDetails.syncedCount || 0) : 0),
     lastSyncTs: db.latestSyncTs ? db.latestSyncTs() : (sdDetails ? (sdDetails.lastSyncTs || 0) : 0),
     syncInProgress: sdDetails ? !!sdDetails.syncInProgress : false,
@@ -1556,6 +1674,8 @@ app.post('/api/readings/batch', (req, res) => {
 
   const result = db.insertOfflineBatch(records);
 
+  if (result.failed > 0) return res.status(500).json({ ok: false, ...result });
+
   if (result.inserted > 0) {
     db.logActivity(
       'Info',
@@ -1601,6 +1721,13 @@ app.get('/api/health', (req, res) => {
 
     time: Date.now()
   });
+});
+
+// Return JSON errors so the dashboard can show the actual save failure.
+app.use((err, req, res, next) => {
+  console.error(`[api] ${req.method} ${req.path}:`, err.message);
+  if (res.headersSent) return next(err);
+  res.status(err.status || 500).json({ ok: false, error: err.message || 'Database operation failed' });
 });
 
 

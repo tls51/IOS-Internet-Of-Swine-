@@ -772,28 +772,46 @@ const PAGES = (() => {
 
   /* ── Reports page ────────────────────────────────────────── */
   function updateReports(state) {
-    CHARTS.drawLineChart('chart-rep-temp', state.history, [
+    CHARTS.drawLineChart('chart-rep-temp', state.reportHistory || [], [
       { key: 'temp', label: 'Temp °C', color: '#EF4444', unit: '°C' },
     ]);
-    CHARTS.drawLineChart('chart-rep-hum', state.history, [
+    CHARTS.drawLineChart('chart-rep-hum', state.reportHistory || [], [
       { key: 'humidity', label: 'Humidity %', color: '#3B82F6', unit: '%' },
     ]);
+
+    const message = document.getElementById('report-status');
+    if (message) {
+      const summary = state.reportSummary;
+      document.querySelectorAll('.range-tab').forEach(btn => {
+        btn.disabled = !!(summary && summary.supportedRanges && !summary.supportedRanges.includes(btn.dataset.range));
+      });
+      const rows = state.reportHistory || [];
+      if (state.reportError) {
+        message.textContent = `Could not refresh reports: ${state.reportError}. Last loaded readings remain visible.`;
+      } else if (!rows.length) {
+        message.textContent = summary && summary.lastTs
+          ? `No readings in this range. Latest saved reading: ${new Date(summary.lastTs).toLocaleString()}. Select All saved to view earlier readings.`
+          : 'No saved readings yet. Keep the ESP32 powered and check its backend connection.';
+      } else {
+        message.textContent = `${rows.length.toLocaleString()} readings shown · ${summary && summary.source === 'sqlite' ? 'Saved in SQLite' : 'Saved on ESP32 (limited history)'}.`;
+      }
+    }
 
     const log = document.getElementById('activity-log');
     if (!log) return;
 
     const TYPE_CLS = { Sensor: 'badge-blue', Mist: 'badge-warn', Bath: 'badge-green', Clean: 'badge-green', Alert: 'badge-danger', Info: 'badge-blue' };
-    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.reportApiBase || IOS_CONFIG.apiBase : '';
 
-    fetch(`${API}/api/activity?limit=30`)
-      .then(r => r.json())
+    fetch(`${API}/api/activity?limit=30&range=${state.reportRange || '24h'}`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(entries => {
         if (!entries.length) {
           log.innerHTML = `<div class="activity-item"><span class="activity-msg muted">No activity logged yet.</span></div>`;
           return;
         }
         log.innerHTML = entries.map(e => {
-          const time = new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const time = e.ts > 1000000000000 ? new Date(e.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Time unavailable';
           const cls  = TYPE_CLS[e.type] || 'badge-muted';
           return `
             <div class="activity-item">

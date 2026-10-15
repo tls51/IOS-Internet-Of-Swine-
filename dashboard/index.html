@@ -580,9 +580,11 @@
               <button class="range-tab active" data-range="24h">24h</button>
               <button class="range-tab" data-range="7d">7d</button>
               <button class="range-tab" data-range="30d">30d</button>
+              <button class="range-tab" data-range="all">All saved</button>
             </div>
             <button class="btn btn-outline" id="btn-export-csv">⬇ Export CSV</button>
           </div>
+          <p id="report-status" class="muted mb-20" role="status">Loading saved readings…</p>
           <div class="grid-2 mb-20">
             <div class="card">
               <div class="field-label mb-14">Temperature Log</div>
@@ -626,6 +628,7 @@
         <button id="modal-cancel" class="btn btn-outline flex-1">Cancel</button>
         <button id="modal-save"   class="btn btn-primary flex-1">Add Schedule</button>
       </div>
+      <p id="modal-error" role="alert" hidden style="color:var(--danger);margin-top:12px"></p>
     </div>
   </div>
 

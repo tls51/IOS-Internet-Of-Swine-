@@ -11,6 +11,7 @@
 #include <SD.h>
 #include <HTTPClient.h>
 #include <WiFiClient.h>
+#include <esp_system.h>
 #include "DHT.h"
 #include "secrets.h"
 
@@ -32,6 +33,7 @@ float lastHum = NAN;
 float lastThi = NAN;
 float lastWaterLevel = -1.0;
 bool pumpIsOn = false;
+bool bathPumpIsOn = false;
 
 // ============================================================
 // DHT22
@@ -208,6 +210,82 @@ bool validateSettings(float minWater, float mistDur, float mistPause,
 
 const unsigned long HISTORY_SAMPLE_INTERVAL_MS = 5 * 60 * 1000UL; // Sample every 5 minutes
 const unsigned long HISTORY_SAVE_INTERVAL_MS   = 5 * 60 * 1000UL; // Flush to LittleFS every 5 minutes (constant, 5-10 min)
+const unsigned long TELEMETRY_INTERVAL_MS = 15000;
+unsigned long lastTelemetrySample = 0;
+bool telemetrySampled = false;
+bool historySampledThisBoot = false;
+
+// Keep the prior file until a complete replacement has been written.
+static void restoreJsonFile(const char* path) {
+    String backup = String(path) + ".bak";
+    if (!LittleFS.exists(path) && LittleFS.exists(backup)) LittleFS.rename(backup, path);
+}
+
+static bool writeJsonFileSafely(const char* path, const JsonDocument& doc) {
+    String temp = String(path) + ".tmp";
+    String backup = String(path) + ".bak";
+    restoreJsonFile(path);
+    File file = LittleFS.open(temp, "w");
+    if (!file) return false;
+    size_t expected = measureJson(doc);
+    size_t written = serializeJson(doc, file);
+    file.flush();
+    bool complete = written == expected && file.getWriteError() == 0;
+    file.close();
+    if (!complete) { LittleFS.remove(temp); return false; }
+    LittleFS.remove(backup);
+    if (LittleFS.exists(path) && !LittleFS.rename(path, backup)) return false;
+    if (!LittleFS.rename(temp, path)) {
+        restoreJsonFile(path);
+        return false;
+    }
+    LittleFS.remove(backup);
+    return true;
+}
+
+// Small persistent log for the standalone ESP32 dashboard.
+#define ACTIVITY_CAPACITY 60
+#define ACTIVITY_FILE "/activity.json"
+struct ActivityRecord { uint64_t ts; char type[12]; char msg[160]; };
+ActivityRecord activityRing[ACTIVITY_CAPACITY];
+size_t activityCount = 0, activityHead = 0;
+
+static void loadActivity() {
+    restoreJsonFile(ACTIVITY_FILE);
+    File file = LittleFS.open(ACTIVITY_FILE, "r");
+    if (!file) return;
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+    if (error || !doc.is<JsonArray>()) return;
+    for (JsonObject obj : doc.as<JsonArray>()) {
+        ActivityRecord& rec = activityRing[activityHead];
+        rec.ts = obj["ts"] | 0ULL;
+        strlcpy(rec.type, obj["type"] | "Info", sizeof(rec.type));
+        strlcpy(rec.msg, obj["msg"] | "", sizeof(rec.msg));
+        activityHead = (activityHead + 1) % ACTIVITY_CAPACITY;
+        if (activityCount < ACTIVITY_CAPACITY) activityCount++;
+    }
+}
+
+static void appendActivity(const char* type, const char* message) {
+    ActivityRecord& rec = activityRing[activityHead];
+    rec.ts = rtcOk && rtcTimeValid ? (uint64_t)rtc.now().unixtime() * 1000ULL : 0;
+    strlcpy(rec.type, type, sizeof(rec.type));
+    strlcpy(rec.msg, message, sizeof(rec.msg));
+    activityHead = (activityHead + 1) % ACTIVITY_CAPACITY;
+    if (activityCount < ACTIVITY_CAPACITY) activityCount++;
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    for (size_t i = 0; i < activityCount; i++) {
+        size_t idx = activityCount < ACTIVITY_CAPACITY ? i : (activityHead + i) % ACTIVITY_CAPACITY;
+        JsonObject obj = arr.add<JsonObject>();
+        obj["ts"] = activityRing[idx].ts;
+        obj["type"] = activityRing[idx].type;
+        obj["msg"] = activityRing[idx].msg;
+    }
+    if (!writeJsonFileSafely(ACTIVITY_FILE, doc)) Serial.println("WARNING: Activity log could not be persisted.");
+}
 
 struct HistoryRecord {
     char     time[6];    // "HH:MM" local time string
@@ -230,7 +308,7 @@ void addHistorySample(float temp, float hum, float thi) {
     rec.humidity = hum;
     rec.thi = thi;
 
-    if (rtcOk) {
+    if (rtcOk && rtcTimeValid) {
         DateTime nowUtc = rtc.now();
         rec.ts = (uint64_t)nowUtc.unixtime() * 1000ULL;
         DateTime nowLocal = nowUtc + TimeSpan(LOCAL_TIMEZONE_OFFSET_SEC);
@@ -252,6 +330,7 @@ void addHistorySample(float temp, float hum, float thi) {
 }
 
 void loadHistory() {
+    restoreJsonFile(HISTORY_FILE);
     historyCount = 0;
     historyHead = 0;
     historyDirty = false;
@@ -299,27 +378,24 @@ void loadHistory() {
     Serial.println(" history reading(s) from LittleFS.");
 }
 
-void saveHistory() {
-    File f = LittleFS.open(HISTORY_FILE, "w");
-    if (!f) {
-        Serial.println("ERROR: Could not open history.json for writing.");
-        return;
-    }
-
-    f.print('[');
+bool saveHistory() {
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
     for (size_t i = 0; i < historyCount; i++) {
         size_t idx = (historyCount < HISTORY_CAPACITY) ? i : ((historyHead + i) % HISTORY_CAPACITY);
-        if (i > 0) f.print(',');
-        f.printf("{\"time\":\"%s\",\"ts\":%llu,\"temp\":%.1f,\"humidity\":%.1f,\"thi\":%.1f}",
-            historyRing[idx].time,
-            (unsigned long long)historyRing[idx].ts,
-            historyRing[idx].temp,
-            historyRing[idx].humidity,
-            historyRing[idx].thi);
+        JsonObject obj = arr.add<JsonObject>();
+        obj["time"] = historyRing[idx].time;
+        obj["ts"] = historyRing[idx].ts;
+        obj["temp"] = historyRing[idx].temp;
+        obj["humidity"] = historyRing[idx].humidity;
+        obj["thi"] = historyRing[idx].thi;
     }
-    f.print(']');
-    f.close();
+    if (!writeJsonFileSafely(HISTORY_FILE, doc)) {
+        Serial.println("ERROR: Could not persist history.json; will retry.");
+        return false;
+    }
     Serial.println("History saved to LittleFS.");
+    return true;
 }
 
 // ============================================================
@@ -375,8 +451,14 @@ unsigned long lastSyncBatchAttempt = 0;
 const unsigned long SYNC_BATCH_INTERVAL_MS = 500; // delay between batches
 const size_t SYNC_BATCH_SIZE = 15;                // 15 records per batch
 
-// Sequence counter for deterministic unique record IDs
+// Device MAC, random boot ID and sequence avoid record collisions after reboot
 static uint32_t recordSeq = 0;
+static uint32_t recordBootId = 0;
+static void makeRecordId(char* out, size_t length) {
+    if (recordBootId == 0) recordBootId = esp_random();
+    snprintf(out, length, "%012llx-%08lx-%08lx",
+        (unsigned long long)ESP.getEfuseMac(), (unsigned long)recordBootId, (unsigned long)++recordSeq);
+}
 
 const char* getSdStatusString() {
     switch (sdCardStatus) {
@@ -717,8 +799,15 @@ bool checkBackendHealth() {
     bool ok = false;
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
-        if (payload.indexOf("\"ok\":true") >= 0 || payload.indexOf("\"ok\": true") >= 0) {
+        JsonDocument response;
+        if (!deserializeJson(response, payload) && response["ok"].as<bool>()) {
             ok = true;
+            uint64_t serverMs = response["time"] | 0ULL;
+            if (rtcOk && !rtcTimeValid && serverMs >= 1704067200000ULL && serverMs <= 4102444799000ULL) {
+                rtc.adjust(DateTime((uint32_t)(serverMs / 1000ULL)));
+                rtcTimeValid = true;
+                Serial.println("RTC recovered from backend UTC time.");
+            }
         }
     }
     http.end();
@@ -745,21 +834,19 @@ bool logOfflineReading(float temp, float hum, float thi,
         return false;
     }
 
-    recordSeq++;
-    char recordId[36];
+    char recordId[48];
+    makeRecordId(recordId, sizeof(recordId));
     uint64_t tsMs = 0;
     bool hasValidRtc = (rtcOk && rtcTimeValid);
 
     if (hasValidRtc) {
         DateTime nowUtc = rtc.now();
         tsMs = (uint64_t)nowUtc.unixtime() * 1000ULL;
-        snprintf(recordId, sizeof(recordId), "esp32-%lu-%u", (unsigned long)nowUtc.unixtime(), recordSeq);
     } else {
         // RTC unavailable: use uptime as a monotone proxy timestamp so the
         // backend can still import the record (ts=null is skipped by the DB).
         // Marked rtc_valid:false so the server knows the time is approximate.
         tsMs = (uint64_t)millis();
-        snprintf(recordId, sizeof(recordId), "esp32-up%llu-%u", (unsigned long long)tsMs, recordSeq);
     }
 
     const char* thiLabel = "Normal";
@@ -823,20 +910,18 @@ bool sendTelemetryDirect(float temp, float hum, float thi,
         return false;
     }
 
-    recordSeq++;
-    char recordId[36];
+    char recordId[48];
+    makeRecordId(recordId, sizeof(recordId));
     uint64_t tsMs = 0;
     bool hasValidRtc = (rtcOk && rtcTimeValid);
 
     if (hasValidRtc) {
         DateTime nowUtc = rtc.now();
         tsMs = (uint64_t)nowUtc.unixtime() * 1000ULL;
-        snprintf(recordId, sizeof(recordId), "esp32-%lu-%u", (unsigned long)nowUtc.unixtime(), recordSeq);
     } else {
         // RTC unavailable: use uptime as a proxy so the backend doesn't drop
         // the record due to a null ts. Marked rtc_valid:false for transparency.
         tsMs = (uint64_t)millis();
-        snprintf(recordId, sizeof(recordId), "esp32-up%llu-%u", (unsigned long long)tsMs, recordSeq);
     }
 
     const char* thiLabel = "Normal";
@@ -891,9 +976,19 @@ bool sendTelemetryDirect(float temp, float hum, float thi,
     bool success = false;
     if (code == 200 || code == 201) {
         backendOnline = true;
-        if (hasValidRtc) lastSyncTs = tsMs;
-        else lastSyncTs = (uint64_t)millis();
-        success = true;
+        JsonDocument acknowledgement;
+        bool parsed = !deserializeJson(acknowledgement, http.getString());
+        success = parsed && acknowledgement["ok"].as<bool>()
+            && (acknowledgement["failed"] | 0) == 0;
+        bool found = false;
+        if (success) {
+            for (const char* id : acknowledgement["accepted_ids"].as<JsonArray>()) {
+                if (id && strcmp(id, recordId) == 0) found = true;
+            }
+        }
+        success = success && found;
+        if (success) lastSyncTs = hasValidRtc ? tsMs : (uint64_t)millis();
+        if (!success) Serial.println("ERROR: Backend did not acknowledge this reading.");
     } else {
         backendOnline = false;
         Serial.printf("Direct telemetry push failed (HTTP %d).\n", code);
@@ -905,14 +1000,11 @@ bool sendTelemetryDirect(float temp, float hum, float thi,
 void handleTelemetrySample(float temp, float hum, float thi,
                            float waterLevel, float flowRate, float waterUsed,
                            bool pumpOn, const char* pumpReason) {
-    if (backendOnline && sdPendingCount == 0) {
-        if (sendTelemetryDirect(temp, hum, thi, waterLevel, flowRate, waterUsed, pumpOn, pumpReason)) {
-            Serial.println("Telemetry: Sent live reading to backend database.");
-            return;
-        }
-    }
-
-    logOfflineReading(temp, hum, thi, waterLevel, flowRate, waterUsed, pumpOn, pumpReason);
+    // Persist every sample before upload, including while the backend is online.
+    // A sudden ESP32 shutdown cannot undo a completed SD write or DB commit.
+    if (logOfflineReading(temp, hum, thi, waterLevel, flowRate, waterUsed, pumpOn, pumpReason)) return;
+    if (backendOnline && sendTelemetryDirect(temp, hum, thi, waterLevel, flowRate, waterUsed, pumpOn, pumpReason)) return;
+    Serial.println("ERROR: Telemetry was not saved: neither SD nor backend accepted it.");
 }
 
 void syncBatch() {
@@ -1005,8 +1097,14 @@ void syncBatch() {
         bool accepted = false;
         if (!resErr && resDoc["ok"].as<bool>()) {
             JsonArray acceptedArr = resDoc["accepted_ids"].as<JsonArray>();
-            if (acceptedArr.size() >= batchCount) {
-                accepted = true;
+            accepted = (resDoc["failed"] | 0) == 0;
+            for (JsonObject reading : arr) {
+                bool found = false;
+                const char* sentId = reading["id"] | "";
+                for (const char* id : acceptedArr) {
+                    if (id && strcmp(id, sentId) == 0) found = true;
+                }
+                if (!found) accepted = false;
             }
         }
 
@@ -1147,13 +1245,19 @@ bool isScheduleActiveNow(const Schedule &s) {
     return false;
 }
 
+extern Schedule backendSchedules[MAX_SCHEDULES];
+extern uint8_t backendScheduleCount;
+
 // ── Check all schedules; returns true if any is currently active ──────────
 bool anyScheduleActive() {
-    for (uint8_t i = 0; i < scheduleCount; i++) {
-        if (isScheduleActiveNow(schedules[i])) {
-            strncpy(activeScheduleType, schedules[i].type, sizeof(activeScheduleType) - 1);
-            activeScheduleType[sizeof(activeScheduleType) - 1] = '\0';
-            return true;
+    for (uint8_t group = 0; group < 2; group++) {
+        Schedule* entries = group == 0 ? schedules : backendSchedules;
+        uint8_t count = group == 0 ? scheduleCount : backendScheduleCount;
+        for (uint8_t i = 0; i < count; i++) {
+            if (isScheduleActiveNow(entries[i])) {
+                strlcpy(activeScheduleType, entries[i].type, sizeof(activeScheduleType));
+                return true;
+            }
         }
     }
     activeScheduleType[0] = '\0';
@@ -1176,6 +1280,7 @@ static void scheduleToJson(JsonObject obj, const Schedule &s) {
 
 // ── Load schedules from LittleFS; missing file → empty list ───────────────
 void loadSchedules() {
+    restoreJsonFile(SCHEDULES_FILE);
     scheduleCount  = 0;
     nextScheduleId = 1;
 
@@ -1242,55 +1347,250 @@ void loadSchedules() {
 }
 
 // ── Persist all schedules to LittleFS (called only when data changes) ─────
-void saveSchedules() {
-    const char *tmpFile = "/schedules.tmp";
-    File f = LittleFS.open(tmpFile, "w");
-    if (!f) {
-        Serial.println("ERROR: Could not open /schedules.tmp for writing.");
-        return;
-    }
-
+bool saveSchedules() {
     JsonDocument doc;
     JsonArray arr = doc.to<JsonArray>();
-    for (uint8_t i = 0; i < scheduleCount; i++) {
-        scheduleToJson(arr.add<JsonObject>(), schedules[i]);
+    for (uint8_t i = 0; i < scheduleCount; i++) scheduleToJson(arr.add<JsonObject>(), schedules[i]);
+    if (!writeJsonFileSafely(SCHEDULES_FILE, doc)) {
+        Serial.println("ERROR: Schedule file could not be persisted.");
+        return false;
     }
+    Serial.println("schedules.json saved safely.");
+    return true;
+}
 
-    if (serializeJson(doc, f) == 0) {
-        Serial.println("ERROR: Failed to serialize schedules to /schedules.tmp");
-        f.close();
-        LittleFS.remove(tmpFile);
-        return;
+// Validate before mutating RAM; malformed data must not become a running schedule.
+static bool validateScheduleJson(JsonObject obj, bool partial = false) {
+    if (!partial || !obj["type"].isNull()) {
+        const char* type = obj["type"] | "";
+        if (strcmp(type, "mist") && strcmp(type, "bath") && strcmp(type, "clean")) return false;
     }
-    f.close();
+    if (!partial || !obj["time"].isNull()) {
+        const char* time = obj["time"] | "";
+        if (strlen(time) != 5 || time[2] != ':' || !isdigit(time[0]) || !isdigit(time[1]) || !isdigit(time[3]) || !isdigit(time[4])) return false;
+        int h = (time[0] - '0') * 10 + time[1] - '0';
+        int m = (time[3] - '0') * 10 + time[4] - '0';
+        if (h > 23 || m > 59) return false;
+    }
+    if (!partial || !obj["duration"].isNull()) {
+        if (!obj["duration"].is<int>() || obj["duration"].as<int>() < 1 || obj["duration"].as<int>() > 1440) return false;
+    }
+    if (!partial || !obj["days"].isNull()) {
+        if (!obj["days"].is<JsonArray>() || obj["days"].size() == 0 || obj["days"].size() > 7) return false;
+        for (JsonVariant day : obj["days"].as<JsonArray>()) {
+            if (!day.is<const char*>() || dayStringToRtcDow(day.as<const char*>()) < 0) return false;
+        }
+    }
+    return obj["active"].isNull() || obj["active"].is<bool>();
+}
 
-    // Atomic replacement: remove old file and rename tmp
-    if (LittleFS.exists(SCHEDULES_FILE)) {
-        LittleFS.remove(SCHEDULES_FILE);
+// Backend schedules have a separate cache. Pulling Node changes never deletes
+// standalone schedules created on the ESP32 itself.
+#define BACKEND_SCHEDULES_FILE "/backend_schedules.json"
+Schedule backendSchedules[MAX_SCHEDULES];
+uint8_t backendScheduleCount = 0;
+unsigned long lastSchedulePull = 0;
+const unsigned long SCHEDULE_PULL_INTERVAL_MS = 10000;
+String backendScheduleSnapshot;
+
+static bool importBackendSchedules(JsonArray arr) {
+    if (arr.size() > MAX_SCHEDULES) return false;
+    Schedule staged[MAX_SCHEDULES] = {};
+    uint8_t count = 0;
+    for (JsonObject obj : arr) {
+        if (!validateScheduleJson(obj)) return false;
+        Schedule& s = staged[count++];
+        String id = obj["id"].as<String>();
+        strlcpy(s.id, id.c_str(), sizeof(s.id));
+        strlcpy(s.type, obj["type"] | "", sizeof(s.type));
+        strlcpy(s.label, obj["label"] | "", sizeof(s.label));
+        strlcpy(s.time, obj["time"] | "", sizeof(s.time));
+        s.duration = obj["duration"].as<uint16_t>();
+        s.active = obj["active"] | true;
+        for (const char* day : obj["days"].as<JsonArray>()) strlcpy(s.days[s.dayCount++], day, sizeof(s.days[0]));
     }
-    if (LittleFS.rename(tmpFile, SCHEDULES_FILE)) {
-        Serial.println("schedules.json saved safely.");
-    } else {
-        Serial.println("ERROR: Failed to rename /schedules.tmp to /schedules.json");
+    memcpy(backendSchedules, staged, sizeof(staged));
+    backendScheduleCount = count;
+    return true;
+}
+
+static void loadBackendSchedules() {
+    restoreJsonFile(BACKEND_SCHEDULES_FILE);
+    File file = LittleFS.open(BACKEND_SCHEDULES_FILE, "r");
+    if (!file) return;
+    JsonDocument doc;
+    bool parsed = !deserializeJson(doc, file);
+    file.close();
+    if (parsed && doc.is<JsonArray>() && importBackendSchedules(doc.as<JsonArray>())) serializeJson(doc, backendScheduleSnapshot);
+}
+
+static void fetchBackendSchedules() {
+    if (!backendOnline || WiFi.status() != WL_CONNECTED) return;
+    WiFiClient client;
+    HTTPClient http;
+    http.setTimeout(1500);
+    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/schedules?type=all";
+    if (!http.begin(client, url)) return;
+    int code = http.GET();
+    String payload = code == 200 ? http.getString() : "";
+    http.end();
+    if (code != 200 || payload == backendScheduleSnapshot) return;
+    JsonDocument doc;
+    if (deserializeJson(doc, payload) || !doc.is<JsonArray>()) return;
+    JsonArray arr = doc.as<JsonArray>();
+    if (arr.size() > MAX_SCHEDULES) { Serial.println("ERROR: Backend schedule snapshot exceeds 20 schedules."); return; }
+    for (JsonObject obj : arr) if (!validateScheduleJson(obj)) return;
+    if (!writeJsonFileSafely(BACKEND_SCHEDULES_FILE, doc)) { Serial.println("ERROR: Backend schedule cache could not be saved."); return; }
+    if (importBackendSchedules(arr)) {
+        backendScheduleSnapshot = payload;
+        Serial.printf("Schedules: Cached %u backend schedule(s).\n", backendScheduleCount);
     }
 }
 
 // ============================================================
-// ACCESS CONTROL & TOKEN AUTHENTICATION
+// ACCESS CONTROL & SESSION AUTHENTICATION
 // ============================================================
 
-bool isAuthorized(AsyncWebServerRequest *request) {
-    if (!AUTH_TOKEN || strlen(AUTH_TOKEN) == 0) {
-        return true; // No token configured, allow all
+#ifndef ADMIN_USER
+#define ADMIN_USER "admin"
+#endif
+
+#ifndef ADMIN_PASSWORD
+#define ADMIN_PASSWORD "ios2024"
+#endif
+
+struct AdminSession {
+    char token[33];
+    uint32_t createdAt; // uptime in seconds
+    bool active;
+};
+
+#define MAX_ADMIN_SESSIONS 8
+const uint32_t ADMIN_SESSION_TTL_SEC = 24 * 3600; // 24 hours
+static AdminSession adminSessions[MAX_ADMIN_SESSIONS];
+static bool adminSessionsInitialized = false;
+
+static uint32_t getUptimeSeconds() {
+    return (uint32_t)(millis() / 1000UL);
+}
+
+static void initAdminSessions() {
+    if (adminSessionsInitialized) return;
+    for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
+        adminSessions[i].active = false;
+        adminSessions[i].token[0] = '\0';
+        adminSessions[i].createdAt = 0;
+    }
+    adminSessionsInitialized = true;
+}
+
+static void cleanExpiredSessions() {
+    initAdminSessions();
+    uint32_t now = getUptimeSeconds();
+    for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
+        if (adminSessions[i].active) {
+            if (now < adminSessions[i].createdAt || (now - adminSessions[i].createdAt) > ADMIN_SESSION_TTL_SEC) {
+                adminSessions[i].active = false;
+                adminSessions[i].token[0] = '\0';
+            }
+        }
+    }
+}
+
+static String createAdminSession() {
+    cleanExpiredSessions();
+    int slot = -1;
+    uint32_t oldestTime = UINT32_MAX;
+    int oldestSlot = 0;
+    for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
+        if (!adminSessions[i].active) {
+            slot = i;
+            break;
+        }
+        if (adminSessions[i].createdAt < oldestTime) {
+            oldestTime = adminSessions[i].createdAt;
+            oldestSlot = i;
+        }
+    }
+    if (slot == -1) {
+        slot = oldestSlot;
     }
 
-    if (request->hasHeader("X-Auth-Token")) {
-        const AsyncWebHeader *h = request->getHeader("X-Auth-Token");
-        if (h && h->value().equals(AUTH_TOKEN)) {
+    const char hexChars[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        adminSessions[slot].token[i] = hexChars[esp_random() % 16];
+    }
+    adminSessions[slot].token[32] = '\0';
+    adminSessions[slot].createdAt = getUptimeSeconds();
+    adminSessions[slot].active = true;
+
+    return String(adminSessions[slot].token);
+}
+
+static bool isValidAdminSession(const String &token) {
+    if (token.length() != 32) return false;
+    cleanExpiredSessions();
+    for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
+        if (adminSessions[i].active && token.equals(adminSessions[i].token)) {
             return true;
         }
     }
+    return false;
+}
 
+static void destroyAdminSession(const String &token) {
+    cleanExpiredSessions();
+    for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
+        if (adminSessions[i].active && token.equals(adminSessions[i].token)) {
+            adminSessions[i].active = false;
+            adminSessions[i].token[0] = '\0';
+            break;
+        }
+    }
+}
+
+static String extractCookieValue(AsyncWebServerRequest *request, const char* name) {
+    if (!request->hasHeader("Cookie")) return "";
+    const AsyncWebHeader *h = request->getHeader("Cookie");
+    if (!h) return "";
+    String cookieStr = h->value();
+    String prefix = String(name) + "=";
+    int idx = cookieStr.indexOf(prefix);
+    if (idx < 0) return "";
+    idx += prefix.length();
+    int end = cookieStr.indexOf(';', idx);
+    if (end < 0) end = cookieStr.length();
+    String val = cookieStr.substring(idx, end);
+    val.trim();
+    return val;
+}
+
+static String extractAuthToken(AsyncWebServerRequest *request) {
+    // 1. Session Cookie
+    String token = extractCookieValue(request, "ios_session");
+    if (token.length() > 0) return token;
+
+    // 2. Custom header X-Session-Token
+    if (request->hasHeader("X-Session-Token")) {
+        const AsyncWebHeader *h = request->getHeader("X-Session-Token");
+        if (h && h->value().length() > 0) {
+            String val = h->value();
+            val.trim();
+            if (val.length() > 0) return val;
+        }
+    }
+
+    // 3. Custom header X-Auth-Token
+    if (request->hasHeader("X-Auth-Token")) {
+        const AsyncWebHeader *h = request->getHeader("X-Auth-Token");
+        if (h && h->value().length() > 0) {
+            String val = h->value();
+            val.trim();
+            if (val.length() > 0) return val;
+        }
+    }
+
+    // 4. Authorization: Bearer <token>
     if (request->hasHeader("Authorization")) {
         const AsyncWebHeader *h = request->getHeader("Authorization");
         if (h) {
@@ -1299,17 +1599,32 @@ bool isAuthorized(AsyncWebServerRequest *request) {
                 val = val.substring(7);
             }
             val.trim();
-            if (val.equals(AUTH_TOKEN)) {
-                return true;
-            }
+            if (val.length() > 0) return val;
         }
+    }
+
+    return "";
+}
+
+bool isAuthorized(AsyncWebServerRequest *request) {
+    String token = extractAuthToken(request);
+    if (token.length() == 0) {
+        return false;
+    }
+
+    if (isValidAdminSession(token)) {
+        return true;
+    }
+
+    if (AUTH_TOKEN && strlen(AUTH_TOKEN) > 0 && token.equals(AUTH_TOKEN)) {
+        return true;
     }
 
     return false;
 }
 
 void sendUnauthorized(AsyncWebServerRequest *request) {
-    request->send(401, "application/json", "{\"ok\":false,\"error\":\"Unauthorized: Invalid or missing access token\"}");
+    request->send(401, "application/json", "{\"ok\":false,\"error\":\"Unauthorized: Invalid or expired session\"}");
 }
 
 // ── Register /api/schedules CRUD routes ───────────────────────────────────
@@ -1356,6 +1671,10 @@ void setupScheduleRoutes(AsyncWebServer &srv) {
                 }
 
                 JsonObject obj = json.as<JsonObject>();
+                if (!validateScheduleJson(obj)) {
+                    request->send(400, "application/json", "{\"ok\":false,\"error\":\"Use type bath/clean/mist, HH:MM, 1-1440 minutes, and valid selected days\"}");
+                    return;
+                }
                 Schedule &s = schedules[scheduleCount];
 
                 snprintf(s.id, sizeof(s.id), "s%lu", (unsigned long)nextScheduleId++);
@@ -1382,7 +1701,12 @@ void setupScheduleRoutes(AsyncWebServer &srv) {
                 }
 
                 scheduleCount++;
-                saveSchedules();
+                if (!saveSchedules()) {
+                    scheduleCount--;
+                    request->send(507, "application/json", "{\"ok\":false,\"error\":\"Schedule was not saved. Check LittleFS mount and available space\"}");
+                    return;
+                }
+                appendActivity(strcmp(s.type, "bath") == 0 ? "Bath" : strcmp(s.type, "clean") == 0 ? "Clean" : "Mist", "Local schedule added.");
 
                 JsonDocument res;
                 scheduleToJson(res.to<JsonObject>(), schedules[scheduleCount - 1]);
@@ -1417,7 +1741,12 @@ void setupScheduleRoutes(AsyncWebServer &srv) {
             return;
         }
 
+        if (!json.is<JsonObject>() || !validateScheduleJson(json.as<JsonObject>(), true)) {
+            request->send(400, "application/json", "{\"ok\":false,\"error\":\"Invalid schedule update\"}");
+            return;
+        }
         Schedule &s = schedules[idx];
+        Schedule previous = s;
 
         if (json.is<JsonObject>()) {
             JsonObject obj = json.as<JsonObject>();
@@ -1442,7 +1771,12 @@ void setupScheduleRoutes(AsyncWebServer &srv) {
             }
         }
 
-        saveSchedules();
+        if (!saveSchedules()) {
+            s = previous;
+            request->send(507, "application/json", "{\"ok\":false,\"error\":\"Schedule update could not be persisted\"}");
+            return;
+        }
+        appendActivity("Info", "Local schedule updated.");
 
         JsonDocument res;
         scheduleToJson(res.to<JsonObject>(), s);
@@ -1485,11 +1819,19 @@ void setupScheduleRoutes(AsyncWebServer &srv) {
         }
 
         // Shift remaining entries left to close the gap
+        Schedule removed = schedules[idx];
         for (uint8_t i = (uint8_t)idx; i < scheduleCount - 1; i++) {
             schedules[i] = schedules[i + 1];
         }
         scheduleCount--;
-        saveSchedules();
+        if (!saveSchedules()) {
+            for (int i = scheduleCount; i > idx; i--) schedules[i] = schedules[i - 1];
+            schedules[idx] = removed;
+            scheduleCount++;
+            request->send(507, "application/json", "{\"ok\":false,\"error\":\"Schedule deletion could not be persisted\"}");
+            return;
+        }
+        appendActivity("Info", "Local schedule deleted.");
 
         request->send(204);
     });
@@ -1551,11 +1893,13 @@ void pumpOff()
 void bathOn()
 {
     digitalWrite(BATH_RELAY_PIN, RELAY_ON);
+    bathPumpIsOn = true;
 }
 
 void bathOff()
 {
     digitalWrite(BATH_RELAY_PIN, RELAY_OFF);
+    bathPumpIsOn = false;
 }
 
 // ============================================================
@@ -1843,12 +2187,12 @@ void handleStatus(AsyncWebServerRequest *request)
     doc["flowRate"] = flowRateLPM;
 
     // Pump state & reason
-    doc["pumpOn"] = pumpIsOn;
-    doc["pumpActive"] = pumpIsOn;
-    doc["pumpState"] = pumpIsOn ? "ON" : "OFF";
+    doc["pumpOn"] = pumpIsOn || bathPumpIsOn;
+    doc["pumpActive"] = pumpIsOn || bathPumpIsOn;
+    doc["pumpState"] = (pumpIsOn || bathPumpIsOn) ? "ON" : "OFF";
     doc["pumpReason"] = currentPumpReason;
     doc["reason"] = currentPumpReason;
-    doc["relayState"] = pumpIsOn;
+    doc["relayState"] = pumpIsOn || bathPumpIsOn;
     doc["mistActive"] = (strcmp(currentPumpReason, "thi_cooling") == 0) || 
                         ((strcmp(currentPumpReason, "scheduled") == 0) && (strcmp(activeScheduleType, "mist") == 0)) ||
                         (manualActive);
@@ -2135,13 +2479,42 @@ void setupSettingsRoutes(AsyncWebServer &srv) {
 }
 
 void setupReadingsRoutes(AsyncWebServer &srv) {
+    srv.on("/api/reports/summary", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        doc["source"] = "esp32";
+        doc["count"] = historyCount;
+        JsonArray ranges = doc["supportedRanges"].to<JsonArray>();
+        ranges.add("24h"); ranges.add("all");
+        uint64_t first = 0, last = 0;
+        for (size_t i = 0; i < historyCount; i++) {
+            uint64_t ts = historyRing[i].ts;
+            if (ts < 1704067200000ULL) continue;
+            if (!first || ts < first) first = ts;
+            if (ts > last) last = ts;
+        }
+        if (first) doc["firstTs"] = first; else doc["firstTs"] = nullptr;
+        if (last) doc["lastTs"] = last; else doc["lastTs"] = nullptr;
+        String payload;
+        serializeJson(doc, payload);
+        request->send(200, "application/json", payload);
+    });
     auto handleReadings = [](AsyncWebServerRequest *request) {
+        String range = request->hasParam("range") ? request->getParam("range")->value() : "24h";
+        if (range != "24h" && range != "all") {
+            request->send(400, "application/json", "{\"error\":\"Use the Node dashboard for 7-day and 30-day reports\"}");
+            return;
+        }
+        uint64_t since = range == "24h" && rtcOk && rtcTimeValid
+            ? (uint64_t)rtc.now().unixtime() * 1000ULL - 24ULL * 3600ULL * 1000ULL : 0;
         AsyncResponseStream *response = request->beginResponseStream("application/json");
         response->addHeader("Access-Control-Allow-Origin", "*");
         response->print('[');
+        bool first = true;
         for (size_t i = 0; i < historyCount; i++) {
             size_t idx = (historyCount < HISTORY_CAPACITY) ? i : ((historyHead + i) % HISTORY_CAPACITY);
-            if (i > 0) response->print(',');
+            if (historyRing[idx].ts >= 1704067200000ULL && historyRing[idx].ts < since) continue;
+            if (!first) response->print(',');
+            first = false;
             response->printf("{\"time\":\"%s\",\"ts\":%llu,\"temp\":%.1f,\"humidity\":%.1f,\"thi\":%.1f}",
                 historyRing[idx].time,
                 (unsigned long long)historyRing[idx].ts,
@@ -2156,14 +2529,22 @@ void setupReadingsRoutes(AsyncWebServer &srv) {
     srv.on("/api/readings", HTTP_GET, handleReadings);
     srv.on("/api/readings/history", HTTP_GET, handleReadings);
 
-    // GET /api/reports/export — streams history as CSV; ?range= accepted and ignored (device holds 24 h only)
+    // The Node archive supplies long-term CSVs. Local export has limited history.
     srv.on("/api/reports/export", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String range = request->hasParam("range") ? request->getParam("range")->value() : "24h";
+        if (range != "24h" && range != "all") {
+            request->send(400, "application/json", "{\"error\":\"Use the Node dashboard for 7-day and 30-day exports\"}");
+            return;
+        }
+        uint64_t since = range == "24h" && rtcOk && rtcTimeValid
+            ? (uint64_t)rtc.now().unixtime() * 1000ULL - 24ULL * 3600ULL * 1000ULL : 0;
         AsyncResponseStream *response = request->beginResponseStream("text/csv");
         response->addHeader("Content-Disposition", "attachment; filename=\"readings.csv\"");
         response->addHeader("Access-Control-Allow-Origin", "*");
         response->print("time,ts,temp,humidity,thi\n");
         for (size_t i = 0; i < historyCount; i++) {
             size_t idx = (historyCount < HISTORY_CAPACITY) ? i : ((historyHead + i) % HISTORY_CAPACITY);
+            if (historyRing[idx].ts >= 1704067200000ULL && historyRing[idx].ts < since) continue;
             response->printf("%s,%llu,%.1f,%.1f,%.1f\n",
                 historyRing[idx].time,
                 (unsigned long long)historyRing[idx].ts,
@@ -2263,9 +2644,26 @@ void setupAuxRoutes(AsyncWebServer &srv) {
         request->send(200, "application/json", json);
     });
 
-    // No event log yet, placeholder.
+    // Return the persistent local log while the backend is unavailable.
     srv.on("/api/activity", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(200, "application/json", "[]");
+        size_t limit = 30;
+        if (request->hasParam("limit")) limit = constrain(request->getParam("limit")->value().toInt(), 1, ACTIVITY_CAPACITY);
+        JsonDocument doc;
+        JsonArray arr = doc.to<JsonArray>();
+        String range = request->hasParam("range") ? request->getParam("range")->value() : "all";
+        uint64_t since = range == "24h" && rtcOk && rtcTimeValid
+            ? (uint64_t)rtc.now().unixtime() * 1000ULL - 24ULL * 3600ULL * 1000ULL : 0;
+        for (size_t i = 0; i < activityCount && i < limit; i++) {
+            size_t idx = (activityHead + ACTIVITY_CAPACITY - 1 - i) % ACTIVITY_CAPACITY;
+            if (activityRing[idx].ts && activityRing[idx].ts < since) continue;
+            JsonObject obj = arr.add<JsonObject>();
+            obj["ts"] = activityRing[idx].ts;
+            obj["type"] = activityRing[idx].type;
+            obj["msg"] = activityRing[idx].msg;
+        }
+        String payload;
+        serializeJson(doc, payload);
+        request->send(200, "application/json", payload);
     });
 }
 
@@ -2285,7 +2683,63 @@ void setupWebServer()
 
     // Mode discovery for dashboard
     server.on("/api/info", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send(200, "application/json", "{\"mode\":\"device\"}");
+        JsonDocument doc;
+        doc["mode"] = "device";
+        doc["authRequired"] = true;
+        doc["backendUrl"] = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT;
+        String payload;
+        serializeJson(doc, payload);
+        request->send(200, "application/json", payload);
+    });
+
+    // POST /api/login {"username": "admin", "password": "..."}
+    AsyncCallbackJsonWebHandler *loginHandler = new AsyncCallbackJsonWebHandler("/api/login",
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!json.is<JsonObject>()) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"Expected JSON object\"}");
+                return;
+            }
+            JsonObject obj = json.as<JsonObject>();
+            const char* u = "";
+            const char* p = "";
+            if (obj["username"].is<const char*>()) u = obj["username"].as<const char*>();
+            else if (obj["user"].is<const char*>()) u = obj["user"].as<const char*>();
+
+            if (obj["password"].is<const char*>()) p = obj["password"].as<const char*>();
+            else if (obj["pass"].is<const char*>()) p = obj["pass"].as<const char*>();
+
+            if (strcmp(u, ADMIN_USER) == 0 && strcmp(p, ADMIN_PASSWORD) == 0) {
+                String token = createAdminSession();
+                AsyncWebServerResponse *response = request->beginResponse(200, "application/json",
+                    "{\"ok\":true,\"token\":\"" + token + "\",\"expiresIn\":" + String(ADMIN_SESSION_TTL_SEC) + "}");
+                response->addHeader("Set-Cookie", "ios_session=" + token + "; Path=/; SameSite=Lax; Max-Age=" + String(ADMIN_SESSION_TTL_SEC));
+                request->send(response);
+                return;
+            }
+
+            request->send(401, "application/json", "{\"ok\":false,\"error\":\"Invalid credentials. Try admin / ios2024\"}");
+        });
+    loginHandler->setMethod(HTTP_POST);
+    server.addHandler(loginHandler);
+
+    // POST /api/logout
+    server.on("/api/logout", HTTP_POST, [](AsyncWebServerRequest *request) {
+        String token = extractAuthToken(request);
+        if (token.length() > 0) {
+            destroyAdminSession(token);
+        }
+        AsyncWebServerResponse *response = request->beginResponse(200, "application/json", "{\"ok\":true}");
+        response->addHeader("Set-Cookie", "ios_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+        request->send(response);
+    });
+
+    // GET /api/session
+    server.on("/api/session", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (isAuthorized(request)) {
+            request->send(200, "application/json", "{\"ok\":true,\"authenticated\":true}");
+        } else {
+            request->send(401, "application/json", "{\"ok\":false,\"authenticated\":false,\"error\":\"Unauthorized: Invalid or expired session\"}");
+        }
     });
 
     server.on("/api/status", HTTP_GET, handleStatus);
@@ -2459,7 +2913,7 @@ void setupWebServer()
 
     // Global CORS headers for cross-origin and preflight requests
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token, Authorization");
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token, Authorization, X-Session-Token");
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
 
     server.onNotFound([](AsyncWebServerRequest *request) {
@@ -2725,7 +3179,8 @@ void setup()
     {
         Serial.println("RTC DS3231 detected.");
         rtcOk = true;
-        rtcTimeValid = !rtc.lostPower();
+        uint32_t rtcEpoch = rtc.now().unixtime();
+        rtcTimeValid = !rtc.lostPower() && rtcEpoch >= 1704067200UL && rtcEpoch <= 4102444799UL;
         if (!rtcTimeValid)
         {
             Serial.println("WARNING: RTC DS3231 lost power! Time is invalid until synchronized.");
@@ -2751,7 +3206,7 @@ void setup()
     // BATHING RELAY
     // --------------------------------------------------------
 
-    // Initialized OFF only and not used by any logic yet
+    // The bathing schedule engine controls this output after initialization.
     digitalWrite(BATH_RELAY_PIN, HIGH);
     pinMode(BATH_RELAY_PIN, OUTPUT);
 
@@ -2782,6 +3237,8 @@ void setup()
         Serial.println("LittleFS mounted.");
         loadSchedules(); // Load persisted schedules; missing file → empty list
         loadHistory();   // Load persisted history readings; missing file → empty history
+        loadActivity();
+        loadBackendSchedules();
     }
 
     // --------------------------------------------------------
@@ -2799,6 +3256,8 @@ void setup()
     if (WiFi.status() == WL_CONNECTED)
     {
         checkBackendHealth();
+        fetchBackendSchedules();
+        lastSchedulePull = millis();
     }
 
     // --------------------------------------------------------
@@ -2825,6 +3284,11 @@ void loop()
 
     // Retry a failed SD mount or write after wiring/card issues are corrected.
     serviceMicroSD();
+
+    if (backendOnline && millis() - lastSchedulePull >= SCHEDULE_PULL_INTERVAL_MS) {
+        lastSchedulePull = millis();
+        fetchBackendSchedules();
+    }
 
     // --------------------------------------------------------
     // BACKEND SERVER HEALTH CHECK (non-blocking 20s interval)
@@ -2909,25 +3373,36 @@ void loop()
     // READINGS HISTORY BUFFER, TELEMETRY PUSH & MICROSD OFFLINE LOG
     // --------------------------------------------------------
 
-    // Sample into RAM ring buffer every 5 minutes (or immediately on first valid reading)
+    // Update pump state before recording telemetry, so reports describe this sample.
+    updatePump();
+
+    // Keep local chart history at five-minute resolution, saved immediately.
     if (!isnan(lastTemp) && !isnan(lastHum) && !isnan(lastThi))
     {
-        if (historyCount == 0 || millis() - lastHistorySample >= HISTORY_SAMPLE_INTERVAL_MS)
+        if (!historySampledThisBoot || millis() - lastHistorySample >= HISTORY_SAMPLE_INTERVAL_MS)
         {
+            historySampledThisBoot = true;
             lastHistorySample = millis();
             addHistorySample(lastTemp, lastHum, lastThi);
-            handleTelemetrySample(lastTemp, lastHum, lastThi, lastWaterLevel, flowRateLPM, totalWaterUsedL, pumpIsOn, currentPumpReason);
+            historyDirty = !saveHistory();
+            char message[150];
+            snprintf(message, sizeof(message), "Temp %.1f C, humidity %.1f%%, THI %.1f; pump %s (%s)", lastTemp, lastHum, lastThi, pumpIsOn || bathPumpIsOn ? "ON" : "OFF", currentPumpReason);
+            appendActivity("Sensor", message);
+        }
+        if (!telemetrySampled || millis() - lastTelemetrySample >= TELEMETRY_INTERVAL_MS) {
+            telemetrySampled = true;
+            lastTelemetrySample = millis();
+            handleTelemetrySample(lastTemp, lastHum, lastThi, lastWaterLevel, flowRateLPM, totalWaterUsedL, pumpIsOn || bathPumpIsOn, currentPumpReason);
         }
     }
 
-    // Write history to LittleFS every 5-10 minutes (constant), minimal flash writes
+    // Retry a failed local-history save without losing its dirty flag
     if (millis() - lastHistorySave >= HISTORY_SAVE_INTERVAL_MS)
     {
         lastHistorySave = millis();
         if (historyDirty)
         {
-            saveHistory();
-            historyDirty = false;
+            historyDirty = !saveHistory();
         }
     }
 
@@ -2935,8 +3410,6 @@ void loop()
     // PUMP CONTROL (Single engine function)
     // pumpOn = waterOk AND (thiTrigger OR scheduled OR manual)
     // --------------------------------------------------------
-
-    updatePump();
 
     // --------------------------------------------------------
     // PERIODIC SERIAL OUTPUT

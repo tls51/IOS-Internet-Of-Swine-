@@ -25,6 +25,7 @@ const CHARTS = (() => {
 
   /* ── scale helpers ───────────────────────────────────────── */
   function scaleX(i, total, W, pad) {
+    if (total <= 1) return W / 2;
     return pad + (i / (total - 1)) * (W - pad * 2);
   }
   function scaleY(v, min, max, H, padT, padB) {
@@ -45,7 +46,15 @@ const CHARTS = (() => {
   /* ── Line / Area chart ───────────────────────────────────── */
   function drawLineChart(containerId, data, series, opts = {}) {
     const container = document.getElementById(containerId);
-    if (!container || !data.length) return;
+    if (!container) return;
+    data = (Array.isArray(data) ? data : []).filter(d => series.some(s => Number.isFinite(d[s.key])));
+    if (!data.length) {
+      container.innerHTML = '';
+      const empty = document.createElement('p');
+      empty.className = 'muted'; empty.textContent = 'No readings in this range.';
+      container.appendChild(empty);
+      return;
+    }
 
     const W = container.clientWidth || 600;
     const H = container.clientHeight || 220;
@@ -66,9 +75,9 @@ const CHARTS = (() => {
     svg.appendChild(defs);
 
     /* y-range across all series */
-    const allVals = data.flatMap(d => series.map(s => d[s.key])).filter(v => v != null);
-    let minV = Math.floor(Math.min(...allVals) - 2);
-    let maxV = Math.ceil(Math.max(...allVals) + 4);
+    const allVals = data.flatMap(d => series.map(s => d[s.key])).filter(Number.isFinite);
+    let minV = Math.floor(allVals.reduce((a, b) => Math.min(a, b), Infinity) - 2);
+    let maxV = Math.ceil(allVals.reduce((a, b) => Math.max(a, b), -Infinity) + 4);
 
     /* reference lines */
     (opts.refLines || []).forEach(r => {
@@ -103,10 +112,12 @@ const CHARTS = (() => {
 
     /* series */
     series.forEach(s => {
-      const pts = data.map((d, i) => [
+      const pts = data.flatMap((d, i) => Number.isFinite(d[s.key]) ? [[
         scaleX(i, data.length, W, padL),
         scaleY(d[s.key], minV, maxV, H, padT, padB),
-      ]);
+      ]] : []);
+      if (!pts.length) return;
+      if (pts.length === 1) svg.appendChild(el('circle', { cx: pts[0][0], cy: pts[0][1], r: 4, fill: s.color }));
 
       if (s.area) {
         const areaBottom = scaleY(minV, minV, maxV, H, padT, padB);
@@ -173,7 +184,7 @@ const CHARTS = (() => {
     const { svg, tt } = scaffold(container, W, H);
 
     const allVals = data.map(d => series.reduce((s, sr) => s + d[sr.key], 0));
-    const maxV    = Math.ceil(Math.max(...allVals) * 1.15);
+    const maxV    = Math.max(1, Math.ceil(allVals.reduce((a, b) => Math.max(a, b), 0) * 1.15));
 
     /* grid */
     for (let i = 0; i <= 4; i++) {

@@ -6,9 +6,13 @@
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const DB_PATH = path.join(__dirname, '..', 'ios.db');
+const DB_PATH = process.env.IOS_DB_PATH
+  ? path.resolve(process.env.IOS_DB_PATH)
+  : path.join(__dirname, '..', 'ios.db');
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = FULL');
+console.log(`[db] Using database: ${DB_PATH}`);
 
 /* ── Schema ─────────────────────────────────────────────── */
 db.exec(`
@@ -127,6 +131,12 @@ CREATE INDEX IF NOT EXISTS idx_offline_ts ON offline_readings(ts);
 })();
 
 /* ── Seed defaults (only if empty) ─────────────────────────── */
+// Preserve the original device time when an invalid RTC needs receipt-time dating.
+const offlineCols = db.prepare('PRAGMA table_info(offline_readings)').all();
+for (const [name, type] of [['source_ts_ms', 'INTEGER'], ['rtc_valid', 'INTEGER'], ['time_source', 'TEXT']]) {
+  if (!offlineCols.some(c => c.name === name)) db.exec(`ALTER TABLE offline_readings ADD COLUMN ${name} ${type}`);
+}
+
 const seedSchedules = db.prepare(`SELECT COUNT(*) AS n FROM schedules`).get();
 if (seedSchedules.n === 0) {
   const insert = db.prepare(`INSERT INTO schedules (type,label,time,duration,days,active) VALUES (?,?,?,?,?,?)`);
@@ -152,8 +162,12 @@ function latestReading() {
   return db.prepare(`SELECT * FROM readings ORDER BY ts DESC LIMIT 1`).get();
 }
 
-function readingsSince(sinceMs) {
-  return db.prepare(`SELECT * FROM readings WHERE ts >= ? ORDER BY ts ASC`).all(sinceMs);
+function readingsSince(sinceMs, untilMs = Date.now()) {
+  return db.prepare(`SELECT * FROM readings WHERE ts >= ? AND ts <= ? ORDER BY ts ASC`).all(sinceMs, untilMs);
+}
+
+function reportSummary() {
+  return db.prepare('SELECT COUNT(*) AS count, MIN(ts) AS firstTs, MAX(ts) AS lastTs FROM readings').get();
 }
 
 /* ── Water ──────────────────────────────────────────────── */
@@ -305,12 +319,13 @@ function logActivity(type, msg, ts) {
   );
 }
 
-function recentActivity(limit = 50) {
+function recentActivity(limit = 50, sinceMs = 0) {
   return db.prepare(`
     SELECT * FROM activity_log
+    WHERE ts >= ?
     ORDER BY ts DESC
     LIMIT ?
-  `).all(limit);
+  `).all(sinceMs, limit);
 }
 
 /* ── Offline Batch Readings ─────────────────────────────── */
@@ -320,8 +335,8 @@ function recentActivity(limit = 50) {
 function insertOfflineBatch(records) {
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO offline_readings
-      (id, ts, temp, humidity, thi, thi_label, water_level, flow_lpm, water_used, pump_on, pump_reason, synced_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, ts, temp, humidity, thi, thi_label, water_level, flow_lpm, water_used, pump_on, pump_reason, synced_at, source_ts_ms, rtc_valid, time_source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertMany = db.transaction((rows) => {
@@ -330,26 +345,23 @@ function insertOfflineBatch(records) {
     const accepted_ids = [];
 
     for (const r of rows) {
-      if (!r.id || typeof r.id !== 'string') {
+      if (!r || typeof r !== 'object' || !r.id || typeof r.id !== 'string') {
         skipped++;
         continue;
       }
 
-      // ts resolution priority:
-      //   1. ts_ms  — preferred (always written by firmware since the null-ts fix)
-      //   2. ts     — fallback for older firmware builds that wrote epoch-ms here
-      //   3. uptime_ms — firmware uptime when RTC was unavailable (no wall clock)
-      //   4. Date.now() — last resort: import the record with the server's current
-      //                   time rather than silently discard valid sensor data
-      const ts = typeof r.ts_ms    === 'number' ? r.ts_ms
+      // Preserve the raw device timestamp separately. Unix dates are accepted
+      // only with a plausible, valid RTC; uptime is dated by server receipt.
+      const sourceTs = typeof r.ts_ms    === 'number' ? r.ts_ms
                : typeof r.ts       === 'number' ? r.ts
                : typeof r.uptime_ms === 'number' ? r.uptime_ms
-               : Date.now();
-
-      if (!ts) {
-        skipped++;
-        continue;
-      }
+               : null;
+      const receivedAt = Date.now();
+      const clockValid = r.rtc_valid !== false && Number.isFinite(sourceTs)
+        && sourceTs >= Date.UTC(2024, 0, 1) && sourceTs <= receivedAt + 5 * 60e3;
+      // millis() is uptime, never a Unix date. Keep it for diagnosis and date
+      // unclocked readings by receipt time; exact offline capture time is unknown.
+      const ts = clockValid ? sourceTs : receivedAt;
 
       const temp        = typeof r.temp_c    === 'number' ? r.temp_c    : (typeof r.temp     === 'number' ? r.temp     : null);
       const humidity    = typeof r.humidity  === 'number' ? r.humidity  : null;
@@ -364,12 +376,14 @@ function insertOfflineBatch(records) {
       const info = stmt.run(
         r.id, ts, temp, humidity, thi, thi_label,
         water_level, flow_lpm, water_used, pump_on, pump_reason,
-        Date.now()
+        receivedAt, Number.isFinite(sourceTs) ? sourceTs : null,
+        clockValid ? 1 : 0, clockValid ? 'device' : 'server_receipt'
       );
 
       if (info.changes > 0) {
         inserted++;
         accepted_ids.push(r.id);
+        logActivity('Sensor', `Temp ${temp ?? 'unavailable'} C, humidity ${humidity ?? 'unavailable'}%, THI ${thi ?? 'unavailable'}; pump ${pump_on ? 'ON' : 'OFF'} (${pump_reason || 'unknown'})${clockValid ? '' : ' [capture time unavailable; dated by receipt]'}`, ts);
 
         // Also mirror into the main readings table if we have temp+humidity
         if (temp !== null && humidity !== null) {
@@ -422,7 +436,7 @@ function latestSyncTs() {
 
 module.exports = {
   db,
-  insertReading, latestReading, readingsSince,
+  insertReading, latestReading, readingsSince, reportSummary,
   insertWater, latestWater, weeklyWaterUsage,
   listSchedules, createSchedule, updateSchedule, toggleSchedule, deleteSchedule,
   getSetting, setSetting, getTHIThresholds, setTHIThresholds,
