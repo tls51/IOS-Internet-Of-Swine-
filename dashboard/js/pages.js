@@ -235,53 +235,70 @@ const PAGES = (() => {
   /* ── Water page ──────────────────────────────────────────── */
   function updateWater(state) {
     const levelEl = document.getElementById('water-level-val');
-    levelEl.textContent = state.waterLevel + '%';
-    levelEl.style.color = state.waterLevel > 30 ? '#22C55E' : '#EF4444';
-    document.getElementById('water-used-val').textContent = state.waterUsed.toFixed(0) + ' L';
-    document.getElementById('water-flow-val').textContent = state.flowRate + ' L/min';
+    levelEl.textContent = state.waterLevel != null ? state.waterLevel + '%' : '—';
+    levelEl.style.color = (state.waterLevel != null && state.waterLevel > 30) ? '#22C55E' : '#EF4444';
+    const usedNum = (typeof state.waterUsed === 'number') ? state.waterUsed : Number(state.waterUsed || 0);
+    document.getElementById('water-used-val').textContent = (Number.isFinite(usedNum) ? usedNum.toFixed(2) : '0.00') + ' L';
+    document.getElementById('water-flow-val').textContent = (state.flowRate != null ? state.flowRate : 0) + ' L/min';
 
     /* tank */
     renderTank('water-tank-visual', state.waterLevel);
     document.getElementById('water-tank-note').textContent =
       state.waterLevel > 60 ? 'Level OK'
     : state.waterLevel > 30 ? 'Refill recommended'
-    : '⚠ Refill immediately';
+    : '⚠️ Refill immediately';
 
-    /* breakdown bars */
+    /* breakdown bars: use real today's data */
     const bd = document.getElementById('water-breakdown');
-    const total = state.waterUsed || 1;
+    const today = (state.waterUsage && state.waterUsage.today)
+      || (state.waterUsage && state.waterUsage.days && state.waterUsage.days[state.waterUsage.days.length - 1])
+      || { mist: 0, bathe: 0, clean: 0, other: 0, total: usedNum || 0 };
+
+    const mistVal  = Number(today.mist)  || 0;
+    const batheVal = Number(today.bathe) || 0;
+    const cleanVal = Number(today.clean) || 0;
+    const otherVal = Number(today.other) || 0;
+    const sumToday = mistVal + batheVal + cleanVal + otherVal;
+    const totalToday = (today.total != null && today.total > 0) ? Number(today.total) : sumToday;
+    const denom = totalToday > 0 ? totalToday : 1;
+
     const parts = [
-      { label: 'Misting',  pct: 0.45, color: '#22C55E' },
-      { label: 'Bathing',  pct: 0.35, color: '#3B82F6' },
-      { label: 'Cleaning', pct: 0.20, color: '#F59E0B' },
+      { label: 'Misting',  val: mistVal,  color: '#22C55E' },
+      { label: 'Bathing',  val: batheVal, color: '#3B82F6' },
+      { label: 'Cleaning', val: cleanVal, color: '#F59E0B' },
+      { label: 'Other',    val: otherVal, color: '#8B949E' },
     ];
     bd.innerHTML = parts.map(p => {
-      const val = Math.round(total * p.pct);
-      const w   = Math.round(p.pct * 100);
+      const pct = totalToday > 0 ? Math.round((p.val / denom) * 100) : 0;
       return `
         <div class="breakdown-item">
           <div class="breakdown-row">
             <span class="muted">${p.label}</span>
-            <span style="font-weight:600">${val} L</span>
+            <span style="font-weight:600">${p.val.toFixed(2)} L (${pct}%)</span>
           </div>
           <div class="breakdown-bar-bg">
-            <div class="breakdown-bar-fill" style="width:${w}%;background:${p.color}"></div>
+            <div class="breakdown-bar-fill" style="width:${pct}%;background:${p.color}"></div>
           </div>
         </div>`;
     }).join('');
 
     /* bar chart */
-    CHARTS.drawBarChart('chart-water', state.weeklyWater, [
+    const chartData = (state.waterUsage && Array.isArray(state.waterUsage.days))
+      ? state.waterUsage.days
+      : (Array.isArray(state.weeklyWater) ? state.weeklyWater : []);
+
+    CHARTS.drawBarChart('chart-water', chartData, [
       { key: 'mist',  label: 'Misting',  color: '#22C55E' },
       { key: 'bathe', label: 'Bathing',  color: '#3B82F6' },
       { key: 'clean', label: 'Cleaning', color: '#F59E0B' },
+      { key: 'other', label: 'Other',    color: '#8B949E' },
     ]);
   }
 
   /* ── Auto systems page ───────────────────────────────────── */
   function updateAuto(state) {
     const threshold = state.threshold;
-    const { mistDurationMin = 5, mistPauseSec = 30 } = state.operationDurations || {};
+    const { mistOnSec = 10, mistPauseSec = 5 } = state.operationDurations || {};
 
     const slider = document.getElementById('threshold-slider');
     const valEl  = document.getElementById('threshold-val');
@@ -291,30 +308,149 @@ const PAGES = (() => {
     /* Update operation duration input fields if not currently focused */
     const inpDur = document.getElementById('inp-mist-dur');
     const inpPause = document.getElementById('inp-mist-pause');
-    if (inpDur && document.activeElement !== inpDur) inpDur.value = mistDurationMin;
+    if (inpDur && document.activeElement !== inpDur) inpDur.value = mistOnSec;
     if (inpPause && document.activeElement !== inpPause) inpPause.value = mistPauseSec;
 
+    /* Update RTC Invalid Alert Banner */
+    const rtcBanner = document.getElementById('rtc-invalid-banner');
+    if (rtcBanner) {
+      if (state.rtcTimeValid === false) {
+        rtcBanner.classList.remove('hidden');
+      } else {
+        rtcBanner.classList.add('hidden');
+      }
+    }
+
+    /* Update Schedule Cache & Synchronization Card */
+    const schedCacheDesc = document.getElementById('sched-cache-desc');
+    const schedCacheBadge = document.getElementById('sched-cache-badge');
+    const schedPullDesc = document.getElementById('sched-pull-desc');
+    const schedPullBadge = document.getElementById('sched-pull-badge');
+
+    const diag = state.scheduleDiag;
+    if (schedCacheDesc && schedCacheBadge) {
+      if (diag) {
+        const local = diag.localCount != null ? diag.localCount : 0;
+        const backend = diag.backendCount != null ? diag.backendCount : 0;
+        schedCacheDesc.textContent = `Cached in LittleFS: ${local} · Backend active: ${backend}`;
+        schedCacheBadge.textContent = `${local} cached`;
+        schedCacheBadge.className = local > 0 ? 'badge badge-green' : 'badge badge-muted';
+      } else {
+        schedCacheDesc.textContent = 'Cached schedules in LittleFS: —';
+        schedCacheBadge.textContent = '— cached';
+        schedCacheBadge.className = 'badge badge-muted';
+      }
+    }
+
+    if (schedPullDesc && schedPullBadge) {
+      if (diag && diag.lastPullMs > 0) {
+        const agoSec = Math.max(0, Math.round((Date.now() - diag.lastPullMs) / 1000));
+        const agoStr = agoSec < 60 ? `${agoSec}s ago` : `${Math.round(agoSec / 60)}m ago`;
+        if (diag.lastPullOk) {
+          schedPullDesc.textContent = `Last pull: ${agoStr} · Success`;
+          schedPullBadge.textContent = '✓ Sync OK';
+          schedPullBadge.className = 'badge badge-green';
+        } else {
+          schedPullDesc.textContent = `Last pull failed: ${diag.lastError || 'Error'} (${agoStr})`;
+          schedPullBadge.textContent = '⚠ Sync Error';
+          schedPullBadge.className = 'badge badge-danger';
+        }
+      } else {
+        schedPullDesc.textContent = 'Last pull: Never';
+        schedPullBadge.textContent = 'Checking…';
+        schedPullBadge.className = 'badge badge-muted';
+      }
+    }
+
+    /* Auto Systems List: Per-relay state, blockedReason, Scheduled now vs Relay ON */
+    const relays = state.relays || {
+      mist:  { on: !!state.mistActive,  scheduledNow: false, blockedReason: 'none' },
+      bath:  { on: !!state.bathActive,  scheduledNow: !!state.bathScheduled, blockedReason: 'none' },
+      clean: { on: !!state.cleanActive, scheduledNow: !!state.cleanScheduled, blockedReason: 'none' },
+    };
+
+    function blockedReasonLabel(code) {
+      if (!code || code === 'none') return null;
+      if (code === 'low_water') return 'Blocked: Low Water (<10%)';
+      if (code === 'tank_sensor_error') return 'Blocked: Tank Sensor Error';
+      if (code === 'rtc_invalid') return 'Blocked: RTC Invalid';
+      return `Blocked: ${code}`;
+    }
+
     const systems = [
-      { label: 'Shower / Bathing System',  icon: '🚿',  active: state.bathActive,  trigger: 'Schedule-based',       desc: 'Executes pre-set bathing schedules via relay-controlled pump.' },
-      { label: 'Misting / Cooling System', icon: '🌫️', active: state.mistActive,  trigger: `Temp > ${threshold}°C`, desc: `Activates when temperature exceeds ${threshold}°C. Cycles: ${mistDurationMin} min ON → ${mistPauseSec} s pause.` },
-      { label: 'Waste Cleaning System',    icon: '🧹',  active: state.cleanActive, trigger: 'Schedule-based',       desc: 'Water-based flushing mechanism on admin-defined schedule.' },
+      {
+        key: 'bath',
+        label: 'Shower / Bathing System',
+        pin: 'GPIO 7',
+        icon: '🚿',
+        relayOn: relays.bath ? !!relays.bath.on : !!state.bathActive,
+        scheduledNow: relays.bath ? !!relays.bath.scheduledNow : !!state.bathScheduled,
+        blockedReason: relays.bath ? relays.bath.blockedReason : 'none',
+        trigger: 'Schedule-based',
+        desc: 'Executes pre-set bathing schedules via relay-controlled pump.'
+      },
+      {
+        key: 'mist',
+        label: 'Misting / Cooling System',
+        pin: 'GPIO 18',
+        icon: '🌫️',
+        relayOn: relays.mist ? !!relays.mist.on : !!state.mistActive,
+        scheduledNow: false,
+        blockedReason: relays.mist ? relays.mist.blockedReason : 'none',
+        trigger: `Temp > ${threshold}°C`,
+        desc: `Activates when temperature exceeds ${threshold}°C. Cycles: ${mistOnSec} s ON → ${mistPauseSec} s pause.`
+      },
+      {
+        key: 'clean',
+        label: 'Waste Cleaning System',
+        pin: 'GPIO 15',
+        icon: '🧹',
+        relayOn: relays.clean ? !!relays.clean.on : !!state.cleanActive,
+        scheduledNow: relays.clean ? !!relays.clean.scheduledNow : !!state.cleanScheduled,
+        blockedReason: relays.clean ? relays.clean.blockedReason : 'none',
+        trigger: 'Schedule-based',
+        desc: 'Water-based flushing mechanism on admin-defined schedule.'
+      },
     ];
 
     const list = document.getElementById('auto-sys-list');
     if (list) {
-      list.innerHTML = systems.map(s => `
+      list.innerHTML = systems.map(s => {
+        const badges = [];
+        // Scheduled now badge for Bath & Clean
+        if (s.key === 'bath' || s.key === 'clean') {
+          if (s.scheduledNow) {
+            badges.push('<span class="badge badge-blue">Scheduled now</span>');
+          } else {
+            badges.push('<span class="badge badge-muted">Not scheduled</span>');
+          }
+        }
+        // Relay ON/OFF badge
+        if (s.relayOn) {
+          badges.push('<span class="badge badge-green"><span class="status-dot" style="background:#22C55E;box-shadow:0 0 6px #22C55E"></span>Relay ON</span>');
+        } else {
+          badges.push('<span class="badge badge-muted"><span class="status-dot" style="background:#8B949E"></span>Relay OFF</span>');
+        }
+        // Blocked reason badge
+        const blockedText = blockedReasonLabel(s.blockedReason);
+        if (blockedText) {
+          badges.push(`<span class="badge badge-danger">${blockedText}</span>`);
+        }
+
+        return `
         <div class="card auto-card">
-          <div class="auto-icon-box${s.active ? ' on' : ''}">${s.icon}</div>
+          <div class="auto-icon-box${s.relayOn ? ' on' : ''}">${s.icon}</div>
           <div class="auto-body">
-            <div class="auto-name">${s.label}</div>
+            <div class="auto-name">${s.label} <span class="muted small">(${s.pin})</span></div>
             <div class="auto-desc">${s.desc}</div>
             <div class="auto-trigger">Trigger: <span>${s.trigger}</span></div>
+            ${blockedText ? `<div class="mt-6" style="color:var(--danger);font-size:12px;font-weight:600;">⚠ ${blockedText}</div>` : ''}
           </div>
-          <span class="badge ${s.active ? 'badge-green' : 'badge-muted'}">
-            <span class="status-dot" style="background:${s.active ? '#22C55E' : '#8B949E'};${s.active ? 'box-shadow:0 0 6px #22C55E' : ''}"></span>
-            ${s.active ? 'Active' : 'Standby'}
-          </span>
-        </div>`).join('');
+          <div class="auto-badges" style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+            ${badges.join('')}
+          </div>
+        </div>`;
+      }).join('');
     }
 
     /* Update Relay Module & Water Pump Test Box */
@@ -377,6 +513,9 @@ const PAGES = (() => {
       if (state.rtcOk === false) {
         rtcStatus.textContent = 'Hardware Error / Not Detected';
         rtcStatus.className = 'color-red';
+      } else if (state.rtcTimeValid === false) {
+        rtcStatus.textContent = 'Invalid / Lost (Needs Sync)';
+        rtcStatus.className = 'color-warn';
       } else if (state.epoch != null) {
         rtcStatus.textContent = 'OK (Synchronized)';
         rtcStatus.className = 'color-green';
@@ -648,9 +787,9 @@ const PAGES = (() => {
     const sensors = [
       { id: 'diag-dht',   key: 'dht_ok',   detailKey: 'dht',     label: 'DHT22 Sensor (GPIO 4)'       },
       { id: 'diag-rtc',   key: 'rtc_ok',   detailKey: 'rtc',     label: 'DS3231 RTC (I2C 8,9)'        },
-      { id: 'diag-tank',  key: 'tank_ok',  detailKey: 'tank',    label: 'HC-SR04 Tank (T:5, E:6)'     },
-      { id: 'diag-flow',  key: 'flow_ok',  detailKey: 'flow',    label: 'YF-S201B Flow (GPIO 15)'     },
-      { id: 'diag-relay', key: 'relay_ok', detailKey: 'relay',   label: 'Relay Driver (GPIO 18)'      },
+      { id: 'diag-tank',  key: 'tank_ok',  detailKey: 'tank',    label: 'HC-SR04 Tank (GPIO 16/17)'   },
+      { id: 'diag-flow',  key: 'flow_ok',  detailKey: 'flow',    label: 'YF-S201B Flow (GPIO 5)'       },
+      { id: 'diag-relay', key: 'relay_ok', detailKey: 'relay',   label: 'Relays (GPIO 18, 7, 15)'      },
     ];
 
     sensors.forEach(({ id, key, detailKey }) => {
@@ -771,7 +910,26 @@ const PAGES = (() => {
 
 
   /* ── Reports page ────────────────────────────────────────── */
-  function updateReports(state) {
+  let _lastRenderedReportHistory = null;
+  let _lastRenderedReportRange = null;
+  let _lastRenderedSummary = null;
+  let _lastRenderedError = null;
+
+  function updateReports(state, force = false) {
+    const historyChanged = state.reportHistory !== _lastRenderedReportHistory;
+    const rangeChanged   = state.reportRange !== _lastRenderedReportRange;
+    const summaryChanged = state.reportSummary !== _lastRenderedSummary;
+    const errorChanged   = state.reportError !== _lastRenderedError;
+
+    if (!force && !historyChanged && !rangeChanged && !summaryChanged && !errorChanged) {
+      return;
+    }
+
+    _lastRenderedReportHistory = state.reportHistory;
+    _lastRenderedReportRange   = state.reportRange;
+    _lastRenderedSummary       = state.reportSummary;
+    _lastRenderedError         = state.reportError;
+
     CHARTS.drawLineChart('chart-rep-temp', state.reportHistory || [], [
       { key: 'temp', label: 'Temp °C', color: '#EF4444', unit: '°C' },
     ]);
@@ -782,7 +940,7 @@ const PAGES = (() => {
     const message = document.getElementById('report-status');
     if (message) {
       const summary = state.reportSummary;
-      document.querySelectorAll('.range-tab').forEach(btn => {
+      document.querySelectorAll('#page-reports .range-tab').forEach(btn => {
         btn.disabled = !!(summary && summary.supportedRanges && !summary.supportedRanges.includes(btn.dataset.range));
       });
       const rows = state.reportHistory || [];
@@ -793,7 +951,7 @@ const PAGES = (() => {
           ? `No readings in this range. Latest saved reading: ${new Date(summary.lastTs).toLocaleString()}. Select All saved to view earlier readings.`
           : 'No saved readings yet. Keep the ESP32 powered and check its backend connection.';
       } else {
-        message.textContent = `${rows.length.toLocaleString()} readings shown · ${summary && summary.source === 'sqlite' ? 'Saved in SQLite' : 'Saved on ESP32 (limited history)'}.`;
+        message.textContent = `${rows.length.toLocaleString()} points shown · ${summary && summary.source === 'sqlite' ? 'Saved in SQLite' : 'Saved on ESP32 (limited history)'}.`;
       }
     }
 

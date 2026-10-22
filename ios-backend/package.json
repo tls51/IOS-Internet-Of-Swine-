@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node test-auth.js"
+    "test": "node test-auth.js && node test-water.js && node test-relay.js && node test-schedules.js && node test-reports.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",

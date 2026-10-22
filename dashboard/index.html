@@ -15,7 +15,7 @@
   <div id="login-screen">
     <div class="login-wrap">
       <div class="login-logo">
-        <span class="pig-icon">🐷</span>
+        <span class="pig-icon"></span>
         <h1 class="logo-title">IoS</h1>
         <p class="logo-sub">Internet of Swine · Admin Portal</p>
       </div>
@@ -44,7 +44,7 @@
     <!-- Sidebar -->
     <aside id="sidebar">
       <div class="sidebar-logo">
-        <span class="pig-icon-sm">🐷</span>
+        <span class="pig-icon-sm"></span>
         <div>
           <div class="sidebar-title">IoS System</div>
           <div class="sidebar-sub">Internet of Swine</div>
@@ -53,14 +53,13 @@
 
       <nav>
         <ul class="nav-list">
-          <li><button class="nav-btn active" data-page="dashboard"><span>📊</span> Dashboard</button></li>
-          <li><button class="nav-btn" data-page="env"><span>🌡️</span> Environmental</button></li>
-          <li><button class="nav-btn" data-page="water"><span>💧</span> Water Mgmt</button></li>
-          <li><button class="nav-btn" data-page="mist"><span>🌫️</span> Misting Schedule</button></li>
-          <li><button class="nav-btn" data-page="bath"><span>🚿</span> Bathing Schedule</button></li>
-          <li><button class="nav-btn" data-page="clean"><span>🧹</span> Cleaning Schedule</button></li>
-          <li><button class="nav-btn" data-page="auto"><span>⚙️</span> Auto Systems</button></li>
-          <li><button class="nav-btn" data-page="reports"><span>📋</span> Reports</button></li>
+          <li><button class="nav-btn active" data-page="dashboard"><span></span> Dashboard</button></li>
+          <li><button class="nav-btn" data-page="env"><span></span> Environmental</button></li>
+          <li><button class="nav-btn" data-page="water"><span></span> Water Mgmt</button></li>
+          <li><button class="nav-btn" data-page="bath"><span></span> Bathing Schedule</button></li>
+          <li><button class="nav-btn" data-page="clean"><span></span> Cleaning Schedule</button></li>
+          <li><button class="nav-btn" data-page="auto"><span></span> Auto Systems</button></li>
+          <li><button class="nav-btn" data-page="reports"><span></span> Reports</button></li>
         </ul>
       </nav>
 
@@ -88,10 +87,10 @@
         </div>
         <div class="topbar-right">
           <span id="thi-chip" class="badge">THI — · —</span>
-          <span id="live-env" class="live-env">🌡 —°C · 💧 —%</span>
+          <span id="live-env" class="live-env">🌡 —°C ·  —%</span>
           <span id="live-time" class="live-time"></span>
-          <button id="btn-sync-time-top" class="btn btn-sm btn-outline" data-mode="device" title="Sync RTC with phone time">🕒 Set time</button>
-          <button id="btn-token-top" class="btn btn-sm btn-outline" title="Set device access token">🔑 Token</button>
+          <button id="btn-sync-time-top" class="btn btn-sm btn-outline" data-mode="device" title="Sync RTC with phone time"> Set time</button>
+          <button id="btn-token-top" class="btn btn-sm btn-outline" title="Set device access token"> Token</button>
         </div>
       </header>
 
@@ -108,7 +107,7 @@
                   <div class="field-label">Temperature</div>
                   <div class="stat-val" id="dash-temp">—</div>
                 </div>
-                <span class="stat-icon">🌡️</span>
+                <span class="stat-icon"></span>
               </div>
             </div>
             <div class="card stat-card">
@@ -117,7 +116,7 @@
                   <div class="field-label">Humidity</div>
                   <div class="stat-val color-blue" id="dash-hum">—</div>
                 </div>
-                <span class="stat-icon">💧</span>
+                <span class="stat-icon"></span>
               </div>
             </div>
             <div class="card stat-card">
@@ -127,7 +126,7 @@
                   <div class="stat-val" id="dash-thi">—</div>
                   <span id="dash-thi-badge" class="badge mt-6">—</span>
                 </div>
-                <span class="stat-icon">📊</span>
+                <span class="stat-icon"></span>
               </div>
             </div>
           </div>
@@ -137,7 +136,7 @@
               <div class="field-label mb-14">Automated Systems</div>
               <div class="sys-list">
                 <div class="sys-row" id="sys-mist">
-                  <span class="sys-icon">🌫️</span>
+                  <span class="sys-icon"></span>
                   <div class="sys-info">
                     <div class="sys-name">Misting System</div>
                     <div class="sys-desc">Auto-triggers when THI ≥ threshold</div>
@@ -145,7 +144,7 @@
                   <span class="badge badge-muted sys-status">Standby</span>
                 </div>
                 <div class="sys-row" id="sys-bath">
-                  <span class="sys-icon">🚿</span>
+                  <span class="sys-icon"></span>
                   <div class="sys-info">
                     <div class="sys-name">Bathing System</div>
                     <div class="sys-desc">Scheduled twice daily</div>
@@ -153,7 +152,7 @@
                   <span class="badge badge-muted sys-status">Standby</span>
                 </div>
                 <div class="sys-row" id="sys-clean">
-                  <span class="sys-icon">🧹</span>
+                  <span class="sys-icon"></span>
                   <div class="sys-info">
                     <div class="sys-name">Cleaning System</div>
                     <div class="sys-desc">Scheduled waste flushing</div>
@@ -258,7 +257,7 @@
                   <div class="field-label">Tank Level</div>
                   <div class="stat-val" id="water-level-val">—</div>
                 </div>
-                <span class="stat-icon">💧</span>
+                <span class="stat-icon"></span>
               </div>
             </div>
             <div class="card stat-card">
@@ -267,7 +266,7 @@
                   <div class="field-label">Today's Usage</div>
                   <div class="stat-val color-blue" id="water-used-val">—</div>
                 </div>
-                <span class="stat-icon">📏</span>
+                <span class="stat-icon"></span>
               </div>
             </div>
             <div class="card stat-card">
@@ -276,7 +275,7 @@
                   <div class="field-label">Flow Rate</div>
                   <div class="stat-val" id="water-flow-val">—</div>
                 </div>
-                <span class="stat-icon">🚰</span>
+                <span class="stat-icon"></span>
               </div>
             </div>
           </div>
@@ -296,18 +295,18 @@
           </div>
 
           <div class="card">
-            <div class="field-label mb-14">Weekly Water Usage (L)</div>
+            <div class="report-topbar mb-14">
+              <div class="field-label" id="water-chart-title">Water Usage (L)</div>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <div class="range-tabs" id="water-range-tabs">
+                  <button class="range-tab active" data-range="7d">7d</button>
+                  <button class="range-tab" data-range="30d">30d</button>
+                </div>
+                <button class="btn btn-outline" id="btn-export-water-csv">📥 Export Water CSV</button>
+              </div>
+            </div>
             <div class="chart-area" id="chart-water"></div>
           </div>
-        </section>
-
-        <!-- MISTING SCHEDULE -->
-        <section id="page-mist" class="page">
-          <div class="sched-topbar mb-20">
-            <span id="mist-count" class="muted small">— schedules active</span>
-            <button class="btn btn-primary" id="btn-add-mist">+ Add Schedule</button>
-          </div>
-          <div class="sched-list" id="mist-list"></div>
         </section>
 
         <!-- BATHING SCHEDULE -->
@@ -330,6 +329,24 @@
 
         <!-- AUTO SYSTEMS -->
         <section id="page-auto" class="page ">
+          <!-- RTC Invalid Alert Banner -->
+          <div id="rtc-invalid-banner" class="card mb-20 hidden" style="border-left: 4px solid #EF4444; background: rgba(239, 68, 68, 0.08);">
+            <div class="pump-status-row">
+              <div class="pump-status-left">
+                <span style="font-size: 24px; margin-right: 12px;">⚠️</span>
+                <div>
+                  <div class="pump-title" style="color: #EF4444; font-weight: 600;">RTC Time Invalid or Lost</div>
+                  <div class="pump-meta muted small">Hardware clock time is invalid. Scheduled Bathing and Cleaning are blocked from firing until time is synchronized.</div>
+                </div>
+              </div>
+              <div>
+                <button id="btn-banner-set-time" class="btn btn-primary" style="background: #EF4444; border-color: #EF4444;">
+                  Set Time Now
+                </button>
+              </div>
+            </div>
+          </div>
+
           <div class="card info-card mb-20">
             <span>ℹ</span>
             <p>These systems activate automatically based on environmental thresholds and scheduled times. No manual trigger is required.</p>
@@ -341,7 +358,7 @@
             <p class="muted small mb-14">Synchronize the onboard hardware RTC with your phone or computer clock for accurate scheduled misting and watering.</p>
             <div class="pump-status-row">
               <div class="pump-status-left">
-                <div class="pump-indicator-icon">🕒</div>
+                <div class="pump-indicator-icon"></div>
                 <div>
                   <div class="pump-title">RTC Status: <span id="rtc-status-text" class="color-green">OK</span></div>
                   <div class="pump-meta muted small" id="rtc-time-meta">Hardware clock in UTC · Converted to local time for display</div>
@@ -349,7 +366,7 @@
               </div>
               <div>
                 <button id="btn-set-time" class="btn btn-primary" data-mode="device">
-                  <span>🕒</span> Set time
+                  <span></span> Set time
                 </button>
               </div>
             </div>
@@ -363,7 +380,7 @@
             <div class="grid-2 mb-10">
               <div class="sys-list">
                 <div class="sys-row">
-                  <span class="sys-icon">💾</span>
+                  <span class="sys-icon"></span>
                   <div class="sys-info">
                     <div class="sys-name">MicroSD Card</div>
                     <div class="sys-desc" id="sd-meta">SPI (CS: 10, MOSI: 11, SCK: 12, MISO: 13)</div>
@@ -371,7 +388,7 @@
                   <span id="sd-status-badge" class="badge badge-muted">Checking…</span>
                 </div>
                 <div class="sys-row">
-                  <span class="sys-icon">💻</span>
+                  <span class="sys-icon"></span>
                   <div class="sys-info">
                     <div class="sys-name">Backend Database</div>
                     <div class="sys-desc" id="backend-status-desc">Windows Laptop SQLite</div>
@@ -381,7 +398,7 @@
               </div>
               <div class="sys-list">
                 <div class="sys-row">
-                  <span class="sys-icon">📋</span>
+                  <span class="sys-icon"></span>
                   <div class="sys-info">
                     <div class="sys-name">Pending Offline Records</div>
                     <div class="sys-desc">Unsynchronized readings on MicroSD</div>
@@ -389,12 +406,40 @@
                   <span id="pending-records-count" class="badge badge-blue">0 pending</span>
                 </div>
                 <div class="sys-row">
-                  <span class="sys-icon">🔄</span>
+                  <span class="sys-icon"></span>
                   <div class="sys-info">
                     <div class="sys-name">Sync Status</div>
                     <div class="sys-desc" id="last-sync-time-desc">Last sync: None yet</div>
                   </div>
                   <span id="sync-state-badge" class="badge badge-muted">Idle</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Schedule Cache & Synchronization Card -->
+          <div class="card mb-20">
+            <div class="field-label mb-14">Schedule Cache &amp; Synchronization</div>
+            <p class="muted small mb-14">Firmware LittleFS cache and periodic backend sync status for bathing and cleaning schedules.</p>
+            <div class="grid-2 mb-10">
+              <div class="sys-list">
+                <div class="sys-row">
+                  <span class="sys-icon">📅</span>
+                  <div class="sys-info">
+                    <div class="sys-name">Schedule Cache</div>
+                    <div class="sys-desc" id="sched-cache-desc">Cached schedules in LittleFS: —</div>
+                  </div>
+                  <span id="sched-cache-badge" class="badge badge-muted">— cached</span>
+                </div>
+              </div>
+              <div class="sys-list">
+                <div class="sys-row">
+                  <span class="sys-icon">🔄</span>
+                  <div class="sys-info">
+                    <div class="sys-name">Backend Schedule Sync</div>
+                    <div class="sys-desc" id="sched-pull-desc">Last pull: Never</div>
+                  </div>
+                  <span id="sched-pull-badge" class="badge badge-muted">Checking…</span>
                 </div>
               </div>
             </div>
@@ -417,8 +462,8 @@
             <p class="muted small mb-14">Adjust the runtime and pause interval for the automated misting cycle when cooling is active.</p>
             <div class="thi-config-grid">
               <div class="field-group mb-0">
-                <label class="field-label">Active Mist Run (minutes)</label>
-                <input id="inp-mist-dur" type="number" class="inp" min="1" max="60" step="1" value="5" />
+                <label class="field-label">Active Mist Run (seconds)</label>
+                <input id="inp-mist-dur" type="number" class="inp" min="1" max="600" step="1" value="10" />
               </div>
               <div class="field-group mb-0">
                 <label class="field-label">Pause Interval (seconds)</label>
@@ -438,10 +483,10 @@
             <div class="pump-test-box">
               <div class="pump-status-row">
                 <div class="pump-status-left">
-                  <div class="pump-indicator-icon" id="pump-indicator-icon">⚡</div>
+                  <div class="pump-indicator-icon" id="pump-indicator-icon"></div>
                   <div>
                     <div class="pump-title" id="pump-current-title">Relay / Pump Status: <span id="pump-relay-text" class="color-blue">Standby (OFF)</span></div>
-                    <div class="pump-meta muted small" id="pump-relay-meta">GPIO 18 (Misting) &amp; GPIO 7 (Bathing) · Active-LOW Relays</div>
+                    <div class="pump-meta muted small" id="pump-relay-meta">GPIO 18 (Misting), GPIO 7 (Bathing) &amp; GPIO 15 (Cleaning) · Active-LOW Relays</div>
                   </div>
                 </div>
                 <div class="pump-badge-wrap">
@@ -451,10 +496,10 @@
 
               <div class="pump-actions-grid mt-16">
                 <button id="btn-test-pump" class="btn btn-primary">
-                  <span>🧪</span> Test Water Pump (3s Pulse)
+                  <span></span> Test Water Pump (3s Pulse)
                 </button>
                 <button id="btn-toggle-pump" class="btn btn-outline">
-                  <span>💧</span> <span id="btn-toggle-pump-text">Manual Pump ON</span>
+                  <span></span> <span id="btn-toggle-pump-text">Manual Pump ON</span>
                 </button>
               </div>
 
@@ -469,7 +514,7 @@
             <div class="field-label mb-14">Connected Sensor Hardware Diagnostics</div>
             <div id="sensor-diag-grid" class="sensor-diag-grid">
               <div class="sensor-diag-item" id="diag-dht">
-                <div class="sensor-diag-icon">🌡️</div>
+                <div class="sensor-diag-icon"></div>
                 <div class="sensor-diag-info">
                   <div class="sensor-diag-name">DHT22 Sensor (GPIO 4)</div>
                   <div class="sensor-diag-desc muted small">Temp &amp; Humidity</div>
@@ -477,7 +522,7 @@
                 <span class="badge badge-muted diag-badge">Checking…</span>
               </div>
               <div class="sensor-diag-item" id="diag-rtc">
-                <div class="sensor-diag-icon">⏰</div>
+                <div class="sensor-diag-icon"></div>
                 <div class="sensor-diag-info">
                   <div class="sensor-diag-name">DS3231 RTC (I2C 8,9)</div>
                   <div class="sensor-diag-desc muted small">Real-Time Clock</div>
@@ -485,32 +530,32 @@
                 <span class="badge badge-muted diag-badge">Checking…</span>
               </div>
               <div class="sensor-diag-item" id="diag-tank">
-                <div class="sensor-diag-icon">📏</div>
+                <div class="sensor-diag-icon"></div>
                 <div class="sensor-diag-info">
-                  <div class="sensor-diag-name">HC-SR04 Sensor (T:5, E:6)</div>
+                  <div class="sensor-diag-name">HC-SR04 Sensor (GPIO 16/17)</div>
                   <div class="sensor-diag-desc muted small">Ultrasonic Water Tank</div>
                 </div>
                 <span class="badge badge-muted diag-badge">Checking…</span>
               </div>
               <div class="sensor-diag-item" id="diag-flow">
-                <div class="sensor-diag-icon">🚰</div>
+                <div class="sensor-diag-icon"></div>
                 <div class="sensor-diag-info">
-                  <div class="sensor-diag-name">YF-S201B Flow (GPIO 15)</div>
+                  <div class="sensor-diag-name">YF-S201B Flow (GPIO 5)</div>
                   <div class="sensor-diag-desc muted small">Water Pulse Counter</div>
                 </div>
                 <span class="badge badge-muted diag-badge">Checking…</span>
               </div>
               <div class="sensor-diag-item" id="diag-relay">
-                <div class="sensor-diag-icon">⚡</div>
+                <div class="sensor-diag-icon"></div>
                 <div class="sensor-diag-info">
-                  <div class="sensor-diag-name">Relay &amp; Water Pump (GPIO 18)</div>
-                  <div class="sensor-diag-desc muted small">Misting &amp; Pump Switch</div>
+                  <div class="sensor-diag-name">Relays &amp; Water Pumps (GPIO 18, 7, 15)</div>
+                  <div class="sensor-diag-desc muted small">Misting, Bath &amp; Clean Relays</div>
                 </div>
                 <span class="badge badge-muted diag-badge">Checking…</span>
               </div>
               <div class="sensor-diag-item" id="diag-sd">
                 <div class="sd-diag-header">
-                  <div class="sensor-diag-icon">💾</div>
+                  <div class="sensor-diag-icon"></div>
                   <div class="sensor-diag-info">
                     <div class="sensor-diag-name">MicroSD SPI Storage</div>
                     <div class="sensor-diag-desc muted small">Offline JSONL Log (GPIO 10,11,12,13)</div>

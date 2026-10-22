@@ -56,6 +56,13 @@ const CHARTS = (() => {
       return;
     }
 
+    // Cap points to prevent SVG rendering bottlenecks (max 400 points)
+    const MAX_CHART_POINTS = 400;
+    if (data.length > MAX_CHART_POINTS) {
+      const step = Math.ceil(data.length / MAX_CHART_POINTS);
+      data = data.filter((_, i) => i % step === 0 || i === data.length - 1);
+    }
+
     const W = container.clientWidth || 600;
     const H = container.clientHeight || 220;
     const padL = 40, padR = 12, padT = 20, padB = 30;
@@ -106,7 +113,7 @@ const CHARTS = (() => {
       if (i % labelEvery !== 0) return;
       const x = scaleX(i, data.length, W, padL);
       const lbl = el('text', { x, y: H - 4, class: 'axis-label', 'text-anchor': 'middle' });
-      lbl.textContent = d.time;
+      lbl.textContent = d.label || d.time || '';
       svg.appendChild(lbl);
     });
 
@@ -148,7 +155,7 @@ const CHARTS = (() => {
       vLine.setAttribute('x2', x);
       vLine.setAttribute('opacity', '0.4');
 
-      let html = `<div class="tt-row" style="font-weight:600;color:var(--text);margin-bottom:4px">${d.time}</div>`;
+      let html = `<div class="tt-row" style="font-weight:600;color:var(--text);margin-bottom:4px">${d.label || d.time || ''}</div>`;
       series.forEach(s => {
         html += `<div class="tt-row"><span><span class="tt-dot" style="background:${s.color}"></span>${s.label}</span><span style="color:${s.color};font-weight:600">${d[s.key]}${s.unit||''}</span></div>`;
       });
@@ -172,10 +179,10 @@ const CHARTS = (() => {
     container.appendChild(leg);
   }
 
-  /* ── Bar chart ───────────────────────────────────────────── */
+  /* ── Bar chart (Stacked) ──────────────────────────────────── */
   function drawBarChart(containerId, data, series) {
     const container = document.getElementById(containerId);
-    if (!container || !data.length) return;
+    if (!container || !data || !data.length) return;
 
     const W = container.clientWidth || 600;
     const H = container.clientHeight || 200;
@@ -183,7 +190,10 @@ const CHARTS = (() => {
 
     const { svg, tt } = scaffold(container, W, H);
 
-    const allVals = data.map(d => series.reduce((s, sr) => s + d[sr.key], 0));
+    const allVals = data.map(d => {
+      if (d.total != null && Number.isFinite(Number(d.total))) return Number(d.total);
+      return series.reduce((s, sr) => s + (Number(d[sr.key]) || 0), 0);
+    });
     const maxV    = Math.max(1, Math.ceil(allVals.reduce((a, b) => Math.max(a, b), 0) * 1.15));
 
     /* grid */
@@ -192,30 +202,79 @@ const CHARTS = (() => {
       const y = scaleY(v, 0, maxV, H, padT, padB);
       svg.appendChild(el('line', { x1: padL, y1: y, x2: W - padR, y2: y, class: 'grid-line' }));
       const lbl = el('text', { x: padL - 4, y: y + 4, class: 'axis-label', 'text-anchor': 'end' });
-      lbl.textContent = Math.round(v);
+      lbl.textContent = (v % 1 === 0) ? v : v.toFixed(1);
       svg.appendChild(lbl);
     }
 
-    const groupW = (W - padL - padR) / data.length;
-    const gap    = groupW * 0.15;
-    const barW   = (groupW - gap * 2) / series.length;
+    const availW = W - padL - padR;
+    const groupW = availW / data.length;
+    const barW   = Math.max(2, Math.min(groupW * 0.7, 32));
+    const labelInterval = data.length > 14 ? Math.ceil(data.length / 7) : 1;
 
     data.forEach((d, gi) => {
-      const gx = padL + gi * groupW + gap;
-      series.forEach((s, si) => {
-        const bx = gx + si * barW;
-        const bh = (d[s.key] / maxV) * (H - padT - padB);
-        const by = H - padB - bh;
+      const cx = padL + gi * groupW + groupW / 2;
+      const bx = cx - barW / 2;
+      let currentY = H - padB;
+
+      series.forEach((s) => {
+        const val = Number(d[s.key]) || 0;
+        if (val <= 0) return;
+        const bh = (val / maxV) * (H - padT - padB);
+        const by = currentY - bh;
         const rect = el('rect', {
-          x: bx, y: by, width: barW - 2, height: bh,
-          fill: s.color, rx: '3',
+          x: bx, y: by, width: barW, height: bh,
+          fill: s.color, rx: '2',
         });
         svg.appendChild(rect);
+        currentY = by;
       });
+
       /* x label */
-      const lbl = el('text', { x: gx + (groupW - gap * 2) / 2, y: H - 6, class: 'axis-label', 'text-anchor': 'middle' });
-      lbl.textContent = d.day || d.label || '';
-      svg.appendChild(lbl);
+      if (gi % labelInterval === 0 || gi === data.length - 1) {
+        const lbl = el('text', { x: cx, y: H - 8, class: 'axis-label', 'text-anchor': 'middle' });
+        let dateText = d.day || d.label || '';
+        if (d.date) {
+          const parts = String(d.date).split('-');
+          const md = parts.length >= 3 ? `${Number(parts[1])}/${Number(parts[2])}` : d.date;
+          dateText = (data.length <= 7 && d.day) ? `${md} ${d.day}` : md;
+        }
+        lbl.textContent = dateText;
+        svg.appendChild(lbl);
+      }
+    });
+
+    /* hover overlay */
+    const overlay = el('rect', {
+      x: padL, y: padT, width: availW, height: H - padT - padB,
+      fill: 'transparent', style: 'cursor:crosshair;'
+    });
+    svg.appendChild(overlay);
+
+    overlay.addEventListener('mousemove', (e) => {
+      const rect = container.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const idx = Math.floor((mx - padL) / groupW);
+      if (idx < 0 || idx >= data.length) return;
+
+      const d = data[idx];
+      let header = d.date || d.day || '';
+      if (d.date && d.day) header = `${d.date} (${d.day})`;
+      let html = `<div class="tt-row" style="font-weight:600;color:var(--text);margin-bottom:4px">${header}</div>`;
+      let totalL = 0;
+      series.forEach(s => {
+        const val = Number(d[s.key]) || 0;
+        totalL += val;
+        html += `<div class="tt-row"><span><span class="tt-dot" style="background:${s.color}"></span>${s.label}</span><span style="color:${s.color};font-weight:600">${val.toFixed(2)} L</span></div>`;
+      });
+      html += `<div class="tt-row" style="border-top:1px solid rgba(255,255,255,.1);margin-top:4px;padding-top:4px;font-weight:600"><span>Total</span><span>${(d.total != null ? Number(d.total) : totalL).toFixed(2)} L</span></div>`;
+      tt.innerHTML = html;
+      tt.classList.add('visible');
+      const tl = Math.min(Math.max(mx + 12, padL), W - 150);
+      tt.style.left = tl + 'px';
+      tt.style.top  = '10px';
+    });
+    overlay.addEventListener('mouseleave', () => {
+      tt.classList.remove('visible');
     });
 
     /* legend */

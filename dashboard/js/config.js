@@ -46,10 +46,10 @@ function setAuthToken(token) {
 }
 
 function promptForToken(message) {
-  // Maintained for backward compatibility, not used in control flow
   const msg = message || 'Control operations require authorization.\nPlease enter the device access token:';
-  const entered = window.prompt(msg, getAuthToken());
-  if (entered !== null && entered.trim() !== '') {
+  const currentToken = (typeof getAuthToken === 'function') ? getAuthToken() : '';
+  const entered = window.prompt(msg, currentToken);
+  if (entered !== null) {
     const trimmed = entered.trim();
     setAuthToken(trimmed);
     return trimmed;
@@ -100,6 +100,7 @@ window.promptForToken = promptForToken;
 IOS_CONFIG.authFetch = authFetch;
 IOS_CONFIG.getAuthToken = getAuthToken;
 IOS_CONFIG.setAuthToken = setAuthToken;
+IOS_CONFIG.promptForToken = promptForToken;
 
 function applyDataMode(mode) {
   const resolved = (mode === 'cloud') ? 'cloud' : 'device';

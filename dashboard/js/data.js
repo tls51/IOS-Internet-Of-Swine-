@@ -46,12 +46,19 @@ const DATA = (() => {
     reportSummary: null,
     reportError: '',
     weeklyWater: [],
+    waterRange: '7d',
+    waterUsage: null,
     threshold: 32,
     thiThresholds: { normalMax: 74, stressMax: 78, extremeMax: 83 },
-    operationDurations: { mistDurationMin: 5, mistPauseSec: 30 },
+    operationDurations: { mistOnSec: 10, mistPauseSec: 5 },
     malfunctions: [],
     diagnostics: null,   // latest ESP32 hardware self-test results
     rtcOk: true,
+    rtcTimeValid: true,
+    relays: null,
+    bathScheduled: false,
+    cleanScheduled: false,
+    scheduleDiag: null,
     epoch: null,
     epochReceivedAt: null,
     connected: false,
@@ -132,6 +139,11 @@ const DATA = (() => {
         }
       }
       if (s.rtcOk !== undefined) state.rtcOk = !!s.rtcOk;
+      if (s.rtcTimeValid !== undefined) state.rtcTimeValid = !!s.rtcTimeValid;
+      if (s.relays !== undefined) state.relays = s.relays;
+      if (s.bathScheduled !== undefined) state.bathScheduled = !!s.bathScheduled;
+      if (s.cleanScheduled !== undefined) state.cleanScheduled = !!s.cleanScheduled;
+      if (s.scheduleDiag !== undefined) state.scheduleDiag = s.scheduleDiag;
       if (s.epoch !== undefined && s.epoch !== null) {
         state.epoch = s.epoch;
         state.epochReceivedAt = Date.now();
@@ -247,17 +259,43 @@ const DATA = (() => {
     return res;
   }
 
-  /* ── Poll /api/readings/history: chart line data ──────────── */
+  /* ── Poll /api/readings/history & /api/water/usage ────────── */
+  async function refreshWaterUsage(range = state.waterRange || '7d') {
+    state.waterRange = (range === '30d') ? '30d' : '7d';
+    let base = API;
+    if (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.reportApiBase) {
+      base = IOS_CONFIG.reportApiBase;
+    }
+
+    let data = null;
+    try {
+      const res = await fetch(`${base}/api/water/usage?range=${state.waterRange}`);
+      if (res.ok) data = await res.json();
+    } catch (_) {}
+
+    if (!data && base !== API) {
+      try {
+        const res2 = await fetch(`${API}/api/water/usage?range=${state.waterRange}`);
+        if (res2.ok) data = await res2.json();
+      } catch (_) {}
+    }
+
+    if (data) {
+      state.waterUsage = data;
+      if (Array.isArray(data.days)) {
+        state.weeklyWater = data.days;
+      }
+    }
+    notify();
+  }
+
   async function refreshHistory() {
     try {
       const rows = await getJSON('/api/readings/history?range=24h');
       state.history = Array.isArray(rows) ? rows : [];
     } catch (err) { /* keep last-known history on failure */ }
 
-    try {
-      const weekly = await getJSON('/api/water/weekly');
-      state.weeklyWater = weekly;
-    } catch (err) { /* keep last-known weekly data on failure */ }
+    await refreshWaterUsage(state.waterRange);
 
     notify();
   }
@@ -348,6 +386,7 @@ const DATA = (() => {
     calcTHI,
     refreshStatus,
     refreshHistory,
+    refreshWaterUsage,
     refreshReports,
     refreshDiagnostics,
     refreshSdStatus,

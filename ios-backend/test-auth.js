@@ -7,21 +7,36 @@ process.env.PORT = String(TEST_PORT);
 process.env.IOS_ADMIN_USER = 'admin';
 process.env.IOS_ADMIN_PASS = 'ios2024';
 
-const serverProc = spawn('node', ['src/server.js'], {
-  cwd: path.join(__dirname),
-  env: { ...process.env, PORT: String(TEST_PORT) },
-  stdio: ['ignore', 'pipe', 'pipe']
-});
+let serverProc = null;
 
-serverProc.stdout.on('data', (d) => process.stdout.write(`[Server] ${d}`));
-serverProc.stderr.on('data', (d) => process.stderr.write(`[Server ERR] ${d}`));
+function startServerProcess() {
+  serverProc = spawn('node', ['src/server.js'], {
+    cwd: path.join(__dirname),
+    env: { ...process.env, PORT: String(TEST_PORT) },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  serverProc.stdout.on('data', (d) => process.stdout.write(`[Server] ${d}`));
+  serverProc.stderr.on('data', (d) => process.stderr.write(`[Server ERR] ${d}`));
+  return serverProc;
+}
+
+async function stopServerProcess() {
+  if (!serverProc) return;
+  const p = serverProc;
+  serverProc = null;
+  return new Promise((resolve) => {
+    p.on('exit', () => setTimeout(resolve, 300));
+    try { p.kill(); } catch (_) {}
+    setTimeout(resolve, 1500);
+  });
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function runTests() {
-  console.log('\n--- Waiting for server to start ---');
+async function waitForServerReady() {
   let ready = false;
   for (let i = 0; i < 30; i++) {
     try {
@@ -34,6 +49,12 @@ async function runTests() {
     await sleep(200);
   }
   assert(ready, 'Server failed to start');
+}
+
+async function runTests() {
+  console.log('\n--- Waiting for server to start ---');
+  startServerProcess();
+  await waitForServerReady();
   console.log('Server is running on port', TEST_PORT);
 
   // 1. GET /api/info
@@ -97,6 +118,52 @@ async function runTests() {
   const sessionData = await sessionRes.json();
   assert.strictEqual(sessionData.authenticated, true);
   console.log('PASS: GET /api/session verified as authenticated');
+
+  // 5b. Verify SQLite session persistence and token hash (not raw token)
+  console.log('\nTest 5b: Verify SQLite session persistence and token hash');
+  const db = require('./src/db');
+  const crypto = require('crypto');
+  const expectedHash = crypto.createHash('sha256').update(loginData.token).digest('hex');
+  const sessionRow = db.getSession(expectedHash);
+  assert(sessionRow, 'Session must exist in SQLite sessions table');
+  assert.strictEqual(sessionRow.username, 'admin', 'Session username must be admin');
+  assert.strictEqual(sessionRow.token_hash, expectedHash, 'token_hash must match sha256 of raw token');
+  assert(sessionRow.expires_at > Date.now(), 'Session must have valid future expires_at');
+  // Confirm raw token is NOT in the database table
+  const rawLeak = db.db.prepare('SELECT * FROM sessions WHERE token_hash = ?').get(loginData.token);
+  assert(!rawLeak, 'Raw token must NEVER be stored as the token_hash');
+  console.log('PASS: Session persisted in SQLite with SHA-256 hash (raw token not stored)');
+
+  // 5c. Server restart: restart server process and confirm session survives
+  console.log('\nTest 5c: Server restart preserves session');
+  await stopServerProcess();
+  console.log('Server stopped. Restarting...');
+  startServerProcess();
+  await waitForServerReady();
+  console.log('Server restarted on port', TEST_PORT);
+
+  const postRestartSession = await fetch(`http://127.0.0.1:${TEST_PORT}/api/session`, {
+    headers: { Cookie: cookieValue }
+  });
+  assert.strictEqual(postRestartSession.status, 200, 'Session must remain valid across server restart');
+  const postRestartData = await postRestartSession.json();
+  assert.strictEqual(postRestartData.authenticated, true, 'authenticated should be true after restart');
+
+  const postRestartBearer = await fetch(`http://127.0.0.1:${TEST_PORT}/api/session`, {
+    headers: { Authorization: `Bearer ${loginData.token}` }
+  });
+  assert.strictEqual(postRestartBearer.status, 200, 'Bearer session token must remain valid across restart');
+  console.log('PASS: Session survives server restart via cookie and bearer token');
+
+  // 5d. Expired session rejection and cleanup
+  console.log('\nTest 5d: Expired sessions are rejected and cleaned up');
+  const expiredHash = crypto.createHash('sha256').update('expired-token-sample').digest('hex');
+  db.saveSession(expiredHash, 'admin', Date.now() - 10000, Date.now() - 1000);
+  assert.strictEqual(db.getSession(expiredHash), null, 'Expired session should return null');
+  db.cleanupExpiredSessions();
+  const rowAfterClean = db.db.prepare('SELECT * FROM sessions WHERE token_hash = ?').get(expiredHash);
+  assert(!rowAfterClean, 'Expired session should be removed from database');
+  console.log('PASS: Expired sessions are rejected and cleaned up');
 
   // 6. Authorized schedule creation (Bathing and Cleaning)
   console.log('\nTest 6: Authorized creation of Bathing and Cleaning schedules');
@@ -238,6 +305,6 @@ runTests()
     console.error('TEST FAILED:', err);
     process.exitCode = 1;
   })
-  .finally(() => {
-    serverProc.kill();
+  .finally(async () => {
+    await stopServerProcess();
   });

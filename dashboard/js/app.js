@@ -44,7 +44,9 @@
   }
 
   function savedPage() {
-    return sessionStorage.getItem(PAGE_KEY) || 'dashboard';
+    const page = sessionStorage.getItem(PAGE_KEY);
+    if (!page || page === 'mist') return 'dashboard';
+    return page;
   }
 
   /* ── State ───────────────────────────────────────────────── */
@@ -151,7 +153,6 @@
     dashboard: 'Dashboard',
     env:       'Environmental Data',
     water:     'Water Management',
-    mist:      'Misting Schedule',
     bath:      'Bathing Schedule',
     clean:     'Cleaning Schedule',
     auto:      'Automatic Systems',
@@ -159,6 +160,7 @@
   };
 
   function showPage(key) {
+    if (key === 'mist') key = 'dashboard';
     activePage = key;
 
     /* persist current page so refresh returns here */
@@ -186,6 +188,7 @@
     /* render page immediately on switch */
     PAGES.update(DATA.state, activePage);
     if (key === 'reports') DATA.refreshReports();
+    if (key === 'water') DATA.refreshWaterUsage();
   }
 
   function initNav() {
@@ -323,10 +326,10 @@
     const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
 
     btnSave.addEventListener('click', () => {
-      const mistDurationMin = parseFloat(inpDur.value);
+      const mistOnSec       = parseFloat(inpDur.value);
       const mistPauseSec    = parseFloat(inpPause.value);
 
-      if (isNaN(mistDurationMin) || isNaN(mistPauseSec) || mistDurationMin < 1 || mistPauseSec < 1) {
+      if (isNaN(mistOnSec) || isNaN(mistPauseSec) || mistOnSec < 1 || mistPauseSec < 1) {
         alert('Please enter valid positive numbers for misting duration and pause interval.');
         return;
       }
@@ -338,7 +341,7 @@
       fetchFn(`${API}/api/settings/durations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mistDurationMin, mistPauseSec }),
+        body: JSON.stringify({ mistOnSec, mistPauseSec }),
       })
       .then(res => {
         if (!res.ok) throw new Error('Failed to save operation durations');
@@ -365,9 +368,9 @@
 
   /* ── Range tabs (reports) & CSV Export ───────────────────── */
   function initRangeTabs() {
-    document.querySelectorAll('.range-tab').forEach(btn => {
+    document.querySelectorAll('#page-reports .range-tab').forEach(btn => {
       btn.addEventListener('click', async () => {
-        document.querySelectorAll('.range-tab').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('#page-reports .range-tab').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         await DATA.refreshReports(btn.dataset.range);
         PAGES.updateReports(DATA.state);
@@ -382,7 +385,7 @@
     const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
 
     btnExport.addEventListener('click', async () => {
-      const activeTab = document.querySelector('.range-tab.active');
+      const activeTab = document.querySelector('#page-reports .range-tab.active');
       const range = activeTab ? activeTab.dataset.range : '24h';
       const base = IOS_CONFIG.reportApiBase || API;
       btnExport.disabled = true;
@@ -401,6 +404,54 @@
       } catch (err) {
         NOTIFY.show({ title: 'Report export failed', message: err.message, type: 'error' });
       } finally { btnExport.disabled = false; }
+    });
+  }
+
+  /* ── Water Range Tabs & CSV Export ──────────────────────── */
+  function initWaterControls() {
+    const tabs = document.querySelectorAll('#water-range-tabs .range-tab');
+    tabs.forEach(btn => {
+      btn.addEventListener('click', async () => {
+        tabs.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        await DATA.refreshWaterUsage(btn.dataset.range);
+        PAGES.updateWater(DATA.state);
+      });
+    });
+
+    const btnExportWater = document.getElementById('btn-export-water-csv');
+    if (!btnExportWater) return;
+
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+
+    btnExportWater.addEventListener('click', async () => {
+      const activeTab = document.querySelector('#water-range-tabs .range-tab.active');
+      const range = activeTab ? activeTab.dataset.range : (DATA.state.waterRange || '7d');
+      const base = (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.reportApiBase) ? IOS_CONFIG.reportApiBase : API;
+      btnExportWater.disabled = true;
+      try {
+        const res = await fetch(`${base}/api/reports/export?type=water&range=${range}`);
+        if (!res.ok) throw new Error(`Export failed: HTTP ${res.status}`);
+        const blob = await res.blob();
+        const href = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = `ios_water_report_${range}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(href), 1000);
+        NOTIFY.show({
+          title: 'Export Complete',
+          message: `Water usage CSV (${range}) downloaded successfully.`,
+          type: 'success',
+          icon: '📥'
+        });
+      } catch (err) {
+        NOTIFY.show({ title: 'Water report export failed', message: err.message, type: 'error' });
+      } finally {
+        btnExportWater.disabled = false;
+      }
     });
   }
 
@@ -571,9 +622,10 @@
     async function handleSync() {
       const btnTop = document.getElementById('btn-sync-time-top');
       const btnPage = document.getElementById('btn-set-time');
+      const btnBanner = document.getElementById('btn-banner-set-time');
       const statusMsg = document.getElementById('time-sync-status');
 
-      const buttons = [btnTop, btnPage].filter(Boolean);
+      const buttons = [btnTop, btnPage, btnBanner].filter(Boolean);
       buttons.forEach(b => { b.disabled = true; });
 
       try {
@@ -618,6 +670,9 @@
 
     const btnPage = document.getElementById('btn-set-time');
     if (btnPage) btnPage.addEventListener('click', handleSync);
+
+    const btnBanner = document.getElementById('btn-banner-set-time');
+    if (btnBanner) btnBanner.addEventListener('click', handleSync);
   }
 
   /* ── Access Token button control ────────────────────────── */
@@ -625,13 +680,40 @@
     const btnToken = document.getElementById('btn-token-top');
     if (!btnToken) return;
     btnToken.addEventListener('click', () => {
-      if (typeof NOTIFY !== 'undefined') {
-        NOTIFY.show({
-          title: 'Session Active',
-          message: 'Authenticated as admin. All control and schedule actions are authorized.',
-          type: 'info',
-          icon: '🔑'
-        });
+      const isDeviceMode = (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.mode === 'device');
+      if (isDeviceMode) {
+        const promptFn = (typeof promptForToken === 'function')
+          ? promptForToken
+          : (window.promptForToken || (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.promptForToken));
+        if (typeof promptFn === 'function') {
+          const res = promptFn();
+          if (res !== null && typeof NOTIFY !== 'undefined') {
+            if (res) {
+              NOTIFY.show({
+                title: 'Token Saved',
+                message: 'Device access token updated successfully.',
+                type: 'success',
+                icon: '🔑'
+              });
+            } else {
+              NOTIFY.show({
+                title: 'Token Cleared',
+                message: 'Device access token was removed.',
+                type: 'info',
+                icon: 'ℹ️'
+              });
+            }
+          }
+        }
+      } else {
+        if (typeof NOTIFY !== 'undefined') {
+          NOTIFY.show({
+            title: 'Session Active',
+            message: 'Authenticated as admin. All control and schedule actions are authorized.',
+            type: 'info',
+            icon: '🔑'
+          });
+        }
       }
     });
   }
@@ -656,6 +738,7 @@
     initTokenControls();
     initRangeTabs();
     initCSVExport();
+    initWaterControls();
 
     /* fetch real data once before first paint, then start polling */
     await DATA.refreshStatus();

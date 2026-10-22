@@ -35,29 +35,40 @@ const ADMIN_PASSWORD = process.env.IOS_ADMIN_PASS || 'ios2024';
 const AUTH_TOKEN = process.env.IOS_AUTH_TOKEN || 'ios-control-secret-token';
 const SESSION_TTL_MS = 24 * 3600 * 1000; // 24 hours
 
-const sessions = new Map();
+let relayState = false;
+let manualPumpActive = false;
 
-function createSession() {
+function hashToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+function createSession(username = 'admin') {
   const token = crypto.randomBytes(16).toString('hex');
-  const expiresAt = Date.now() + SESSION_TTL_MS;
-  sessions.set(token, { expiresAt });
+  const now = Date.now();
+  const expiresAt = now + SESSION_TTL_MS;
+  const tokenHash = hashToken(token);
+  db.saveSession(tokenHash, username, now, expiresAt);
   return { token, expiresIn: Math.floor(SESSION_TTL_MS / 1000) };
 }
 
 function isValidSession(token) {
   if (!token) return false;
-  const s = sessions.get(token);
-  if (!s) return false;
-  if (Date.now() > s.expiresAt) {
-    sessions.delete(token);
-    return false;
-  }
-  return true;
+  const tokenHash = hashToken(token);
+  const session = db.getSession(tokenHash);
+  return !!session;
 }
 
 function destroySession(token) {
-  if (token) sessions.delete(token);
+  if (!token) return;
+  const tokenHash = hashToken(token);
+  db.deleteSession(tokenHash);
 }
+
+// Clean up expired sessions periodically
+const sessionCleanupInterval = setInterval(() => {
+  try { db.cleanupExpiredSessions(); } catch (_) {}
+}, 3600 * 1000);
+if (sessionCleanupInterval.unref) sessionCleanupInterval.unref();
 
 function getSessionTokenFromReq(req) {
   if (req.headers.cookie) {
@@ -103,7 +114,7 @@ app.post('/api/login', (req, res) => {
   const p = (password !== undefined ? password : pass || '');
 
   if (u === ADMIN_USER && p === ADMIN_PASSWORD) {
-    const { token, expiresIn } = createSession();
+    const { token, expiresIn } = createSession(u);
     res.setHeader('Set-Cookie', `ios_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${expiresIn}`);
     return res.json({ ok: true, token, expiresIn });
   }
@@ -440,7 +451,11 @@ app.post('/api/water', (req, res) => {
     level_pct,
     used_l,
     flow_lpm,
-    device_id
+    device_id,
+    mist_on,
+    bath_on,
+    clean_on,
+    src_id
   } = req.body;
 
   const prev = db.latestWater();
@@ -500,7 +515,12 @@ app.post('/api/water', (req, res) => {
     flow_lpm: finalFlow,
 
     device_id:
-      device_id || 'esp32'
+      device_id || 'esp32',
+
+    mist_on: mist_on != null ? (mist_on ? 1 : 0) : null,
+    bath_on: bath_on != null ? (bath_on ? 1 : 0) : null,
+    clean_on: clean_on != null ? (clean_on ? 1 : 0) : null,
+    src_id: src_id || null
   });
 
 
@@ -681,25 +701,45 @@ app.get('/api/status', (req, res) => {
     : (diagnostics && diagnostics.sd_ok != null ? (diagnostics.sd_ok ? 'Ready' : 'Error') : 'Unknown');
 
 
-  // Existing temperature-based misting
-  const mistActive =
-    temp != null
-      ? temp > threshold
-      : false;
-
 
   // DATABASE SCHEDULE STATUS
-  const bathActive =
+  const bathScheduled =
     bathSchedules.some(
       isScheduleActiveNow
     );
 
-
-  const cleanActive =
+  const cleanScheduled =
     cleanSchedules.some(
       isScheduleActiveNow
     );
 
+  // Latest telemetry flags if under 60 s old, otherwise unknown/false
+  const telem = db.latestTelemetry ? db.latestTelemetry() : null;
+  const isTelemFresh = !!(telem && telem.ts && (now - telem.ts <= 60000));
+
+  const mistActive = isTelemFresh ? (telem.mist_on != null ? !!telem.mist_on : false) : false;
+  const bathActive = isTelemFresh ? (telem.bath_on != null ? !!telem.bath_on : false) : false;
+  const cleanActive = isTelemFresh ? (telem.clean_on != null ? !!telem.clean_on : false) : false;
+
+  const waterOk = water && water.level_pct >= 20;
+
+  const relays = {
+    mist: {
+      on: mistActive,
+      scheduledNow: false,
+      blockedReason: 'none'
+    },
+    bath: {
+      on: bathActive,
+      scheduledNow: bathScheduled,
+      blockedReason: (!bathActive && bathScheduled) ? (!waterOk ? 'low_water' : (cleanActive ? 'preempted' : 'none')) : 'none'
+    },
+    clean: {
+      on: cleanActive,
+      scheduledNow: cleanScheduled,
+      blockedReason: (!cleanActive && cleanScheduled) ? (!waterOk ? 'low_water' : (manualPumpActive ? 'preempted' : 'none')) : 'none'
+    }
+  };
 
   // Overall pump state
   const pumpActive =
@@ -707,7 +747,11 @@ app.get('/api/status', (req, res) => {
     manualPumpActive ||
     mistActive ||
     bathActive ||
-    cleanActive;
+    cleanActive ||
+    (isTelemFresh && telem.pump_on != null ? !!telem.pump_on : false);
+
+  const waterUsed = db.getTodayWaterUsage ? db.getTodayWaterUsage() : 0;
+  const waterUsedSinceBoot = water ? (water.used_l || 0) : 0;
 
 
   /* ----------------------------------------------------------
@@ -759,10 +803,9 @@ app.get('/api/status', (req, res) => {
         ? water.level_pct
         : null,
 
-    waterUsed:
-      water
-        ? water.used_l
-        : 0,
+    waterUsed,
+
+    waterUsedSinceBoot,
 
     flowRate:
       water
@@ -778,12 +821,32 @@ app.get('/api/status', (req, res) => {
 
     cleanActive,
 
+    bathScheduled,
+
+    cleanScheduled,
+
+    rtcTimeValid: true,
+
+    relays,
+
+    scheduleDiag: {
+      lastPullOk: true,
+      lastPullMs: Date.now(),
+      lastError: 'none',
+      backendCount: bathSchedules.length + cleanSchedules.length,
+      localCount: 0
+    },
+
     pumpActive,
 
 
     relayState,
 
     manualPumpActive,
+
+    relayCommandStatus: lastRelayStatus,
+
+    pendingRelayCommand,
 
     lastPumpTest,
 
@@ -811,34 +874,31 @@ app.get('/api/readings/history', (req, res) => {
   const range =
     req.query.range || '24h';
 
-  const rows =
-    db.readingsSince(
-      reportSince(range)
-    );
+  const until =
+    req.query.until ? Number(req.query.until) : Date.now();
 
+  const since =
+    req.query.since ? Number(req.query.since) : (range === 'all' ? 0 : until - (REPORT_RANGES[range] || REPORT_RANGES['24h']));
 
-  res.json(
-    rows.map(r => ({
+  const points =
+    db.getAggregatedReadings({
+      range,
+      sinceMs: since,
+      untilMs: until
+    });
 
-      time:
-        new Date(r.ts)
-          .toLocaleTimeString('en-GB', { timeZone: BARN_TIMEZONE, hour: '2-digit', minute: '2-digit' }),
-
-      ts: r.ts,
-
-      temp: r.temp,
-
-      humidity: r.humidity,
-
-      thi: r.thi
-    }))
-  );
+  res.json(points);
 });
 
 
 /* ============================================================
-   WEEKLY WATER USAGE
+   WATER USAGE & WEEKLY SUMMARY
    ============================================================ */
+
+app.get('/api/water/usage', (req, res) => {
+  const range = req.query.range || '7d';
+  res.json(db.getWaterUsage(range));
+});
 
 app.get('/api/water/weekly', (req, res) => {
 
@@ -868,17 +928,17 @@ app.get('/api/schedules', (req, res) => {
     req.query.type;
 
   // The ESP32 polls this snapshot and caches it for operation without Node.
-  if (type === 'all') return res.json(['mist', 'bath', 'clean'].flatMap(t => db.listSchedules(t)));
+  if (type === 'all') return res.json(['bath', 'clean'].flatMap(t => db.listSchedules(t)));
 
 
   if (
-    !['bath', 'clean', 'mist']
+    !['bath', 'clean']
       .includes(type)
   ) {
 
     return res.status(400).json({
       error:
-        'type must be bath, clean, or mist'
+        'type must be bath or clean'
     });
   }
 
@@ -907,13 +967,13 @@ app.post('/api/schedules', requireAuth, (req, res) => {
 
 
   if (
-    !['bath', 'clean', 'mist']
+    !['bath', 'clean']
       .includes(type)
   ) {
 
     return res.status(400).json({
       error:
-        'type must be bath, clean, or mist'
+        'type must be bath or clean'
     });
   }
 
@@ -992,7 +1052,7 @@ const handleUpdateSchedule = (req, res) => {
   }
 
   db.logActivity(
-    row.type === 'bath' ? 'Bath' : row.type === 'mist' ? 'Mist' : 'Clean',
+    row.type === 'bath' ? 'Bath' : 'Clean',
     `Schedule "${row.label}" updated: ${row.time}, ${row.duration} min, ${JSON.parse(row.days).join(', ')}, ${row.active ? 'enabled' : 'disabled'}`
   );
 
@@ -1053,8 +1113,7 @@ app.get('/api/schedules/debug', (req, res) => {
     today,
     nowMin,
     bath: db.listSchedules('bath').map(annotate),
-    clean: db.listSchedules('clean').map(annotate),
-    mist: db.listSchedules('mist').map(annotate)
+    clean: db.listSchedules('clean').map(annotate)
   });
 });
 
@@ -1131,7 +1190,7 @@ app.get('/api/settings/durations', (req, res) => {
 app.post('/api/settings/durations', requireAuth, (req, res) => {
 
   const {
-    mistDurationMin,
+    mistOnSec,
     mistPauseSec
   } = req.body;
 
@@ -1139,9 +1198,9 @@ app.post('/api/settings/durations', requireAuth, (req, res) => {
   const updated =
     db.setOperationDurations({
 
-      mistDurationMin:
-        typeof mistDurationMin === 'number'
-          ? mistDurationMin
+      mistOnSec:
+        typeof mistOnSec === 'number'
+          ? mistOnSec
           : undefined,
 
       mistPauseSec:
@@ -1153,7 +1212,7 @@ app.post('/api/settings/durations', requireAuth, (req, res) => {
 
   db.logActivity(
     'Info',
-    `Operation durations updated: Misting ${updated.mistDurationMin} min ON / ${updated.mistPauseSec} s pause`
+    `Operation durations updated: Misting ${updated.mistOnSec} s ON / ${updated.mistPauseSec} s pause`
   );
 
 
@@ -1218,56 +1277,67 @@ app.post('/api/settings/thi', requireAuth, (req, res) => {
 
 app.get('/api/reports/export', (req, res) => {
 
+  const type =
+    req.query.type;
+
   const range =
     req.query.range || '24h';
 
+  const until =
+    req.query.until ? Number(req.query.until) : Date.now();
 
-  const rows =
-    db.readingsSince(
-      reportSince(range)
+  const since =
+    req.query.since ? Number(req.query.since) : (range === 'all' ? 0 : until - (REPORT_RANGES[range] || REPORT_RANGES['24h']));
+
+  if (type === 'water') {
+    const report = db.getWaterUsage(range);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="ios_water_report_${range}_${Date.now()}.csv"`
     );
+    res.write('Date,Day,Mist_L,Bathe_L,Clean_L,Other_L,Total_L\r\n');
+    (report.days || []).forEach(d => {
+      res.write(`"${d.date}","${d.day}",${d.mist},${d.bathe},${d.clean},${d.other},${d.total}\r\n`);
+    });
+    return res.end();
+  }
 
+  const resolution =
+    req.query.resolution || (range === '24h' ? 'raw' : 'bucket');
 
   const thiThresholds =
     db.getTHIThresholds();
-
-
-  let csv =
-    'Timestamp,DateTime,Temperature_C,Humidity_Pct,THI,THI_Status\r\n';
-
-
-  rows.forEach(r => {
-
-    const dt =
-      new Date(r.ts)
-        .toISOString();
-
-
-    const status =
-      thiLevel(
-        r.thi,
-        thiThresholds
-      ).label;
-
-
-    csv +=
-      `${r.ts},"${dt}",${r.temp},${r.humidity},${r.thi},"${status}"\r\n`;
-  });
-
 
   res.setHeader(
     'Content-Type',
     'text/csv'
   );
 
-
   res.setHeader(
     'Content-Disposition',
-    `attachment; filename="ios_system_report_${range}_${Date.now()}.csv"`
+    `attachment; filename="ios_system_report_${range}_${resolution}_${Date.now()}.csv"`
   );
 
+  if (resolution === 'bucket') {
+    const points = db.getAggregatedReadings({ range, sinceMs: since, untilMs: until });
+    res.write('Timestamp,DateTime,Time,Label,Temperature_C,Temp_Min,Temp_Max,Humidity_Pct,THI,THI_Max,THI_Status,Readings_Count\r\n');
+    for (const p of points) {
+      const dt = new Date(p.ts).toISOString();
+      const status = p.thi != null ? thiLevel(p.thi, thiThresholds).label : '—';
+      res.write(`${p.ts},"${dt}","${p.time}","${p.label}",${p.temp},${p.tempMin},${p.tempMax},${p.humidity},${p.thi},${p.thiMax},"${status}",${p.n}\r\n`);
+    }
+    return res.end();
+  }
 
-  res.send(csv);
+  // resolution === 'raw'
+  res.write('Timestamp,DateTime,Temperature_C,Humidity_Pct,THI,THI_Status\r\n');
+  for (const r of db.rawReadingsIterator(since, until)) {
+    const dt = new Date(r.ts).toISOString();
+    const status = thiLevel(r.thi, thiThresholds).label;
+    res.write(`${r.ts},"${dt}",${r.temp},${r.humidity},${r.thi},"${status}"\r\n`);
+  }
+  return res.end();
 });
 
 
@@ -1293,13 +1363,10 @@ app.get('/api/activity', (req, res) => {
    RELAY & WATER PUMP CONTROL
    ============================================================ */
 
-let relayState = false;
-
-let manualPumpActive = false;
-
 let lastPumpTest = null;
 
 let pendingRelayCommand = null;
+let lastRelayStatus = 'idle';
 
 
 /* ------------------------------------------------------------
@@ -1322,6 +1389,7 @@ app.post('/api/relay/test', requireAuth, (req, res) => {
 
     ts: Date.now()
   };
+  lastRelayStatus = 'queued';
 
 
   lastPumpTest = {
@@ -1330,43 +1398,28 @@ app.post('/api/relay/test', requireAuth, (req, res) => {
 
     duration_ms,
 
-    status: 'Testing'
+    status: 'queued'
   };
-
-
-  relayState = true;
 
 
   db.logActivity(
     'Mist',
-    `Relay module & water pump test triggered (${(duration_ms / 1000).toFixed(0)}s pulse)`
+    `Relay module & water pump test command queued (${(duration_ms / 1000).toFixed(0)}s pulse)`
   );
-
-
-  setTimeout(() => {
-
-    relayState = false;
-
-    if (
-      lastPumpTest &&
-      lastPumpTest.status === 'Testing'
-    ) {
-
-      lastPumpTest.status =
-        'Completed';
-    }
-
-  }, duration_ms + 1000);
 
 
   res.json({
 
     ok: true,
 
+    status: 'queued',
+
     message:
       `Pump test command queued for ${duration_ms}ms`,
 
-    lastPumpTest
+    lastPumpTest,
+
+    pendingRelayCommand
   });
 });
 
@@ -1381,14 +1434,6 @@ app.post('/api/relay/control', requireAuth, (req, res) => {
     !!req.body.active;
 
 
-  manualPumpActive =
-    active;
-
-
-  relayState =
-    active;
-
-
   pendingRelayCommand = {
 
     command:
@@ -1398,11 +1443,12 @@ app.post('/api/relay/control', requireAuth, (req, res) => {
 
     ts: Date.now()
   };
+  lastRelayStatus = 'queued';
 
 
   db.logActivity(
     'Mist',
-    `Water pump manual override switched ${active ? 'ON' : 'OFF'}`
+    `Water pump manual override command queued: ${active ? 'ON' : 'OFF'}`
   );
 
 
@@ -1410,29 +1456,34 @@ app.post('/api/relay/control', requireAuth, (req, res) => {
 
     ok: true,
 
+    status: 'queued',
+
     manualPumpActive,
 
-    relayState
+    relayState,
+
+    pendingRelayCommand
   });
 });
 
 app.post('/api/manual', requireAuth, (req, res) => {
   const active = req.body && req.body.active !== undefined ? !!req.body.active : true;
-  manualPumpActive = active;
-  relayState = active;
   pendingRelayCommand = {
     command: active ? 'pump_on' : 'pump_off',
     ts: Date.now()
   };
+  lastRelayStatus = 'queued';
   db.logActivity(
     'Mist',
-    `Water pump manual override switched ${active ? 'ON' : 'OFF'}`
+    `Water pump manual override command queued: ${active ? 'ON' : 'OFF'}`
   );
   res.json({
     ok: true,
+    status: 'queued',
     manual: manualPumpActive,
     duration_ms: active ? 60000 : 0,
-    max_run_ms: 300000
+    max_run_ms: 300000,
+    pendingRelayCommand
   });
 });
 
@@ -1442,29 +1493,70 @@ app.post('/api/manual', requireAuth, (req, res) => {
    ------------------------------------------------------------ */
 
 app.get('/api/relay/command', (req, res) => {
-
-  const cmd =
-    pendingRelayCommand;
-
-
-  // Command is consumed once
-  pendingRelayCommand =
-    null;
-
-
   res.json({
-
-    command:
-      cmd || null,
-
+    command: pendingRelayCommand || null,
+    status: lastRelayStatus,
     manualPumpActive
   });
 });
 
 
 /* ------------------------------------------------------------
-   ESP32 REPORTS RELAY STATUS
+   ESP32 ACKNOWLEDGES RELAY COMMAND
    ------------------------------------------------------------ */
+
+app.post('/api/relay/ack', requireAuth, (req, res) => {
+  const { command, status, relay_on, pump_reason } = req.body || {};
+
+  lastRelayStatus = status || (relay_on ? 'applied' : (pump_reason === 'low_water' ? 'blocked: low water' : 'applied'));
+
+  if (typeof relay_on === 'boolean') {
+    relayState = relay_on;
+    manualPumpActive = relay_on;
+  }
+
+  if (lastRelayStatus === 'blocked: low water') {
+    relayState = false;
+    manualPumpActive = false;
+    if (lastPumpTest && (lastPumpTest.status === 'Testing' || lastPumpTest.status === 'queued')) {
+      lastPumpTest.status = 'Blocked: Low Water';
+    }
+  } else if (lastRelayStatus === 'applied') {
+    if (lastPumpTest && lastPumpTest.status === 'queued') {
+      lastPumpTest.status = 'Testing';
+    }
+  }
+
+  pendingRelayCommand = null;
+
+  db.logActivity(
+    'Mist',
+    `Relay command '${command || 'unknown'}' acknowledged: ${lastRelayStatus}`
+  );
+
+  res.json({
+    ok: true,
+    status: lastRelayStatus,
+    relayState,
+    manualPumpActive
+  });
+});
+
+
+/* ------------------------------------------------------------
+   RELAY STATUS (GET & POST)
+   ------------------------------------------------------------ */
+
+app.get('/api/relay/status', (req, res) => {
+  res.json({
+    ok: true,
+    status: lastRelayStatus,
+    relayState,
+    manualPumpActive,
+    lastPumpTest,
+    pendingRelayCommand
+  });
+});
 
 app.post('/api/relay/status', (req, res) => {
 
@@ -1472,7 +1564,8 @@ app.post('/api/relay/status', (req, res) => {
     relay_on,
     test_completed,
     flow_pulses,
-    flow_lpm
+    flow_lpm,
+    status
   } = req.body;
 
 
@@ -1482,6 +1575,13 @@ app.post('/api/relay/status', (req, res) => {
 
     relayState =
       relay_on;
+    manualPumpActive =
+      relay_on;
+  }
+
+  if (status) {
+    lastRelayStatus = status;
+    pendingRelayCommand = null;
   }
 
 
@@ -1513,6 +1613,8 @@ app.post('/api/relay/status', (req, res) => {
     ok: true,
 
     relayState,
+
+    status: lastRelayStatus,
 
     lastPumpTest
   });
@@ -1675,13 +1777,6 @@ app.post('/api/readings/batch', (req, res) => {
   const result = db.insertOfflineBatch(records);
 
   if (result.failed > 0) return res.status(500).json({ ok: false, ...result });
-
-  if (result.inserted > 0) {
-    db.logActivity(
-      'Info',
-      `Offline sync: ${result.inserted} record(s) inserted, ${result.skipped} skipped (duplicate/invalid)`
-    );
-  }
 
   res.status(result.inserted > 0 ? 201 : 200).json({
     ok: true,

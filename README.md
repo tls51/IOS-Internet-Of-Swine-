@@ -152,7 +152,7 @@ HC-SR04 TRIG / ECHO	GPIO 16 / GPIO 17	Tank distance measurement
 YF-S201B signal	GPIO 5	Flow pulse interrupt
 Misting relay	GPIO 18	THI cooling, mist schedules and device manual override
 Bathing relay	GPIO 7	Bath schedules
-Cleaning relay	Unassigned	Cleaning schedules currently have no actuator output
+Cleaning relay	GPIO 15	Cleaning schedules (active-LOW relay)
 MicroSD CS	GPIO 10	SPI chip select
 MicroSD MOSI	GPIO 11	SPI data to card
 MicroSD SCK	GPIO 12	SPI clock
@@ -176,7 +176,7 @@ Backend cache on ESP32	/backend_schedules.json, refreshed every ten seconds; ret
 
 
 The cache does not overwrite standalone schedules or insert backend records into the ESP32's standalone CRUD list. Each source supports up to 20 schedules. The current engine chooses the first active schedule, with standalone schedules checked before backend schedules; simultaneous schedule types need further arbitration if all must run together.
-Bath schedules drive GPIO 7 when water protection allows operation. Cleaning schedules can be saved and recognized, but no cleaning relay is assigned. Define the actual cleaning pump/relay wiring before implementing that output.
+Bath schedules drive GPIO 7 and cleaning schedules drive GPIO 15 when water protection allows operation.
 7. Reports, persistence and shutdown behavior
 Storage	What it retains
 Node SQLite	Environmental readings, water readings, schedules, settings, diagnostics, activity and imported telemetry
@@ -295,7 +295,7 @@ GET /api/relay/command	Node command queue; current firmware does not poll it
 
 ESP32 control writes require its configured device token. The current Node API has no authentication middleware.
 Current limitations
-- Cleaning hardware: no output is assigned, so cleaning schedule recognition does not activate a cleaning pump.
+- Cleaning hardware: cleaning schedules drive GPIO 15 (active-LOW relay).
 - Node relay controls: command polling is not implemented by this firmware. Test direct controls through the ESP32 host; a Node response is a queued request, not physical feedback.
 - Settings synchronization: only backend schedules are fetched into the device cache. Node settings and ESP32 NVS settings remain separate. The local automatic cooling engine uses thiThreshold; the temperature slider alone is not its activation condition.
 - Water accounting: the firmware volume resets at boot and has no daily reset. Node's weekly function sums cumulative readings, which can overcount consumption, while its operation breakdown fields remain zero. ESP32 weekly data is also a placeholder. Accurate daily/weekly and per-operation accounting needs interval-delta or session-based calculation.
