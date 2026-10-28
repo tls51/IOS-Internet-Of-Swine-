@@ -160,9 +160,11 @@ async function runTests() {
   console.log(`   HTTP "all" returned ${dataAll.length} points in ${httpAllElapsed} ms`);
   console.log('   PASS: HTTP history endpoints return valid aggregated points.\n');
 
+  const authHeaders = { 'X-Auth-Token': 'ios-control-secret-token' };
+
   // Test /api/reports/summary
   console.log('7. Testing GET /api/reports/summary...');
-  const resSummary = await fetch(`http://127.0.0.1:${TEST_PORT}/api/reports/summary?range=7d`);
+  const resSummary = await fetch(`http://127.0.0.1:${TEST_PORT}/api/reports/summary?range=7d`, { headers: authHeaders });
   assert.strictEqual(resSummary.status, 200);
   const summary = await resSummary.json();
   assert.strictEqual(summary.bucketMs['7d'], 3600000, '7d summary bucketMs should be 1 hour');
@@ -172,7 +174,7 @@ async function runTests() {
   // Test /api/reports/export CSV streaming
   console.log('8. Testing GET /api/reports/export CSV streaming and row count match...');
   // 7d bucket export
-  const resCsv7d = await fetch(`http://127.0.0.1:${TEST_PORT}/api/reports/export?range=7d&resolution=bucket`);
+  const resCsv7d = await fetch(`http://127.0.0.1:${TEST_PORT}/api/reports/export?range=7d&resolution=bucket`, { headers: authHeaders });
   assert.strictEqual(resCsv7d.status, 200);
   assert.strictEqual(resCsv7d.headers.get('content-type'), 'text/csv');
   const csv7d = await resCsv7d.text();
@@ -183,7 +185,7 @@ async function runTests() {
   assert(lines7d[0].startsWith('Timestamp,DateTime,Time,Label'), 'CSV header matches bucket schema');
 
   // 30d bucket export
-  const resCsv30d = await fetch(`http://127.0.0.1:${TEST_PORT}/api/reports/export?range=30d&resolution=bucket`);
+  const resCsv30d = await fetch(`http://127.0.0.1:${TEST_PORT}/api/reports/export?range=30d&resolution=bucket`, { headers: authHeaders });
   assert.strictEqual(resCsv30d.status, 200);
   const csv30d = await resCsv30d.text();
   const lines30d = csv30d.trim().split(/\r?\n/);
@@ -191,7 +193,7 @@ async function runTests() {
   assert.strictEqual(dataRowCount30d, pts30d.length, `CSV 30d row count (${dataRowCount30d}) matches points count (${pts30d.length})`);
 
   // Default resolution for 7d (should default to bucket)
-  const resCsv7dDefault = await fetch(`http://127.0.0.1:${TEST_PORT}/api/reports/export?range=7d`);
+  const resCsv7dDefault = await fetch(`http://127.0.0.1:${TEST_PORT}/api/reports/export?range=7d`, { headers: authHeaders });
   assert.strictEqual(resCsv7dDefault.status, 200);
   const csv7dDefault = await resCsv7dDefault.text();
   const lines7dDefault = csv7dDefault.trim().split(/\r?\n/);

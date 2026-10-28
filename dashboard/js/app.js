@@ -127,22 +127,75 @@
   /* Expose globally for schedule.js and other components */
   window.NOTIFY = NOTIFY;
 
-  /* ── Clock ───────────────────────────────────────────────── */
+  /* ── Clock & Date Display ────────────────────────────────── */
+  function formatCurrentDateTime(state) {
+    if (state && state.rtcOk === false) {
+      return {
+        dateStr: 'RTC Error',
+        timeStr: 'Clock Fault',
+        fullStr: 'RTC Error (Clock Fault)',
+        sourceStr: 'Hardware RTC Fault'
+      };
+    }
+
+    let d;
+    let isRtc = false;
+    if (state && state.epoch != null && state.epochReceivedAt != null) {
+      const elapsedSec = Math.floor((Date.now() - state.epochReceivedAt) / 1000);
+      d = new Date((state.epoch + elapsedSec) * 1000);
+      isRtc = true;
+    } else {
+      d = new Date();
+    }
+
+    const dateStr = d.toLocaleDateString(undefined, {
+      weekday: 'short',
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric'
+    });
+    const timeStr = d.toLocaleTimeString(undefined, {
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    });
+
+    return {
+      dateStr,
+      timeStr,
+      fullStr: `${dateStr} · ${timeStr}`,
+      sourceStr: isRtc ? 'Hardware RTC (Synced)' : 'System Local Time'
+    };
+  }
+  window.formatCurrentDateTime = formatCurrentDateTime;
+
+  function updateClockDisplays(dt) {
+    if (!dt) dt = formatCurrentDateTime(DATA.state);
+
+    const elLive = document.getElementById('live-time');
+    if (elLive) elLive.textContent = dt.fullStr;
+
+    const elSideDate = document.getElementById('sidebar-clock-date');
+    if (elSideDate) elSideDate.textContent = dt.dateStr;
+
+    const elSideTime = document.getElementById('sidebar-clock-time');
+    if (elSideTime) elSideTime.textContent = dt.timeStr;
+
+    const elDashClock = document.getElementById('dash-live-datetime');
+    if (elDashClock) elDashClock.textContent = dt.fullStr;
+
+    const elDashSource = document.getElementById('dash-clock-source');
+    if (elDashSource) elDashSource.textContent = dt.sourceStr;
+
+    const elRtcLive = document.getElementById('rtc-live-datetime');
+    if (elRtcLive) elRtcLive.textContent = dt.fullStr;
+  }
+  window.updateClockDisplays = updateClockDisplays;
+
   function startClock() {
-    const el = document.getElementById('live-time');
     function tick() {
-      if (!el) return;
-      if (DATA.state && DATA.state.rtcOk === false) {
-        el.textContent = 'RTC Error';
-        return;
-      }
-      if (DATA.state && DATA.state.epoch != null && DATA.state.epochReceivedAt != null) {
-        const elapsedSec = Math.floor((Date.now() - DATA.state.epochReceivedAt) / 1000);
-        const deviceTime = new Date((DATA.state.epoch + elapsedSec) * 1000);
-        el.textContent = deviceTime.toLocaleTimeString();
-      } else {
-        el.textContent = new Date().toLocaleTimeString();
-      }
+      updateClockDisplays();
     }
     tick();
     setInterval(tick, 1000);
@@ -370,6 +423,7 @@
   function initRangeTabs() {
     document.querySelectorAll('#page-reports .range-tab').forEach(btn => {
       btn.addEventListener('click', async () => {
+        if (btn.disabled) return;
         document.querySelectorAll('#page-reports .range-tab').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         await DATA.refreshReports(btn.dataset.range);
@@ -390,7 +444,8 @@
       const base = IOS_CONFIG.reportApiBase || API;
       btnExport.disabled = true;
       try {
-        const res = await fetch(`${base}/api/reports/export?range=${range}`);
+        const doFetch = (typeof authFetch === 'function') ? authFetch : fetch;
+        const res = await doFetch(`${base}/api/reports/export?range=${range}`);
         if (!res.ok) throw new Error(`Export failed: HTTP ${res.status}`);
         const blob = await res.blob();
         const href = URL.createObjectURL(blob);
@@ -419,6 +474,16 @@
       });
     });
 
+    const bdTabs = document.querySelectorAll('#breakdown-range-tabs .range-tab');
+    bdTabs.forEach(btn => {
+      btn.addEventListener('click', () => {
+        bdTabs.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        DATA.state.breakdownRange = btn.dataset.range;
+        PAGES.updateWater(DATA.state);
+      });
+    });
+
     const btnExportWater = document.getElementById('btn-export-water-csv');
     if (!btnExportWater) return;
 
@@ -430,7 +495,8 @@
       const base = (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.reportApiBase) ? IOS_CONFIG.reportApiBase : API;
       btnExportWater.disabled = true;
       try {
-        const res = await fetch(`${base}/api/reports/export?type=water&range=${range}`);
+        const doFetch = (typeof authFetch === 'function') ? authFetch : fetch;
+        const res = await doFetch(`${base}/api/reports/export?type=water&range=${range}`);
         if (!res.ok) throw new Error(`Export failed: HTTP ${res.status}`);
         const blob = await res.blob();
         const href = URL.createObjectURL(blob);
@@ -777,11 +843,23 @@
             errEl.classList.remove('hidden');
           }
         }
-      } catch (_) {
-        // Standalone or offline fallback
-        loginScreen.classList.add('hidden');
-        appShell.classList.remove('hidden');
-        boot();
+      } catch (err) {
+        const isDeviceMode = (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.mode === 'device');
+        if (isDeviceMode) {
+          // Standalone or offline fallback on ESP32
+          loginScreen.classList.add('hidden');
+          appShell.classList.remove('hidden');
+          boot();
+        } else {
+          // In cloud mode, network outage must not bypass authentication
+          DATA.stop();
+          loginScreen.classList.remove('hidden');
+          appShell.classList.add('hidden');
+          if (errEl) {
+            errEl.textContent = 'Unable to reach server. Please check your network connection.';
+            errEl.classList.remove('hidden');
+          }
+        }
       }
     }
   });

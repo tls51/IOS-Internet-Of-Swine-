@@ -93,6 +93,31 @@
   gap: 10px;
   background: var(--surface);
 }
+/* Sidebar clock */
+.sidebar-clock {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.sidebar-clock-date {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.sidebar-clock-time {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.5px;
+}
+
 .conn-dot-wrap {
   display: flex;
   align-items: center;
@@ -164,7 +189,54 @@
   justify-content: flex-end;
 }
 .live-env  { font-size: 13px; color: var(--muted); white-space: nowrap; }
-.live-time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.live-time {
+  font-size: 12px;
+  color: var(--text-soft);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface-2);
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Dashboard live clock banner ─────────────────────────── */
+.dash-clock-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.dash-clock-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.dash-clock-icon {
+  font-size: 22px;
+}
+.dash-clock-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.dash-clock-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}
 
 /* ── Hamburger toggle button ─────────────────────────────── */
 .sidebar-toggle {

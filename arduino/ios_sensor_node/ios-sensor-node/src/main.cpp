@@ -15,6 +15,7 @@
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <mbedtls/sha256.h>
 
 // Mutex protecting concurrent LittleFS and SD card access between loop and async web handlers
 SemaphoreHandle_t fsMutex = NULL;
@@ -66,6 +67,12 @@ float lastWaterLevel = -1.0;
 bool pumpIsOn = false;
 bool bathPumpIsOn = false;
 bool cleanPumpIsOn = false;
+
+// Per-operation water accumulators (declared here; defined again at sensor-block init)
+float mistWaterUsedL  = 0.0f;   // Cumulative liters attributed to misting since boot
+float bathWaterUsedL  = 0.0f;   // Cumulative liters attributed to bathing since boot
+float cleanWaterUsedL = 0.0f;   // Cumulative liters attributed to cleaning since boot
+float otherWaterUsedL = 0.0f;   // Cumulative liters attributed to other/idle since boot
 
 // ============================================================
 // DHT22
@@ -286,9 +293,13 @@ static bool writeJsonFileSafely(const char* path, const JsonDocument& doc) {
 // Small persistent log for the standalone ESP32 dashboard.
 #define ACTIVITY_CAPACITY 60
 #define ACTIVITY_FILE "/activity.json"
-struct ActivityRecord { uint64_t ts; char type[12]; char msg[160]; };
+struct ActivityRecord { uint64_t ts; uint32_t uptimeMs; char type[12]; char msg[160]; };
 ActivityRecord activityRing[ACTIVITY_CAPACITY];
 size_t activityCount = 0, activityHead = 0;
+bool activityDirty = false;
+size_t unflushedActivityCount = 0;
+unsigned long lastActivityFlush = 0;
+const unsigned long ACTIVITY_FLUSH_INTERVAL_MS = 60000;
 
 static void loadActivity() {
     FsLock lock;
@@ -302,6 +313,7 @@ static void loadActivity() {
     for (JsonObject obj : doc.as<JsonArray>()) {
         ActivityRecord& rec = activityRing[activityHead];
         rec.ts = obj["ts"] | 0ULL;
+        rec.uptimeMs = 0;
         strlcpy(rec.type, obj["type"] | "Info", sizeof(rec.type));
         strlcpy(rec.msg, obj["msg"] | "", sizeof(rec.msg));
         activityHead = (activityHead + 1) % ACTIVITY_CAPACITY;
@@ -309,13 +321,8 @@ static void loadActivity() {
     }
 }
 
-static void appendActivity(const char* type, const char* message) {
-    ActivityRecord& rec = activityRing[activityHead];
-    rec.ts = rtcOk && rtcTimeValid ? (uint64_t)rtc.now().unixtime() * 1000ULL : 0;
-    strlcpy(rec.type, type, sizeof(rec.type));
-    strlcpy(rec.msg, message, sizeof(rec.msg));
-    activityHead = (activityHead + 1) % ACTIVITY_CAPACITY;
-    if (activityCount < ACTIVITY_CAPACITY) activityCount++;
+static bool flushActivityLog() {
+    if (!activityDirty) return true;
     JsonDocument doc;
     JsonArray arr = doc.to<JsonArray>();
     for (size_t i = 0; i < activityCount; i++) {
@@ -325,7 +332,44 @@ static void appendActivity(const char* type, const char* message) {
         obj["type"] = activityRing[idx].type;
         obj["msg"] = activityRing[idx].msg;
     }
-    if (!writeJsonFileSafely(ACTIVITY_FILE, doc)) Serial.println("WARNING: Activity log could not be persisted.");
+    bool ok = writeJsonFileSafely(ACTIVITY_FILE, doc);
+    if (ok) {
+        activityDirty = false;
+        unflushedActivityCount = 0;
+    } else {
+        Serial.println("WARNING: Activity log could not be persisted.");
+    }
+    return ok;
+}
+
+static void appendActivity(const char* type, const char* message) {
+    ActivityRecord& rec = activityRing[activityHead];
+    rec.uptimeMs = (uint32_t)millis();
+    rec.ts = rtcOk && rtcTimeValid ? (uint64_t)rtc.now().unixtime() * 1000ULL : 0;
+    strlcpy(rec.type, type, sizeof(rec.type));
+    strlcpy(rec.msg, message, sizeof(rec.msg));
+    activityHead = (activityHead + 1) % ACTIVITY_CAPACITY;
+    if (activityCount < ACTIVITY_CAPACITY) activityCount++;
+    activityDirty = true;
+    unflushedActivityCount++;
+    if (unflushedActivityCount >= 10) {
+        flushActivityLog();
+    }
+}
+
+static void backfillActivityTimestamps(uint64_t rtcNowMs) {
+    uint32_t nowMs = millis();
+    bool anyBackfilled = false;
+    for (size_t i = 0; i < activityCount; i++) {
+        if (activityRing[i].ts == 0) {
+            uint32_t elapsed = nowMs - activityRing[i].uptimeMs;
+            activityRing[i].ts = (rtcNowMs > elapsed) ? (rtcNowMs - elapsed) : rtcNowMs;
+            anyBackfilled = true;
+        }
+    }
+    if (anyBackfilled) {
+        activityDirty = true;
+    }
 }
 
 struct HistoryRecord {
@@ -461,7 +505,7 @@ enum SdStatus {
 
 SdStatus sdCardStatus = SD_STATUS_UNKNOWN;
 bool sdMounted = false;
-const char* sdLastError = "Not initialized";
+static char sdLastError[80] = "Not initialized";
 uint32_t sdSpiFrequencyHz = 0;
 unsigned long lastSdMountAttempt = 0;
 const unsigned long SD_RETRY_INTERVAL_MS = 30000;
@@ -488,7 +532,7 @@ uint32_t sdSyncedOffset = 0;     // byte offset in offline_readings.jsonl confir
 uint32_t sdSyncedCount = 0;      // total records confirmed synced
 uint32_t sdPendingCount = 0;     // number of records awaiting sync
 uint64_t lastSyncTs = 0;         // UTC timestamp (ms) of last successful sync
-bool syncInProgress = false;
+volatile bool syncInProgress = false;
 unsigned long lastSyncBatchAttempt = 0;
 const unsigned long SYNC_BATCH_INTERVAL_MS = 500; // delay between batches
 const size_t SYNC_BATCH_SIZE = 15;                // 15 records per batch
@@ -707,7 +751,10 @@ void calculatePendingRecords() {
 
     size_t fileSize = f.size();
     if (sdSyncedOffset > fileSize) {
-        sdSyncedOffset = 0;
+        Serial.printf("MicroSD: sdSyncedOffset (%u) exceeds fileSize (%u); clamping.\n", sdSyncedOffset, (unsigned int)fileSize);
+        sdSyncedOffset = (uint32_t)fileSize;
+        sdPendingCount = 0;
+        saveSyncProgress();
     }
 
     if (f.seek(sdSyncedOffset)) {
@@ -728,7 +775,7 @@ void calculatePendingRecords() {
 void setSdMissing(const char* reason) {
     sdMounted = false;
     sdCardStatus = SD_STATUS_MISSING;
-    sdLastError = reason;
+    strlcpy(sdLastError, reason ? reason : "", sizeof(sdLastError));
     sdSpiFrequencyHz = 0;
     sdCardTypeStr = "Unavailable";
     sdCardSizeBytes = 0;
@@ -741,7 +788,7 @@ void setSdMissing(const char* reason) {
 void setSdError(const char* reason) {
     sdMounted = false;
     sdCardStatus = SD_STATUS_ERROR;
-    sdLastError = reason;
+    strlcpy(sdLastError, reason ? reason : "", sizeof(sdLastError));
     sdSpiFrequencyHz = 0;
     sdCardTypeStr = "Unavailable";
     sdCardSizeBytes = 0;
@@ -756,7 +803,7 @@ bool tryMountMicroSD(uint32_t frequencyHz) {
     lastSdMountAttempt = millis();
     sdMounted = false;
     sdCardStatus = SD_STATUS_UNKNOWN;
-    sdLastError = "Initializing";
+    strlcpy(sdLastError, "Initializing", sizeof(sdLastError));
     sdSpiFrequencyHz = 0;
 
     // Reset a previous failed mount and explicitly reuse the configured pins.
@@ -803,7 +850,7 @@ bool tryMountMicroSD(uint32_t frequencyHz) {
 
     sdMounted = true;
     sdCardStatus = SD_STATUS_READY;
-    sdLastError = "";
+    sdLastError[0] = '\0';
     sdSpiFrequencyHz = frequencyHz;
     updateSdMetrics(true);
     Serial.printf("MicroSD READY: %s, %llu MB; SPI=%lu Hz\n",
@@ -864,6 +911,7 @@ bool checkBackendHealth() {
                 if (!rtcTimeValid || diff > 5) {
                     rtc.adjust(DateTime(srvEpoch));
                     rtcTimeValid = true;
+                    backfillActivityTimestamps((uint64_t)srvEpoch * 1000ULL);
                     Serial.printf("RTC: Recovered from backend UTC time: %lu (was off by %ld s)\n", (unsigned long)srvEpoch, diff);
                     appendActivity("System", "RTC recovered from backend UTC time.");
                 }
@@ -895,6 +943,7 @@ static void checkNtpSync() {
         if (!rtcTimeValid || diff > 5) {
             rtc.adjust(DateTime((uint32_t)ntpNow));
             rtcTimeValid = true;
+            backfillActivityTimestamps((uint64_t)ntpNow * 1000ULL);
             Serial.printf("RTC: Synchronized from NTP: UTC %lu (was off by %ld s)\n", (unsigned long)ntpNow, diff);
             appendActivity("System", "RTC synchronized from NTP.");
         }
@@ -922,9 +971,9 @@ void buildTelemetryRecord(JsonObject obj, char* recordId, size_t recordIdSize,
     const char* thiLabel = "Normal";
     if (!isnan(thi)) {
         if (thi < thiNormalMax)        thiLabel = "Normal";
-        else if (thi <= thiStressMax)  thiLabel = "Stressful";
-        else if (thi <= thiExtremeMax) thiLabel = "Extreme Heat";
-        else                            thiLabel = "Danger Zone";
+        else if (thi < thiStressMax)   thiLabel = "Stressful";
+        else if (thi < thiExtremeMax)  thiLabel = "Extreme Heat";
+        else                           thiLabel = "Danger Zone";
     }
 
     obj["id"]        = (const char*)recordId;
@@ -956,6 +1005,10 @@ void buildTelemetryRecord(JsonObject obj, char* recordId, size_t recordIdSize,
     obj["mist_on"]      = mistOn;
     obj["bath_on"]      = bathOn;
     obj["clean_on"]     = cleanOn;
+    obj["mist_l"]       = mistWaterUsedL;
+    obj["bath_l"]       = bathWaterUsedL;
+    obj["clean_l"]      = cleanWaterUsedL;
+    obj["other_l"]      = otherWaterUsedL;
 }
 
 bool logOfflineReading(float temp, float hum, float thi,
@@ -1208,6 +1261,18 @@ void syncBatch() {
     }
     http.end();
     syncInProgress = false;
+}
+
+// FreeRTOS background task for non-blocking SD batch sync (PERF-04)
+static TaskHandle_t syncTaskHandle = NULL;
+
+void syncBatchTask(void *pvParameters) {
+    for (;;) {
+        if (backendOnline && sdMounted && sdPendingCount > 0 && !syncInProgress) {
+            syncBatch();
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 // ============================================================
@@ -1595,9 +1660,42 @@ static void fetchBackendSchedules() {
 #define ADMIN_PASSWORD "ios2024"
 #endif
 
+static bool constantTimeCompare(const void* a, const void* b, size_t len) {
+    const uint8_t* pA = (const uint8_t*)a;
+    const uint8_t* pB = (const uint8_t*)b;
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= (uint8_t)(pA[i] ^ pB[i]);
+    }
+    return diff == 0;
+}
+
+static const char* ADMIN_SALT = "ios_swine_esp32_2024";
+static uint8_t adminPasswordHash[32];
+static bool adminPasswordHashInitialized = false;
+
+static void computeSha256Salted(const char* pass, const char* salt, uint8_t output[32]) {
+    char combined[128];
+    snprintf(combined, sizeof(combined), "%s:%s", salt, pass ? pass : "");
+    mbedtls_sha256((const unsigned char*)combined, strlen(combined), output, 0);
+}
+
+static void initAdminPasswordHash() {
+    computeSha256Salted(ADMIN_PASSWORD, ADMIN_SALT, adminPasswordHash);
+    adminPasswordHashInitialized = true;
+}
+
+static bool verifyAdminPassword(const char* pass) {
+    if (!pass) return false;
+    if (!adminPasswordHashInitialized) initAdminPasswordHash();
+    uint8_t providedHash[32];
+    computeSha256Salted(pass, ADMIN_SALT, providedHash);
+    return constantTimeCompare(adminPasswordHash, providedHash, 32);
+}
+
 struct AdminSession {
     char token[33];
-    uint32_t createdAt; // uptime in seconds
+    uint32_t createdAtMs; // uptime in milliseconds (overflow-safe)
     bool active;
 };
 
@@ -1606,26 +1704,24 @@ const uint32_t ADMIN_SESSION_TTL_SEC = 24 * 3600; // 24 hours
 static AdminSession adminSessions[MAX_ADMIN_SESSIONS];
 static bool adminSessionsInitialized = false;
 
-static uint32_t getUptimeSeconds() {
-    return (uint32_t)(millis() / 1000UL);
-}
-
 static void initAdminSessions() {
     if (adminSessionsInitialized) return;
     for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
         adminSessions[i].active = false;
         adminSessions[i].token[0] = '\0';
-        adminSessions[i].createdAt = 0;
+        adminSessions[i].createdAtMs = 0;
     }
     adminSessionsInitialized = true;
 }
 
 static void cleanExpiredSessions() {
     initAdminSessions();
-    uint32_t now = getUptimeSeconds();
+    uint32_t nowMs = millis();
     for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
         if (adminSessions[i].active) {
-            if (now < adminSessions[i].createdAt || (now - adminSessions[i].createdAt) > ADMIN_SESSION_TTL_SEC) {
+            // Unsigned subtraction is overflow-safe across 49.7 day millis() wrap
+            uint32_t elapsedMs = (uint32_t)(nowMs - adminSessions[i].createdAtMs);
+            if (elapsedMs > (ADMIN_SESSION_TTL_SEC * 1000UL)) {
                 adminSessions[i].active = false;
                 adminSessions[i].token[0] = '\0';
             }
@@ -1636,15 +1732,17 @@ static void cleanExpiredSessions() {
 static String createAdminSession() {
     cleanExpiredSessions();
     int slot = -1;
-    uint32_t oldestTime = UINT32_MAX;
+    uint32_t maxElapsedMs = 0;
     int oldestSlot = 0;
+    uint32_t nowMs = millis();
     for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
         if (!adminSessions[i].active) {
             slot = i;
             break;
         }
-        if (adminSessions[i].createdAt < oldestTime) {
-            oldestTime = adminSessions[i].createdAt;
+        uint32_t elapsedMs = (uint32_t)(nowMs - adminSessions[i].createdAtMs);
+        if (elapsedMs >= maxElapsedMs) {
+            maxElapsedMs = elapsedMs;
             oldestSlot = i;
         }
     }
@@ -1657,7 +1755,7 @@ static String createAdminSession() {
         adminSessions[slot].token[i] = hexChars[esp_random() % 16];
     }
     adminSessions[slot].token[32] = '\0';
-    adminSessions[slot].createdAt = getUptimeSeconds();
+    adminSessions[slot].createdAtMs = millis();
     adminSessions[slot].active = true;
 
     return String(adminSessions[slot].token);
@@ -1666,18 +1764,24 @@ static String createAdminSession() {
 static bool isValidAdminSession(const String &token) {
     if (token.length() != 32) return false;
     cleanExpiredSessions();
+    bool valid = false;
+    const char* tokCStr = token.c_str();
     for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
-        if (adminSessions[i].active && token.equals(adminSessions[i].token)) {
-            return true;
+        if (adminSessions[i].active) {
+            if (constantTimeCompare(tokCStr, adminSessions[i].token, 32)) {
+                valid = true;
+            }
         }
     }
-    return false;
+    return valid;
 }
 
 static void destroyAdminSession(const String &token) {
+    if (token.length() != 32) return;
     cleanExpiredSessions();
+    const char* tokCStr = token.c_str();
     for (int i = 0; i < MAX_ADMIN_SESSIONS; i++) {
-        if (adminSessions[i].active && token.equals(adminSessions[i].token)) {
+        if (adminSessions[i].active && constantTimeCompare(tokCStr, adminSessions[i].token, 32)) {
             adminSessions[i].active = false;
             adminSessions[i].token[0] = '\0';
             break;
@@ -1863,10 +1967,10 @@ void setupScheduleRoutes(AsyncWebServer &srv) {
         String path    = request->url();
         String idParam = path.substring(path.lastIndexOf('/') + 1);
 
-        int8_t idx = -1;
+        int idx = -1;
         for (uint8_t i = 0; i < scheduleCount; i++) {
             if (strcmp(schedules[i].id, idParam.c_str()) == 0) {
-                idx = (int8_t)i;
+                idx = (int)i;
                 break;
             }
         }
@@ -1940,10 +2044,10 @@ void setupScheduleRoutes(AsyncWebServer &srv) {
         String path    = request->url();
         String idParam = path.substring(path.lastIndexOf('/') + 1);
 
-        int8_t idx = -1;
+        int idx = -1;
         for (uint8_t i = 0; i < scheduleCount; i++) {
             if (strcmp(schedules[i].id, idParam.c_str()) == 0) {
-                idx = (int8_t)i;
+                idx = (int)i;
                 break;
             }
         }
@@ -1954,16 +2058,19 @@ void setupScheduleRoutes(AsyncWebServer &srv) {
             return;
         }
 
+        // Snapshot before shifting for safe rollback
+        Schedule backupSchedules[MAX_SCHEDULES];
+        uint8_t backupCount = scheduleCount;
+        memcpy(backupSchedules, schedules, sizeof(Schedule) * scheduleCount);
+
         // Shift remaining entries left to close the gap
-        Schedule removed = schedules[idx];
         for (uint8_t i = (uint8_t)idx; i < scheduleCount - 1; i++) {
             schedules[i] = schedules[i + 1];
         }
         scheduleCount--;
         if (!saveSchedules()) {
-            for (int i = scheduleCount; i > idx; i--) schedules[i] = schedules[i - 1];
-            schedules[idx] = removed;
-            scheduleCount++;
+            memcpy(schedules, backupSchedules, sizeof(Schedule) * backupCount);
+            scheduleCount = backupCount;
             request->send(507, "application/json", "{\"ok\":false,\"error\":\"Schedule deletion could not be persisted\"}");
             return;
         }
@@ -1993,7 +2100,133 @@ unsigned long lastFlowPulseCount = 0;
 float flowRateLPM = 0.0;
 float totalWaterUsedL = 0.0;     // Cumulative water used since boot (waterUsedSinceBoot)
 float todayWaterUsedL = 0.0;     // Water used today (resets at local midnight when RTC valid)
+// mistWaterUsedL / bathWaterUsedL / cleanWaterUsedL / otherWaterUsedL declared near top (before buildTelemetryRecord)
 uint8_t lastWaterDay = 0xFF;     // Tracks local day to detect midnight rollover
+
+// ============================================================
+// WATER PERSISTENCE & DAILY HISTORY RING (BUG-05 & BUG-06)
+// ============================================================
+
+unsigned long lastWaterSaveMs = 0;
+float lastSavedTotalWaterL = 0.0f;
+
+#define DAILY_WATER_FILE "/water_daily.json"
+#define DAILY_WATER_CAPACITY 30
+
+struct DailyWaterRecord {
+    char date[16];   // YYYY-MM-DD
+    char day[8];     // Sun, Mon, etc.
+    float mist;
+    float bathe;
+    float clean;
+    float other;
+    float total;
+};
+
+static DailyWaterRecord dailyWaterHistory[DAILY_WATER_CAPACITY];
+static size_t dailyWaterCount = 0;
+
+static void loadDailyWaterHistory() {
+    FsLock lock;
+    dailyWaterCount = 0;
+    if (!LittleFS.exists(DAILY_WATER_FILE)) return;
+    File f = LittleFS.open(DAILY_WATER_FILE, "r");
+    if (!f) return;
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, f);
+    f.close();
+    if (err || !doc.is<JsonArray>()) return;
+    JsonArray arr = doc.as<JsonArray>();
+    for (JsonObject obj : arr) {
+        if (dailyWaterCount >= DAILY_WATER_CAPACITY) break;
+        DailyWaterRecord &rec = dailyWaterHistory[dailyWaterCount++];
+        strlcpy(rec.date, obj["date"] | "—", sizeof(rec.date));
+        strlcpy(rec.day, obj["day"] | "—", sizeof(rec.day));
+        rec.mist  = obj["mist"] | 0.0f;
+        rec.bathe = obj["bathe"] | 0.0f;
+        rec.clean = obj["clean"] | 0.0f;
+        rec.other = obj["other"] | 0.0f;
+        rec.total = obj["total"] | 0.0f;
+    }
+}
+
+static void saveDailyWaterHistory() {
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    for (size_t i = 0; i < dailyWaterCount; i++) {
+        JsonObject obj = arr.add<JsonObject>();
+        obj["date"]  = dailyWaterHistory[i].date;
+        obj["day"]   = dailyWaterHistory[i].day;
+        obj["mist"]  = dailyWaterHistory[i].mist;
+        obj["bathe"] = dailyWaterHistory[i].bathe;
+        obj["clean"] = dailyWaterHistory[i].clean;
+        obj["other"] = dailyWaterHistory[i].other;
+        obj["total"] = dailyWaterHistory[i].total;
+    }
+    writeJsonFileSafely(DAILY_WATER_FILE, doc);
+}
+
+static void recordCompletedDayWater(const char* dateStr, const char* dayStr,
+                                    float mist, float bathe, float clean, float other, float total) {
+    for (size_t i = 0; i < dailyWaterCount; i++) {
+        if (strcmp(dailyWaterHistory[i].date, dateStr) == 0) {
+            dailyWaterHistory[i].mist  = mist;
+            dailyWaterHistory[i].bathe = bathe;
+            dailyWaterHistory[i].clean = clean;
+            dailyWaterHistory[i].other = other;
+            dailyWaterHistory[i].total = total;
+            saveDailyWaterHistory();
+            return;
+        }
+    }
+    if (dailyWaterCount >= DAILY_WATER_CAPACITY) {
+        for (size_t i = 0; i < DAILY_WATER_CAPACITY - 1; i++) {
+            dailyWaterHistory[i] = dailyWaterHistory[i + 1];
+        }
+        dailyWaterCount = DAILY_WATER_CAPACITY - 1;
+    }
+    DailyWaterRecord &rec = dailyWaterHistory[dailyWaterCount++];
+    strlcpy(rec.date, dateStr, sizeof(rec.date));
+    strlcpy(rec.day, dayStr, sizeof(rec.day));
+    rec.mist  = mist;
+    rec.bathe = bathe;
+    rec.clean = clean;
+    rec.other = other;
+    rec.total = total;
+    saveDailyWaterHistory();
+}
+
+void saveWaterCounters() {
+    Preferences waterPref;
+    if (waterPref.begin("ios_water", false)) {
+        waterPref.putFloat("today", todayWaterUsedL);
+        waterPref.putFloat("total", totalWaterUsedL);
+        waterPref.putFloat("mist",  mistWaterUsedL);
+        waterPref.putFloat("bath",  bathWaterUsedL);
+        waterPref.putFloat("clean", cleanWaterUsedL);
+        waterPref.putFloat("other", otherWaterUsedL);
+        waterPref.putUChar("day",   lastWaterDay);
+        waterPref.end();
+        lastWaterSaveMs = millis();
+        lastSavedTotalWaterL = totalWaterUsedL;
+    }
+}
+
+void loadWaterCounters() {
+    Preferences waterPref;
+    if (waterPref.begin("ios_water", true)) {
+        todayWaterUsedL = waterPref.getFloat("today", 0.0f);
+        totalWaterUsedL = waterPref.getFloat("total", 0.0f);
+        mistWaterUsedL  = waterPref.getFloat("mist",  0.0f);
+        bathWaterUsedL  = waterPref.getFloat("bath",  0.0f);
+        cleanWaterUsedL = waterPref.getFloat("clean", 0.0f);
+        otherWaterUsedL = waterPref.getFloat("other", 0.0f);
+        lastWaterDay    = waterPref.getUChar("day",   0xFF);
+        waterPref.end();
+        lastSavedTotalWaterL = totalWaterUsedL;
+        Serial.printf("[WATER] Loaded: total=%.2fL, today=%.2fL, day=%u\n", totalWaterUsedL, todayWaterUsedL, lastWaterDay);
+    }
+}
 
 // ============================================================
 // SERIAL TIMING
@@ -2025,6 +2258,7 @@ void pumpOff()
 {
     digitalWrite(RELAY_PIN, RELAY_OFF);
     pumpIsOn = false;
+    saveWaterCounters();
 }
 
 // ── Bathing relay (BATH_RELAY_PIN = GPIO 7, active-LOW) ───────────────────
@@ -2038,6 +2272,7 @@ void bathOff()
 {
     digitalWrite(BATH_RELAY_PIN, RELAY_OFF);
     bathPumpIsOn = false;
+    saveWaterCounters();
 }
 
 // ── Cleaning relay (CLEAN_RELAY_PIN = GPIO 15, active-LOW) ─────────────────
@@ -2051,6 +2286,7 @@ void cleanOff()
 {
     digitalWrite(CLEAN_RELAY_PIN, RELAY_OFF);
     cleanPumpIsOn = false;
+    saveWaterCounters();
 }
 
 static const char* getBlockedReason(bool isScheduledRelay, bool isPumpOn, bool isPreempted = false) {
@@ -2170,9 +2406,17 @@ void updatePump()
     } else if (rtcValid && schedClean) {
         // Clean schedule: highest scheduled priority — pauses bath & misting
         shouldClean = waterOk;
+        // Reset mist cycle state when scheduled cleaning takes over (LOGIC-06)
+        mistCycleRunning = false;
+        mistInOnPhase = false;
+        thiOffSince = 0;
     } else if (rtcValid && schedBath) {
         // Bath schedule: pauses misting while window is active
         shouldBath = waterOk;
+        // Reset mist cycle state when scheduled bathing takes over (LOGIC-06)
+        mistCycleRunning = false;
+        mistInOnPhase = false;
+        thiOffSince = 0;
     } else {
         // THI auto-cooling: lowest priority, only when no schedule is running
         shouldMist = waterOk && thiTrigger;
@@ -2512,11 +2756,11 @@ void handleStatus(AsyncWebServerRequest *request)
             thiStatus["label"] = "Normal";
             thiStatus["cls"] = "badge-blue";
             thiStatus["color"] = "#3B82F6";
-        } else if (lastThi <= thiStressMax) {
+        } else if (lastThi < thiStressMax) {
             thiStatus["label"] = "Stressful";
             thiStatus["cls"] = "badge-warn";
             thiStatus["color"] = "#F59E0B";
-        } else if (lastThi <= thiExtremeMax) {
+        } else if (lastThi < thiExtremeMax) {
             thiStatus["label"] = "Extreme Heat";
             thiStatus["cls"] = "badge-orange";
             thiStatus["color"] = "#F97316";
@@ -2565,8 +2809,13 @@ void handleStatus(AsyncWebServerRequest *request)
     }
 
     doc["waterUsed"] = todayWaterUsedL;
+    doc["waterUsedToday"] = todayWaterUsedL;
     doc["waterUsedSinceBoot"] = totalWaterUsedL;
     doc["flowRate"] = flowRateLPM;
+    doc["mist_l"] = mistWaterUsedL;
+    doc["bath_l"] = bathWaterUsedL;
+    doc["clean_l"] = cleanWaterUsedL;
+    doc["other_l"] = otherWaterUsedL;
 
     // Pump state & reason
     bool anyPumpOn = pumpIsOn || bathPumpIsOn || cleanPumpIsOn;
@@ -2887,6 +3136,10 @@ void setupSettingsRoutes(AsyncWebServer &srv) {
 
 void setupReadingsRoutes(AsyncWebServer &srv) {
     srv.on("/api/reports/summary", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (!isAuthorized(request)) {
+            sendUnauthorized(request);
+            return;
+        }
         JsonDocument doc;
         doc["source"] = "esp32";
         doc["count"] = historyCount;
@@ -2907,19 +3160,18 @@ void setupReadingsRoutes(AsyncWebServer &srv) {
     });
     auto handleReadings = [](AsyncWebServerRequest *request) {
         String range = request->hasParam("range") ? request->getParam("range")->value() : "24h";
-        if (range != "24h" && range != "all") {
-            request->send(400, "application/json", "{\"error\":\"Use the Node dashboard for 7-day and 30-day reports\"}");
-            return;
-        }
-        uint64_t since = range == "24h" && rtcOk && rtcTimeValid
+        uint64_t since = (range == "24h" && rtcOk && rtcTimeValid)
             ? (uint64_t)rtc.now().unixtime() * 1000ULL - 24ULL * 3600ULL * 1000ULL : 0;
         AsyncResponseStream *response = request->beginResponseStream("application/json");
         response->addHeader("Access-Control-Allow-Origin", "*");
+        if (range != "24h" && range != "all") {
+            response->addHeader("X-Limited-History", "24h");
+        }
         response->print('[');
         bool first = true;
         for (size_t i = 0; i < historyCount; i++) {
             size_t idx = (historyCount < HISTORY_CAPACITY) ? i : ((historyHead + i) % HISTORY_CAPACITY);
-            if (historyRing[idx].ts >= 1704067200000ULL && historyRing[idx].ts < since) continue;
+            if (since > 0 && (historyRing[idx].ts < 1704067200000ULL || historyRing[idx].ts < since)) continue;
             if (!first) response->print(',');
             first = false;
             response->printf("{\"time\":\"%s\",\"ts\":%llu,\"temp\":%.1f,\"humidity\":%.1f,\"thi\":%.1f}",
@@ -2938,20 +3190,23 @@ void setupReadingsRoutes(AsyncWebServer &srv) {
 
     // The Node archive supplies long-term CSVs. Local export has limited history.
     srv.on("/api/reports/export", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String range = request->hasParam("range") ? request->getParam("range")->value() : "24h";
-        if (range != "24h" && range != "all") {
-            request->send(400, "application/json", "{\"error\":\"Use the Node dashboard for 7-day and 30-day exports\"}");
+        if (!isAuthorized(request)) {
+            sendUnauthorized(request);
             return;
         }
-        uint64_t since = range == "24h" && rtcOk && rtcTimeValid
+        String range = request->hasParam("range") ? request->getParam("range")->value() : "24h";
+        uint64_t since = (range == "24h" && rtcOk && rtcTimeValid)
             ? (uint64_t)rtc.now().unixtime() * 1000ULL - 24ULL * 3600ULL * 1000ULL : 0;
         AsyncResponseStream *response = request->beginResponseStream("text/csv");
         response->addHeader("Content-Disposition", "attachment; filename=\"readings.csv\"");
         response->addHeader("Access-Control-Allow-Origin", "*");
+        if (range != "24h" && range != "all") {
+            response->addHeader("X-Limited-History", "24h");
+        }
         response->print("time,ts,temp,humidity,thi\n");
         for (size_t i = 0; i < historyCount; i++) {
             size_t idx = (historyCount < HISTORY_CAPACITY) ? i : ((historyHead + i) % HISTORY_CAPACITY);
-            if (historyRing[idx].ts >= 1704067200000ULL && historyRing[idx].ts < since) continue;
+            if (since > 0 && (historyRing[idx].ts < 1704067200000ULL || historyRing[idx].ts < since)) continue;
             response->printf("%s,%llu,%.1f,%.1f,%.1f\n",
                 historyRing[idx].time,
                 (unsigned long long)historyRing[idx].ts,
@@ -2965,27 +3220,55 @@ void setupReadingsRoutes(AsyncWebServer &srv) {
 
 void setupAuxRoutes(AsyncWebServer &srv) {
     srv.on("/api/water/weekly", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (!isAuthorized(request)) {
+            sendUnauthorized(request);
+            return;
+        }
         JsonDocument doc;
         JsonArray days = doc.to<JsonArray>();
         const char* dayNames[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-        uint32_t nowEpoch = (rtcOk && rtcTimeValid) ? rtc.now().unixtime() : 0;
+        uint32_t nowEpoch = (rtcOk && rtcTimeValid) ? (rtc.now().unixtime() + LOCAL_TIMEZONE_OFFSET_SEC) : 0;
         for (int i = 6; i >= 0; i--) {
             JsonObject d = days.add<JsonObject>();
+            char dateBuf[16] = "—";
+            const char* dayStr = "—";
             if (nowEpoch > 0) {
                 DateTime dt(nowEpoch - i * 86400);
-                char dateBuf[16];
                 snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", dt.year(), dt.month(), dt.day());
-                d["date"] = dateBuf;
-                d["day"] = dayNames[dt.dayOfTheWeek()];
+                dayStr = dayNames[dt.dayOfTheWeek()];
             } else {
-                d["date"] = "—";
-                d["day"] = dayNames[(7 - i) % 7];
+                dayStr = dayNames[(7 - i) % 7];
             }
-            d["mist"] = 0;
-            d["bathe"] = 0;
-            d["clean"] = 0;
-            d["other"] = (i == 0) ? (float)todayWaterUsedL : 0;
-            d["total"] = (i == 0) ? (float)todayWaterUsedL : 0;
+            d["date"] = dateBuf;
+            d["day"] = dayStr;
+
+            if (i == 0) {
+                d["mist"] = (float)mistWaterUsedL;
+                d["bathe"] = (float)bathWaterUsedL;
+                d["clean"] = (float)cleanWaterUsedL;
+                d["other"] = (float)otherWaterUsedL;
+                d["total"] = (float)todayWaterUsedL;
+            } else {
+                bool found = false;
+                for (size_t h = 0; h < dailyWaterCount; h++) {
+                    if (strcmp(dailyWaterHistory[h].date, dateBuf) == 0) {
+                        d["mist"] = dailyWaterHistory[h].mist;
+                        d["bathe"] = dailyWaterHistory[h].bathe;
+                        d["clean"] = dailyWaterHistory[h].clean;
+                        d["other"] = dailyWaterHistory[h].other;
+                        d["total"] = dailyWaterHistory[h].total;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    d["mist"] = 0.0f;
+                    d["bathe"] = 0.0f;
+                    d["clean"] = 0.0f;
+                    d["other"] = 0.0f;
+                    d["total"] = 0.0f;
+                }
+            }
         }
         String out;
         serializeJson(days, out);
@@ -2993,35 +3276,73 @@ void setupAuxRoutes(AsyncWebServer &srv) {
     });
 
     srv.on("/api/water/usage", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (!isAuthorized(request)) {
+            sendUnauthorized(request);
+            return;
+        }
+        String range = request->hasParam("range") ? request->getParam("range")->value() : "7d";
+        int numDays = 7;
+        if (range == "24h") {
+            numDays = 1;
+        } else if (range == "30d") {
+            numDays = 30;
+        }
         JsonDocument doc;
         JsonArray days = doc["days"].to<JsonArray>();
         const char* dayNames[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-        uint32_t nowEpoch = (rtcOk && rtcTimeValid) ? rtc.now().unixtime() : 0;
-        for (int i = 6; i >= 0; i--) {
+        uint32_t nowEpoch = (rtcOk && rtcTimeValid) ? (rtc.now().unixtime() + LOCAL_TIMEZONE_OFFSET_SEC) : 0;
+        float sumMist = 0, sumBathe = 0, sumClean = 0, sumOther = 0, sumTotal = 0;
+
+        for (int i = numDays - 1; i >= 0; i--) {
             JsonObject d = days.add<JsonObject>();
+            char dateBuf[16] = "—";
+            const char* dayStr = "—";
             if (nowEpoch > 0) {
                 DateTime dt(nowEpoch - i * 86400);
-                char dateBuf[16];
                 snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", dt.year(), dt.month(), dt.day());
-                d["date"] = dateBuf;
-                d["day"] = dayNames[dt.dayOfTheWeek()];
+                dayStr = dayNames[dt.dayOfTheWeek()];
             } else {
-                d["date"] = "—";
-                d["day"] = dayNames[(7 - i) % 7];
+                dayStr = dayNames[(7 - (i % 7)) % 7];
             }
-            d["mist"] = 0;
-            d["bathe"] = 0;
-            d["clean"] = 0;
-            d["other"] = (i == 0) ? (float)todayWaterUsedL : 0;
-            d["total"] = (i == 0) ? (float)todayWaterUsedL : 0;
+            d["date"] = dateBuf;
+            d["day"] = dayStr;
+
+            float m = 0, b = 0, c = 0, o = 0, t = 0;
+            if (i == 0) {
+                m = mistWaterUsedL;
+                b = bathWaterUsedL;
+                c = cleanWaterUsedL;
+                o = otherWaterUsedL;
+                t = todayWaterUsedL;
+            } else {
+                for (size_t h = 0; h < dailyWaterCount; h++) {
+                    if (strcmp(dailyWaterHistory[h].date, dateBuf) == 0) {
+                        m = dailyWaterHistory[h].mist;
+                        b = dailyWaterHistory[h].bathe;
+                        c = dailyWaterHistory[h].clean;
+                        o = dailyWaterHistory[h].other;
+                        t = dailyWaterHistory[h].total;
+                        break;
+                    }
+                }
+            }
+            d["mist"] = m;
+            d["bathe"] = b;
+            d["clean"] = c;
+            d["other"] = o;
+            d["total"] = t;
+
+            sumMist += m; sumBathe += b; sumClean += c; sumOther += o; sumTotal += t;
         }
+
         JsonObject totals = doc["totals"].to<JsonObject>();
-        totals["mist"] = 0;
-        totals["bathe"] = 0;
-        totals["clean"] = 0;
-        totals["other"] = (float)todayWaterUsedL;
-        totals["total"] = (float)todayWaterUsedL;
+        totals["mist"] = sumMist;
+        totals["bathe"] = sumBathe;
+        totals["clean"] = sumClean;
+        totals["other"] = sumOther;
+        totals["total"] = sumTotal;
         doc["today"] = (float)todayWaterUsedL;
+        doc["range"] = range;
         doc["source"] = "esp32-local";
         String out;
         serializeJson(doc, out);
@@ -3168,7 +3489,8 @@ void setupWebServer()
             if (obj["password"].is<const char*>()) p = obj["password"].as<const char*>();
             else if (obj["pass"].is<const char*>()) p = obj["pass"].as<const char*>();
 
-            if (strcmp(u, ADMIN_USER) == 0 && strcmp(p, ADMIN_PASSWORD) == 0) {
+            bool userOk = (strlen(u) == strlen(ADMIN_USER)) && constantTimeCompare(u, ADMIN_USER, strlen(ADMIN_USER));
+            if (userOk && verifyAdminPassword(p)) {
                 String token = createAdminSession();
                 AsyncWebServerResponse *response = request->beginResponse(200, "application/json",
                     "{\"ok\":true,\"token\":\"" + token + "\",\"expiresIn\":" + String(ADMIN_SESSION_TTL_SEC) + "}");
@@ -3177,7 +3499,7 @@ void setupWebServer()
                 return;
             }
 
-            request->send(401, "application/json", "{\"ok\":false,\"error\":\"Invalid credentials. Try admin / ios2024\"}");
+            request->send(401, "application/json", "{\"ok\":false,\"error\":\"Invalid credentials\"}");
         });
     loginHandler->setMethod(HTTP_POST);
     server.addHandler(loginHandler);
@@ -3241,6 +3563,7 @@ void setupWebServer()
 
         rtc.adjust(DateTime((uint32_t)epochVal));
         rtcTimeValid = true;
+        backfillActivityTimestamps((uint64_t)epochVal * 1000ULL);
 
         Serial.print("RTC successfully adjusted to UTC epoch: ");
         Serial.println((uint32_t)epochVal);
@@ -3373,7 +3696,7 @@ void setupWebServer()
 
     // Global CORS headers for cross-origin and preflight requests
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
-    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, X-Auth-Token, Authorization, X-Session-Token");
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
 
     // Captive portal detection endpoints (Android, iOS/macOS, Windows, Firefox)
@@ -3525,15 +3848,40 @@ void calculateWaterFlow()
         uint8_t currentDay = nowLocal.day();
         if (lastWaterDay == 0xFF) {
             lastWaterDay = currentDay;
+            saveWaterCounters();
         } else if (currentDay != lastWaterDay) {
+            DateTime prevDayUtc = nowLocal - TimeSpan(86400);
+            char dateBuf[16];
+            snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", prevDayUtc.year(), prevDayUtc.month(), prevDayUtc.day());
+            const char* dayNames[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+            recordCompletedDayWater(dateBuf, dayNames[prevDayUtc.dayOfTheWeek()],
+                                    mistWaterUsedL, bathWaterUsedL, cleanWaterUsedL, otherWaterUsedL, todayWaterUsedL);
             todayWaterUsedL = 0.0;
+            mistWaterUsedL = 0.0;
+            bathWaterUsedL = 0.0;
+            cleanWaterUsedL = 0.0;
+            otherWaterUsedL = 0.0;
             lastWaterDay = currentDay;
+            saveWaterCounters();
         }
     }
 
     // Add water usage to total and today's usage
     totalWaterUsedL += litersUsed;
     todayWaterUsedL += litersUsed;
+
+    // Per-operation attribution (scheduled operations override auto-misting: clean > bath > mist > other)
+    if (litersUsed > 0.0f) {
+        if (cleanPumpIsOn) {
+            cleanWaterUsedL += litersUsed;
+        } else if (bathPumpIsOn) {
+            bathWaterUsedL += litersUsed;
+        } else if (pumpIsOn) {
+            mistWaterUsedL += litersUsed;
+        } else {
+            otherWaterUsedL += litersUsed;
+        }
+    }
 
     // Save current values
     lastFlowPulseCount = currentPulseCount;
@@ -3661,10 +4009,11 @@ void setup()
     delay(1000);
 
     // --------------------------------------------------------
-    // PREFERENCES (NVS) SETTINGS
+    // PREFERENCES (NVS) SETTINGS & WATER COUNTERS
     // --------------------------------------------------------
 
     loadSettings();
+    loadWaterCounters();
 
     // --------------------------------------------------------
     // DHT22
@@ -3692,6 +4041,29 @@ void setup()
         if (!rtcTimeValid)
         {
             Serial.println("WARNING: RTC DS3231 lost power! Time is invalid until synchronized.");
+        }
+        else if (lastWaterDay != 0xFF)
+        {
+            DateTime nowUtc = rtc.now();
+            DateTime nowLocal = nowUtc + TimeSpan(LOCAL_TIMEZONE_OFFSET_SEC);
+            uint8_t currentDay = nowLocal.day();
+            if (currentDay != lastWaterDay)
+            {
+                // Day rolled over while powered off — archive previous day water
+                DateTime prevDayUtc = nowLocal - TimeSpan(86400);
+                char dateBuf[16];
+                snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", prevDayUtc.year(), prevDayUtc.month(), prevDayUtc.day());
+                const char* dayNames[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+                recordCompletedDayWater(dateBuf, dayNames[prevDayUtc.dayOfTheWeek()],
+                                        mistWaterUsedL, bathWaterUsedL, cleanWaterUsedL, otherWaterUsedL, todayWaterUsedL);
+                todayWaterUsedL = 0.0;
+                mistWaterUsedL = 0.0;
+                bathWaterUsedL = 0.0;
+                cleanWaterUsedL = 0.0;
+                otherWaterUsedL = 0.0;
+                lastWaterDay = currentDay;
+                saveWaterCounters();
+            }
         }
     }
 
@@ -3755,6 +4127,7 @@ void setup()
         loadHistory();   // Load persisted history readings; missing file → empty history
         loadActivity();
         loadBackendSchedules();
+        loadDailyWaterHistory(); // Load persisted 30-day water history (BUG-06)
     }
 
     // --------------------------------------------------------
@@ -3782,6 +4155,20 @@ void setup()
     // --------------------------------------------------------
 
     setupWebServer();
+
+    // --------------------------------------------------------
+    // FREERTOS BACKGROUND TASKS (PERF-04)
+    // --------------------------------------------------------
+
+    xTaskCreatePinnedToCore(
+        syncBatchTask,
+        "SyncBatchTask",
+        8192,
+        NULL,
+        1,
+        &syncTaskHandle,
+        0 // Core 0: keeps Core 1 free for Arduino loop & sensor timing
+    );
 
     Serial.println("System started.");
     Serial.println("YF-S201 flow sensor initialized.");
@@ -3838,16 +4225,19 @@ void loop()
     }
 
     // --------------------------------------------------------
-    // AUTOMATIC MICROSD BATCH SYNCHRONIZATION
-    // Drains pending offline readings to backend in small batches
+    // PERIODIC WATER COUNTER PERSISTENCE (BUG-05)
+    // Saves every 5 minutes if water usage increased
     // --------------------------------------------------------
 
-    if (backendOnline && sdMounted && sdPendingCount > 0 && !syncInProgress)
+    if (millis() - lastWaterSaveMs >= 300000UL)
     {
-        if (millis() - lastSyncBatchAttempt >= SYNC_BATCH_INTERVAL_MS)
+        if (totalWaterUsedL - lastSavedTotalWaterL >= 0.05f)
         {
-            lastSyncBatchAttempt = millis();
-            syncBatch();
+            saveWaterCounters();
+        }
+        else
+        {
+            lastWaterSaveMs = millis();
         }
     }
 
@@ -3932,13 +4322,15 @@ void loop()
             snprintf(message, sizeof(message), "Temp %.1f C, humidity %.1f%%, THI %.1f; pump %s (%s)", lastTemp, lastHum, lastThi, (pumpIsOn || bathPumpIsOn || cleanPumpIsOn) ? "ON" : "OFF", currentPumpReason);
             appendActivity("Sensor", message);
         }
-        if (!telemetrySampled || millis() - lastTelemetrySample >= TELEMETRY_INTERVAL_MS) {
-            telemetrySampled = true;
-            lastTelemetrySample = millis();
-            handleTelemetrySample(lastTemp, lastHum, lastThi, lastWaterLevel, flowRateLPM, totalWaterUsedL,
-                                  pumpIsOn || bathPumpIsOn || cleanPumpIsOn, currentPumpReason,
-                                  pumpIsOn, bathPumpIsOn, cleanPumpIsOn);
-        }
+    }
+
+    // Telemetry push & MicroSD offline log: decoupled from DHT validity so water/pump telemetry is always preserved
+    if (!telemetrySampled || millis() - lastTelemetrySample >= TELEMETRY_INTERVAL_MS) {
+        telemetrySampled = true;
+        lastTelemetrySample = millis();
+        handleTelemetrySample(lastTemp, lastHum, lastThi, lastWaterLevel, flowRateLPM, totalWaterUsedL,
+                              pumpIsOn || bathPumpIsOn || cleanPumpIsOn, currentPumpReason,
+                              pumpIsOn, bathPumpIsOn, cleanPumpIsOn);
     }
 
     // Retry a failed local-history save without losing its dirty flag
@@ -3948,6 +4340,16 @@ void loop()
         if (historyDirty)
         {
             historyDirty = !saveHistory();
+        }
+    }
+
+    // Periodic activity log flush to reduce LittleFS flash wear (PERF-02)
+    if (millis() - lastActivityFlush >= ACTIVITY_FLUSH_INTERVAL_MS)
+    {
+        lastActivityFlush = millis();
+        if (activityDirty)
+        {
+            flushActivityLog();
         }
     }
 

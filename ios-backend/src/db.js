@@ -164,7 +164,10 @@ migrateRemoveMistSchedules();
   const table = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='water_readings'`).get();
   if (!table) return;
   const cols = db.prepare(`PRAGMA table_info(water_readings)`).all();
-  for (const [name, type] of [['mist_on', 'INTEGER'], ['bath_on', 'INTEGER'], ['clean_on', 'INTEGER'], ['src_id', 'TEXT']]) {
+  for (const [name, type] of [
+    ['mist_on', 'INTEGER'], ['bath_on', 'INTEGER'], ['clean_on', 'INTEGER'], ['src_id', 'TEXT'],
+    ['mist_l', 'REAL DEFAULT 0'], ['bath_l', 'REAL DEFAULT 0'], ['clean_l', 'REAL DEFAULT 0'], ['other_l', 'REAL DEFAULT 0']
+  ]) {
     if (!cols.some(c => c.name === name)) {
       db.exec(`ALTER TABLE water_readings ADD COLUMN ${name} ${type}`);
       console.log(`[db] water_readings table migrated: added ${name} column`);
@@ -178,7 +181,10 @@ migrateRemoveMistSchedules();
   const table = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='offline_readings'`).get();
   if (!table) return;
   const cols = db.prepare(`PRAGMA table_info(offline_readings)`).all();
-  for (const [name, type] of [['mist_on', 'INTEGER'], ['bath_on', 'INTEGER'], ['clean_on', 'INTEGER']]) {
+  for (const [name, type] of [
+    ['mist_on', 'INTEGER'], ['bath_on', 'INTEGER'], ['clean_on', 'INTEGER'],
+    ['mist_l', 'REAL DEFAULT 0'], ['bath_l', 'REAL DEFAULT 0'], ['clean_l', 'REAL DEFAULT 0'], ['other_l', 'REAL DEFAULT 0']
+  ]) {
     if (!cols.some(c => c.name === name)) {
       db.exec(`ALTER TABLE offline_readings ADD COLUMN ${name} ${type}`);
       console.log(`[db] offline_readings table migrated: added ${name} column`);
@@ -376,7 +382,7 @@ function reportSummary() {
     counts: {
       readings: count,
       offline: offlineCount,
-      total: count
+      total: count + offlineCount
     },
     readingsCount: count,
     offlineCount,
@@ -387,18 +393,22 @@ function reportSummary() {
 }
 
 /* ── Water ──────────────────────────────────────────────── */
-function insertWater({ level_pct, used_l, flow_lpm, device_id, ts, mist_on, bath_on, clean_on, src_id }) {
-  const stmt = db.prepare(`INSERT OR IGNORE INTO water_readings (ts,level_pct,used_l,flow_lpm,device_id,mist_on,bath_on,clean_on,src_id) VALUES (?,?,?,?,?,?,?,?,?)`);
+function insertWater({ level_pct, used_l, flow_lpm, device_id, ts, mist_on, bath_on, clean_on, src_id, mist_l, bath_l, clean_l, other_l }) {
+  const stmt = db.prepare(`INSERT OR IGNORE INTO water_readings (ts,level_pct,used_l,flow_lpm,device_id,mist_on,bath_on,clean_on,src_id,mist_l,bath_l,clean_l,other_l) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   return stmt.run(
     ts || Date.now(),
-    level_pct,
-    used_l,
-    flow_lpm,
+    level_pct != null ? level_pct : 0,
+    used_l != null ? used_l : 0,
+    flow_lpm != null ? flow_lpm : 0,
     device_id || 'esp32-tank',
     mist_on != null ? (mist_on ? 1 : 0) : null,
     bath_on != null ? (bath_on ? 1 : 0) : null,
     clean_on != null ? (clean_on ? 1 : 0) : null,
-    src_id || null
+    src_id || null,
+    mist_l != null ? mist_l : 0,
+    bath_l != null ? bath_l : 0,
+    clean_l != null ? clean_l : 0,
+    other_l != null ? other_l : 0
   );
 }
 
@@ -424,8 +434,8 @@ function calculateWaterUsageForRows(rows) {
     const prev = rows[i - 1].used_l;
     const curr = rows[i].used_l;
     if (curr < prev) {
-      // Counter reset on reboot: treat new value as a fresh start
-      totalUsage += Math.max(0, segMax - segMin);
+      // Counter reset on reboot: finalize previous segment and count curr as usage
+      totalUsage += Math.max(0, segMax - segMin) + curr;
       segMin = curr;
       segMax = curr;
     } else {
@@ -476,19 +486,19 @@ function usageByOperation(rows) {
     const isBathe = !!row.bath_on;
     const isClean = !!row.clean_on;
 
-    const activeOps = [];
-    if (isMist) activeOps.push('mist');
-    if (isBathe) activeOps.push('bathe');
-    if (isClean) activeOps.push('clean');
-    if (activeOps.length === 0) {
-      activeOps.push('other');
+    // Attribution priority rule: scheduled operations override auto-misting
+    // clean > bath > mist > other
+    let op = 'other';
+    if (isClean) {
+      op = 'clean';
+    } else if (isBathe) {
+      op = 'bathe';
+    } else if (isMist) {
+      op = 'mist';
     }
 
-    const share = delta / activeOps.length;
     const dayEntry = getDayEntry(row.ts);
-    for (const op of activeOps) {
-      dayEntry[op] += share;
-    }
+    dayEntry[op] += delta;
     dayEntry.total += delta;
   }
 
@@ -529,17 +539,21 @@ function weeklyWaterUsage(sinceMs) {
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   let refTs = Date.now();
-  if (sinceMs !== undefined) {
+  if (sinceMs !== undefined && typeof sinceMs === 'number') {
     const maxRow = db.prepare(`SELECT MAX(ts) AS max_ts FROM water_readings`).get();
     if (maxRow && maxRow.max_ts) {
       refTs = maxRow.max_ts;
+    } else {
+      refTs = sinceMs;
     }
   }
 
   const refD = new Date(refTs + MANILA_OFFSET_MS);
   const endMidnightUtc = Date.UTC(refD.getUTCFullYear(), refD.getUTCMonth(), refD.getUTCDate()) - MANILA_OFFSET_MS;
   const startMidnightUtc = endMidnightUtc - 6 * 24 * 60 * 60 * 1000;
-  const querySince = sinceMs !== undefined ? Math.min(sinceMs, startMidnightUtc) : startMidnightUtc;
+  const querySince = (sinceMs !== undefined && typeof sinceMs === 'number')
+    ? Math.min(sinceMs, startMidnightUtc)
+    : startMidnightUtc;
 
   const prevRow = db.prepare(`SELECT * FROM water_readings WHERE ts < ? ORDER BY ts DESC LIMIT 1`).get(querySince);
   const rows = db.prepare(`SELECT * FROM water_readings WHERE ts >= ? ORDER BY ts ASC`).all(querySince);
@@ -652,11 +666,21 @@ function getWaterUsage(range = '7d') {
 
   const todayEntry = dayByDate.get(todayDateStr) || days.find(d => d.date === todayDateStr);
   const todayVal = todayEntry ? todayEntry.total : getTodayWaterUsage();
+  const todayBreakdown = todayEntry || {
+    date: todayDateStr,
+    day: dayNames[dNow.getUTCDay()],
+    mist: 0,
+    bathe: 0,
+    clean: 0,
+    other: 0,
+    total: 0
+  };
 
   return {
     days,
     totals,
     today: parseFloat((todayVal || 0).toFixed(2)),
+    todayBreakdown,
     source: 'sqlite'
   };
 }
@@ -702,6 +726,10 @@ function toggleSchedule(id, active) {
 
 function deleteSchedule(id) {
   return db.prepare(`DELETE FROM schedules WHERE id = ?`).run(id);
+}
+
+function scheduleCount() {
+  return db.prepare(`SELECT COUNT(*) AS n FROM schedules`).get().n;
 }
 
 /* ── Settings ───────────────────────────────────────────── */
@@ -802,8 +830,8 @@ function recentActivity(limit = 50, sinceMs = 0) {
 function insertOfflineBatch(records) {
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO offline_readings
-      (id, ts, temp, humidity, thi, thi_label, water_level, flow_lpm, water_used, pump_on, pump_reason, synced_at, source_ts_ms, rtc_valid, time_source, mist_on, bath_on, clean_on)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, ts, temp, humidity, thi, thi_label, water_level, flow_lpm, water_used, pump_on, pump_reason, synced_at, source_ts_ms, rtc_valid, time_source, mist_on, bath_on, clean_on, mist_l, bath_l, clean_l, other_l)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertMany = db.transaction((rows) => {
@@ -842,13 +870,27 @@ function insertOfflineBatch(records) {
       const mist_on     = r.mist_on != null ? (r.mist_on ? 1 : 0) : null;
       const bath_on     = r.bath_on != null ? (r.bath_on ? 1 : 0) : null;
       const clean_on    = r.clean_on != null ? (r.clean_on ? 1 : 0) : null;
+      const mist_l      = typeof r.mist_l === 'number' ? r.mist_l : (typeof r.mist_liters === 'number' ? r.mist_liters : 0);
+      const bath_l      = typeof r.bath_l === 'number' ? r.bath_l : (typeof r.bath_liters === 'number' ? r.bath_liters : 0);
+      const clean_l     = typeof r.clean_l === 'number' ? r.clean_l : (typeof r.clean_liters === 'number' ? r.clean_liters : 0);
+      const other_l     = typeof r.other_l === 'number' ? r.other_l : (typeof r.other_liters === 'number' ? r.other_liters : 0);
+
+      if (clockValid) {
+        const existing = db.prepare(`SELECT id FROM offline_readings WHERE ts = ?`).get(ts);
+        if (existing) {
+          skipped++;
+          accepted_ids.push(r.id);
+          continue;
+        }
+      }
 
       const info = stmt.run(
         r.id, ts, temp, humidity, thi, thi_label,
         water_level, flow_lpm, water_used, pump_on, pump_reason,
         receivedAt, Number.isFinite(sourceTs) ? sourceTs : null,
         clockValid ? 1 : 0, clockValid ? 'device' : 'server_receipt',
-        mist_on, bath_on, clean_on
+        mist_on, bath_on, clean_on,
+        mist_l, bath_l, clean_l, other_l
       );
 
       if (info.changes > 0) {
@@ -867,13 +909,14 @@ function insertOfflineBatch(records) {
 
         // Mirror water data if available
         if (water_level !== null || flow_lpm !== null || water_used !== null) {
-          db.prepare(`INSERT OR IGNORE INTO water_readings (ts,level_pct,used_l,flow_lpm,device_id,mist_on,bath_on,clean_on,src_id) VALUES (?,?,?,?,?,?,?,?,?)`)
+          db.prepare(`INSERT OR IGNORE INTO water_readings (ts,level_pct,used_l,flow_lpm,device_id,mist_on,bath_on,clean_on,src_id,mist_l,bath_l,clean_l,other_l) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
             .run(ts,
               water_level !== null ? water_level : 0,
               water_used  !== null ? water_used  : 0,
               flow_lpm    !== null ? flow_lpm    : 0,
               'esp32-offline',
-              mist_on, bath_on, clean_on, r.id);
+              mist_on, bath_on, clean_on, r.id,
+              mist_l, bath_l, clean_l, other_l);
         }
 
       } else {
@@ -946,7 +989,7 @@ module.exports = {
   getAggregatedReadings, rawReadingsIterator,
   insertWater, latestWater, weeklyWaterUsage, calculateWaterUsageForRows,
   usageByOperation, getWaterUsage, getTodayWaterUsage, latestTelemetry,
-  listSchedules, createSchedule, updateSchedule, toggleSchedule, deleteSchedule,
+  listSchedules, createSchedule, updateSchedule, toggleSchedule, deleteSchedule, scheduleCount,
   getSetting, setSetting, getTHIThresholds, setTHIThresholds,
   getOperationDurations, setOperationDurations,
   logActivity, recentActivity,

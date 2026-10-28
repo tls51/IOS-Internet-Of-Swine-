@@ -20,8 +20,8 @@ const DATA = (() => {
     const extremeMax = (thresholds && thresholds.extremeMax != null) ? thresholds.extremeMax : 83;
 
     if (thi < normalMax)   return { label: 'Normal',       cls: 'badge-blue',   color: '#3B82F6' };
-    if (thi <= stressMax)  return { label: 'Stressful',    cls: 'badge-warn',   color: '#F59E0B' };
-    if (thi <= extremeMax) return { label: 'Extreme Heat', cls: 'badge-orange', color: '#F97316' };
+    if (thi < stressMax)   return { label: 'Stressful',    cls: 'badge-warn',   color: '#F59E0B' };
+    if (thi < extremeMax)  return { label: 'Extreme Heat', cls: 'badge-orange', color: '#F97316' };
     return                        { label: 'Danger Zone',  cls: 'badge-danger', color: '#EF4444' };
   }
 
@@ -35,7 +35,7 @@ const DATA = (() => {
   /* ── Live state (same shape pages.js already expects) ─────── */
   const state = {
     temp: null, humidity: null, thi: null,
-    waterLevel: null, waterUsed: 0, flowRate: 0,
+    waterLevel: null, waterUsed: 0, waterUsedToday: 0, waterUsedSinceBoot: 0, flowRate: 0,
     mistActive: false, bathActive: false, cleanActive: false,
     pumpActive: false, relayState: false, manualPumpActive: false,
     pumpState: 'OFF', pumpReason: 'idle',
@@ -112,7 +112,9 @@ const DATA = (() => {
       state.humidity       = s.humidity;
       state.thi             = s.thi;
       state.waterLevel     = s.waterLevel;
-      state.waterUsed       = s.waterUsed || 0;
+      state.waterUsedToday = s.waterUsedToday != null ? s.waterUsedToday : (s.waterUsed || 0);
+      state.waterUsed       = s.waterUsedToday != null ? s.waterUsedToday : (s.waterUsed || 0);
+      state.waterUsedSinceBoot = s.waterUsedSinceBoot || 0;
       state.flowRate        = s.flowRate || 0;
       state.mistActive     = !!s.mistActive;
       state.bathActive      = !!s.bathActive;
@@ -261,21 +263,22 @@ const DATA = (() => {
 
   /* ── Poll /api/readings/history & /api/water/usage ────────── */
   async function refreshWaterUsage(range = state.waterRange || '7d') {
-    state.waterRange = (range === '30d') ? '30d' : '7d';
+    state.waterRange = (range === '24h' || range === '30d') ? range : '7d';
     let base = API;
     if (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.reportApiBase) {
       base = IOS_CONFIG.reportApiBase;
     }
 
+    const doFetch = (typeof authFetch === 'function') ? authFetch : fetch;
     let data = null;
     try {
-      const res = await fetch(`${base}/api/water/usage?range=${state.waterRange}`);
+      const res = await doFetch(`${base}/api/water/usage?range=${state.waterRange}`);
       if (res.ok) data = await res.json();
     } catch (_) {}
 
     if (!data && base !== API) {
       try {
-        const res2 = await fetch(`${API}/api/water/usage?range=${state.waterRange}`);
+        const res2 = await doFetch(`${API}/api/water/usage?range=${state.waterRange}`);
         if (res2.ok) data = await res2.json();
       } catch (_) {}
     }
@@ -302,19 +305,25 @@ const DATA = (() => {
 
   let _reportRequest = 0;
   async function refreshReports(range = state.reportRange) {
-    state.reportRange = ['24h', '7d', '30d', 'all'].includes(range) ? range : '24h';
+    const isDevice = (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.mode === 'device');
+    let targetRange = ['24h', '7d', '30d', 'all'].includes(range) ? range : '24h';
+    if (isDevice && (targetRange === '7d' || targetRange === '30d')) {
+      targetRange = '24h';
+    }
+    state.reportRange = targetRange;
     const selectedRange = state.reportRange;
     const requestId = ++_reportRequest;
     const base = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.reportApiBase || API : API;
+    const doFetch = (typeof authFetch === 'function') ? authFetch : fetch;
     try {
-      const res = await fetch(`${base}/api/readings/history?range=${selectedRange}`);
+      const res = await doFetch(`${base}/api/readings/history?range=${selectedRange}`);
       if (!res.ok) throw new Error(`Report history: HTTP ${res.status}`);
       const rows = await res.json();
       if (!Array.isArray(rows)) throw new Error('Report history is not an array');
       if (requestId !== _reportRequest) return;
       state.reportHistory = rows;
       state.reportError = '';
-      const summary = await fetch(`${base}/api/reports/summary`);
+      const summary = await doFetch(`${base}/api/reports/summary`);
       if (summary.ok) {
         const info = await summary.json();
         if (requestId === _reportRequest) state.reportSummary = info;
@@ -331,9 +340,13 @@ const DATA = (() => {
   let _historyTimer = null;
   let _diagTimer = null;
   let _sdTimer = null;
+  let _running = false;
 
   function start() {
+    if (_running) return;
+    _running = true;
     stop();
+    _running = true;
     refreshStatus();
     refreshHistory();
     refreshReports();
@@ -346,10 +359,11 @@ const DATA = (() => {
   }
 
   function stop() {
-    clearInterval(_statusTimer);
-    clearInterval(_historyTimer);
-    clearInterval(_diagTimer);
-    clearInterval(_sdTimer);
+    _running = false;
+    if (_statusTimer)  { clearInterval(_statusTimer);  _statusTimer = null; }
+    if (_historyTimer) { clearInterval(_historyTimer); _historyTimer = null; }
+    if (_diagTimer)    { clearInterval(_diagTimer);    _diagTimer = null; }
+    if (_sdTimer)      { clearInterval(_sdTimer);      _sdTimer = null; }
   }
 
   /* ── RTC Time Synchronization ────────────────────────────── */

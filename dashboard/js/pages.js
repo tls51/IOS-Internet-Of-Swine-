@@ -8,11 +8,15 @@ const PAGES = (() => {
   function renderTank(containerId, level) {
     const wrap = document.getElementById(containerId);
     if (!wrap) return;
-    const color = level > 60 ? '#22C55E' : level > 30 ? '#F59E0B' : '#EF4444';
+    const hasLevel = level != null && Number.isFinite(Number(level)) && Number(level) >= 0;
+    const numLevel = hasLevel ? Math.min(100, Math.max(0, Number(level))) : null;
+    const color = numLevel != null ? (numLevel > 60 ? '#22C55E' : numLevel > 30 ? '#F59E0B' : '#EF4444') : 'var(--text-muted, #8B949E)';
+    const heightStyle = numLevel != null ? `${numLevel}%` : '0%';
+    const labelText = numLevel != null ? `${Math.round(numLevel)}%` : '—';
     wrap.innerHTML = `
       <div class="tank-svg-wrap">
-        <div class="tank-fill" style="height:${level}%;background:${color}44;border-top:2px solid ${color}"></div>
-        <div class="tank-label-inside" style="color:${color}">${level}%</div>
+        <div class="tank-fill" style="height:${heightStyle};background:${color}44;border-top:2px solid ${color}"></div>
+        <div class="tank-label-inside" style="color:${color}">${labelText}</div>
       </div>
       <span class="tank-sublabel">Water Level</span>`;
   }
@@ -24,9 +28,9 @@ const PAGES = (() => {
     const { stressMax = 78, extremeMax = 83 } = state.thiThresholds || {};
 
     if (state.thi != null) {
-      if (state.thi > extremeMax) {
+      if (state.thi >= extremeMax) {
         msgs.push(`DANGER: THI exceeds ${extremeMax} — immediate cooling required!`);
-      } else if (state.thi > stressMax) {
+      } else if (state.thi >= stressMax) {
         msgs.push(`WARNING: Extreme heat stress detected (THI ${state.thi})`);
       }
     }
@@ -65,14 +69,14 @@ const PAGES = (() => {
       : '🌡 —°C · 💧 —%';
     document.getElementById('live-env').textContent = envTxt;
 
-    if (state.rtcOk === false) {
-      document.getElementById('live-time').textContent = 'RTC Error';
-    } else if (state.epoch != null && state.epochReceivedAt != null) {
-      const elapsedSec = Math.floor((Date.now() - state.epochReceivedAt) / 1000);
-      const currentDeviceDate = new Date((state.epoch + elapsedSec) * 1000);
-      document.getElementById('live-time').textContent = currentDeviceDate.toLocaleTimeString();
+    if (window.updateClockDisplays) {
+      window.updateClockDisplays();
+    } else if (state.rtcOk === false) {
+      const el = document.getElementById('live-time');
+      if (el) el.textContent = 'RTC Error';
     } else {
-      document.getElementById('live-time').textContent = new Date().toLocaleTimeString();
+      const el = document.getElementById('live-time');
+      if (el) el.textContent = new Date().toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }) + ' · ' + new Date().toLocaleTimeString();
     }
 
     /* connection indicator */
@@ -138,7 +142,9 @@ const PAGES = (() => {
                        : state.waterLevel > 60 ? 'Sufficient supply'
                        : state.waterLevel > 30 ? 'Refill soon'
                        : '⚠ Critical — refill now';
-    document.getElementById('dash-usage').innerHTML = `${(state.waterUsed || 0).toFixed(0)} <span class="muted small">L</span>`;
+    const todayUsage = state.waterUsedToday != null ? state.waterUsedToday : (state.waterUsed || 0);
+    const todayUsageNum = Number(todayUsage);
+    document.getElementById('dash-usage').innerHTML = `${Number.isFinite(todayUsageNum) ? todayUsageNum.toFixed(0) : '0'} <span class="muted small">L</span>`;
 
     /* alerts */
     updateAlerts(state);
@@ -237,50 +243,97 @@ const PAGES = (() => {
     const levelEl = document.getElementById('water-level-val');
     levelEl.textContent = state.waterLevel != null ? state.waterLevel + '%' : '—';
     levelEl.style.color = (state.waterLevel != null && state.waterLevel > 30) ? '#22C55E' : '#EF4444';
-    const usedNum = (typeof state.waterUsed === 'number') ? state.waterUsed : Number(state.waterUsed || 0);
+    const todayVal = state.waterUsedToday != null ? state.waterUsedToday : state.waterUsed;
+    const usedNum = (typeof todayVal === 'number') ? todayVal : Number(todayVal || 0);
     document.getElementById('water-used-val').textContent = (Number.isFinite(usedNum) ? usedNum.toFixed(2) : '0.00') + ' L';
     document.getElementById('water-flow-val').textContent = (state.flowRate != null ? state.flowRate : 0) + ' L/min';
 
     /* tank */
     renderTank('water-tank-visual', state.waterLevel);
     document.getElementById('water-tank-note').textContent =
-      state.waterLevel > 60 ? 'Level OK'
-    : state.waterLevel > 30 ? 'Refill recommended'
-    : '⚠️ Refill immediately';
+      state.waterLevel == null ? 'No sensor reading'
+      : state.waterLevel > 60 ? 'Level OK'
+      : state.waterLevel > 30 ? 'Refill recommended'
+      : '⚠️ Refill immediately';
 
-    /* breakdown bars: use real today's data */
+    /* breakdown bars: use real breakdown data based on selected range */
     const bd = document.getElementById('water-breakdown');
-    const today = (state.waterUsage && state.waterUsage.today)
-      || (state.waterUsage && state.waterUsage.days && state.waterUsage.days[state.waterUsage.days.length - 1])
-      || { mist: 0, bathe: 0, clean: 0, other: 0, total: usedNum || 0 };
+    const range = state.breakdownRange || 'today';
+    const breakdownTitle = document.getElementById('breakdown-title');
+    if (breakdownTitle) {
+      breakdownTitle.textContent = range === '7d' ? 'Consumption Breakdown (Past 7 Days)' : 'Consumption Breakdown (Today)';
+    }
 
-    const mistVal  = Number(today.mist)  || 0;
-    const batheVal = Number(today.bathe) || 0;
-    const cleanVal = Number(today.clean) || 0;
-    const otherVal = Number(today.other) || 0;
-    const sumToday = mistVal + batheVal + cleanVal + otherVal;
-    const totalToday = (today.total != null && today.total > 0) ? Number(today.total) : sumToday;
-    const denom = totalToday > 0 ? totalToday : 1;
+    let mistVal = 0, batheVal = 0, cleanVal = 0, otherVal = 0, totalVal = 0;
 
-    const parts = [
-      { label: 'Misting',  val: mistVal,  color: '#22C55E' },
-      { label: 'Bathing',  val: batheVal, color: '#3B82F6' },
-      { label: 'Cleaning', val: cleanVal, color: '#F59E0B' },
-      { label: 'Other',    val: otherVal, color: '#8B949E' },
-    ];
-    bd.innerHTML = parts.map(p => {
-      const pct = totalToday > 0 ? Math.round((p.val / denom) * 100) : 0;
-      return `
-        <div class="breakdown-item">
-          <div class="breakdown-row">
-            <span class="muted">${p.label}</span>
-            <span style="font-weight:600">${p.val.toFixed(2)} L (${pct}%)</span>
-          </div>
-          <div class="breakdown-bar-bg">
-            <div class="breakdown-bar-fill" style="width:${pct}%;background:${p.color}"></div>
-          </div>
+    if (range === '7d') {
+      const totals = state.waterUsage && state.waterUsage.totals;
+      if (totals) {
+        mistVal  = Number(totals.mist)  || 0;
+        batheVal = Number(totals.bathe) || 0;
+        cleanVal = Number(totals.clean) || 0;
+        otherVal = Number(totals.other) || 0;
+        totalVal = (totals.total != null && Number(totals.total) > 0)
+          ? Number(totals.total)
+          : (mistVal + batheVal + cleanVal + otherVal);
+      }
+    } else {
+      const now = new Date();
+      const localDateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const today = (state.waterUsage && state.waterUsage.todayBreakdown && typeof state.waterUsage.todayBreakdown === 'object')
+        ? state.waterUsage.todayBreakdown
+        : ((state.waterUsage && state.waterUsage.today && typeof state.waterUsage.today === 'object')
+            ? state.waterUsage.today
+            : ((state.waterUsage && Array.isArray(state.waterUsage.days))
+                ? state.waterUsage.days.find(d => d.date === localDateStr)
+                : null));
+
+      if (today) {
+        mistVal  = Number(today.mist)  || 0;
+        batheVal = Number(today.bathe) || 0;
+        cleanVal = Number(today.clean) || 0;
+        otherVal = Number(today.other) || 0;
+        totalVal = (today.total != null && Number(today.total) > 0)
+          ? Number(today.total)
+          : (mistVal + batheVal + cleanVal + otherVal);
+      } else {
+        mistVal  = 0;
+        batheVal = 0;
+        cleanVal = 0;
+        otherVal = 0;
+        totalVal = 0;
+      }
+    }
+
+    if (totalVal <= 0 && mistVal <= 0 && batheVal <= 0 && cleanVal <= 0 && otherVal <= 0) {
+      bd.innerHTML = `
+        <div class="empty-state text-center" style="padding: 24px 0; color: var(--text-muted, #8B949E);">
+          <div style="font-size: 24px; margin-bottom: 6px;">💧</div>
+          <div style="font-size: 13px;">No water consumption recorded for this period.</div>
         </div>`;
-    }).join('');
+    } else {
+      const denom = totalVal > 0 ? totalVal : 1;
+      const parts = [
+        { label: 'Misting',  val: mistVal,  color: '#22C55E' },
+        { label: 'Bathing',  val: batheVal, color: '#3B82F6' },
+        { label: 'Cleaning', val: cleanVal, color: '#F59E0B' },
+        { label: 'Other',    val: otherVal, color: '#8B949E' },
+      ];
+      bd.innerHTML = parts.map(p => {
+        const valNum = Number.isFinite(p.val) ? p.val : 0;
+        const pct = totalVal > 0 ? Math.round((valNum / denom) * 100) : 0;
+        return `
+          <div class="breakdown-item">
+            <div class="breakdown-row">
+              <span class="muted">${p.label}</span>
+              <span style="font-weight:600">${valNum.toFixed(2)} L (${pct}%)</span>
+            </div>
+            <div class="breakdown-bar-bg">
+              <div class="breakdown-bar-fill" style="width:${pct}%;background:${p.color}"></div>
+            </div>
+          </div>`;
+      }).join('');
+    }
 
     /* bar chart */
     const chartData = (state.waterUsage && Array.isArray(state.waterUsage.days))
@@ -940,8 +993,15 @@ const PAGES = (() => {
     const message = document.getElementById('report-status');
     if (message) {
       const summary = state.reportSummary;
+      const isDevice = (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.mode === 'device');
       document.querySelectorAll('#page-reports .range-tab').forEach(btn => {
-        btn.disabled = !!(summary && summary.supportedRanges && !summary.supportedRanges.includes(btn.dataset.range));
+        const r = btn.dataset.range;
+        if (isDevice && (r === '7d' || r === '30d')) {
+          btn.disabled = true;
+          btn.title = '7d/30d reports require Node backend connection';
+        } else {
+          btn.disabled = !!(summary && summary.supportedRanges && !summary.supportedRanges.includes(r));
+        }
       });
       const rows = state.reportHistory || [];
       if (state.reportError) {
@@ -960,8 +1020,9 @@ const PAGES = (() => {
 
     const TYPE_CLS = { Sensor: 'badge-blue', Mist: 'badge-warn', Bath: 'badge-green', Clean: 'badge-green', Alert: 'badge-danger', Info: 'badge-blue' };
     const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.reportApiBase || IOS_CONFIG.apiBase : '';
+    const doFetch = (typeof authFetch === 'function') ? authFetch : fetch;
 
-    fetch(`${API}/api/activity?limit=30&range=${state.reportRange || '24h'}`)
+    doFetch(`${API}/api/activity?limit=30&range=${state.reportRange || '24h'}`)
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(entries => {
         if (!entries.length) {

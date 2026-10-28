@@ -66,8 +66,6 @@ async function authFetch(url, options = {}) {
   // Automatically attach active session token if present
   const token = getAuthToken();
   if (token) {
-    opts.headers['X-Session-Token'] = token;
-    opts.headers['X-Auth-Token'] = token;
     opts.headers['Authorization'] = `Bearer ${token}`;
   }
 

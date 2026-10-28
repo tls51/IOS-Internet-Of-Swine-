@@ -25,9 +25,9 @@ These classification boundaries are separate from the firmware's automatic cooli
 - Show dashboard alerts when tank level is below 20%.
 3. Monitor water usage
 - Measure instantaneous flow in liters per minute using the YF-S201B.
-- Accumulate liters used from flow-sensor pulses. The current firmware counter is cumulative since boot.
-- Provide a weekly water chart in the dashboard.
-- Retain accurate daily totals and separate misting/bathing/cleaning consumption as implementation objectives; the current weekly aggregation and operation breakdown need further work.
+- Accumulate liters used from flow-sensor pulses. Firmware tracks both cumulative volume since boot and daily volume reset at local midnight.
+- Provide a weekly water chart in the dashboard with hover tooltips and daily calendar date axis labels.
+- Calculate accurate daily totals and per-operation breakdown (misting, bathing, cleaning, other) using reboot-safe and midnight-safe interval deltas.
 4. Provide a web-based admin dashboard
 - Prototype admin sign-in: admin / ios2024, with session preservation across page refreshes. ESP32 control authorization uses a separate device token.
 - Schedule management: create, list, enable/pause and delete misting, bathing and cleaning schedules with start time, duration and selected days. Backend routes also support partial edits.
@@ -165,7 +165,7 @@ Relays are active LOW:
 #define RELAY_ON LOW
 #define RELAY_OFF HIGH
 If your hardware needs active-HIGH behavior, adapt these definitions and the output initialization consistently. RELAY_ACTIVE_LOW is not the switch used by this source.
-The pump test and manual control buttons can act directly through an ESP32-hosted dashboard, subject to water protection and run limits. Node exposes a command queue for those buttons, but this firmware does not poll /api/relay/command; Node-hosted button responses do not prove relay execution.
+The pump test and manual control buttons act directly through the ESP32-hosted dashboard, and via command queue on Node. Node exposes `/api/relay/control` and `/api/relay/test`; the ESP32 polls `/api/relay/command` via `pollBackendRelayCommand` and posts status confirmations to `/api/relay/ack`.
 6. Schedule management and offline execution
 Schedules contain a type (mist, bath or clean), label, local start time (HH:MM), duration, selected days and enabled state. The dashboard accepts whole-number durations from 1–60 minutes. Backend/device validation supports 1–1440 minutes through their APIs.
 Both Node and firmware evaluate schedules in UTC+8; Node uses Asia/Manila. Midnight-crossing windows are supported. The RTC stores UTC internally and must have valid time for scheduled operation. An invalid detected RTC can recover from backend UTC time, or be set through the device's Set time control.
@@ -290,15 +290,16 @@ Endpoint	Purpose and implementation status
 POST /api/relay/test	{ duration_ms }; ESP32 applies a timed device override; Node queues a command
 POST /api/relay/control	{ active }; ESP32 applies a device override; Node queues a command
 POST /api/manual	ESP32 timed manual override, e.g. { active, duration_sec }
-GET /api/relay/command	Node command queue; current firmware does not poll it
+GET /api/relay/command	Node command queue; polled periodically by ESP32 firmware
+POST /api/relay/ack	ESP32 acknowledges executed or blocked relay commands
 
 
 ESP32 control writes require its configured device token. The current Node API has no authentication middleware.
 Current limitations
 - Cleaning hardware: cleaning schedules drive GPIO 15 (active-LOW relay).
-- Node relay controls: command polling is not implemented by this firmware. Test direct controls through the ESP32 host; a Node response is a queued request, not physical feedback.
+- Node relay controls: Node queues commands, which the ESP32 polls and acknowledges via `/api/relay/ack`.
 - Settings synchronization: only backend schedules are fetched into the device cache. Node settings and ESP32 NVS settings remain separate. The local automatic cooling engine uses thiThreshold; the temperature slider alone is not its activation condition.
-- Water accounting: the firmware volume resets at boot and has no daily reset. Node's weekly function sums cumulative readings, which can overcount consumption, while its operation breakdown fields remain zero. ESP32 weekly data is also a placeholder. Accurate daily/weekly and per-operation accounting needs interval-delta or session-based calculation.
+- Water accounting: water telemetry is decoupled from DHT validity so water data is logged and pushed even if the DHT22 fails. Volume is tracked using reset-safe interval deltas in Asia/Manila calendar days with per-operation attribution.
 - Overlapping schedules: the first active schedule wins; existing standalone schedules are evaluated first. Independent simultaneous mist/bath/clean operation requires additional arbitration.
 - Diagnostics: flow and relay health flags currently include assumed values; they are not proof of a physical relay/flow self-test. Interactive serial test commands from older documentation are absent.
 - Authentication: admin credentials are checked in frontend JavaScript, and Node API routes are unauthenticated. Keep the present deployment on a private LAN; public hosting needs server-side authentication and access controls.

@@ -866,3 +866,132 @@ Done:
   - SQLite table auto-migration executed cleanly.
   - Schedule CRUD unit test for `type: "mist"` (create, update, toggle active, list, delete) executed with 100% pass rate.
 
+
+
+---
+
+### Phase 1 Bug & Logic Fixes Summary (2026-10-28)
+
+1. **BUG-05 (Water Counter & Rollover Persistence)**:
+   - NVS namespace `"ios_water"` persists `todayWaterUsedL`, `totalWaterUsedL`, `mistWaterUsedL`, `bathWaterUsedL`, `cleanWaterUsedL`, `otherWaterUsedL`, and `lastWaterDay`.
+   - Restored on boot via `loadWaterCounters()`. Handles power drops across midnight by archiving previous day usage.
+   - Throttled persistence: immediately on relay-off (`pumpOff()`, `bathOff()`, `cleanOff()`), on midnight rollover, and every 5 minutes in `loop()` if water volume increased.
+
+2. **BUG-06 (30-Day Persisted Water History Ring in Device Mode)**:
+   - LittleFS ring buffer stored in `/water_daily.json` (up to 30 days).
+   - Functions `loadDailyWaterHistory()`, `saveDailyWaterHistory()`, `recordCompletedDayWater(...)`.
+   - `/api/water/weekly` and `/api/water/usage` now return real historical days instead of hardcoded 0.0 values, computing totals dynamically.
+
+3. **BUG-07 (Device-Mode Reports Graceful Fallback)**:
+   - In `main.cpp`, `/api/readings`, `/api/readings/history`, and `/api/reports/export` no longer reject `7d` and `30d` with HTTP 400; they return available 24h history with `X-Limited-History: 24h`.
+   - In `data.js`, default report range is set to `'24h'` in device mode.
+   - In `pages.js` and `app.js`, `7d` and `30d` tabs in `#page-reports` are disabled early in device mode.
+
+4. **BUG-01 (Backend Total Count)**:
+   - In `db.js` line 385, updated `total: count + offlineCount`.
+
+5. **BUG-04 (Session TTL Overflow Safety)**:
+   - Replaced flawed `now < createdAt` with overflow-safe unsigned subtraction `(uint32_t)(nowMs - adminSessions[i].createdAtMs) > (ADMIN_SESSION_TTL_SEC * 1000UL)`.
+   - Oldest session lookup in `createAdminSession()` safely selects maximum elapsed milliseconds.
+
+6. **LOGIC-01 (THI Boundary Consistency)**:
+   - Aligned classification and alert thresholds across `server.js`, `data.js`, `pages.js`, and `main.cpp`:
+     - Normal: `< normalMax`
+     - Stressful: `< stressMax`
+     - Extreme Heat: `< extremeMax` (triggers `WARNING: Extreme heat stress detected`)
+     - Danger Zone: `>= extremeMax` (triggers `DANGER: THI exceeds extreme limit`)
+
+7. **LOGIC-02 (Cloud vs. Device Session Auto-Resume)**:
+   - `app.js` auto-resumes on network error only when `IOS_CONFIG.mode === 'device'`.
+   - In cloud mode, network failures display an informative message and do not bypass the login screen.
+
+8. **SEC-01 (Sanitized Credentials & Startup Warning)**:
+   - Replaced credentials leakage with generic `"Invalid credentials"` error in both `server.js` and `main.cpp`.
+   - Added startup warning in `server.js` if `IOS_ADMIN_PASS` is not set.
+
+9. **SEC-05 & SEC-06 (Endpoint Authentication & Dashboard authFetch Migration)**:
+   - Added `requireAuth` (`isAuthorized`) to `/api/reports/export`, `/api/reports/summary`, `/api/water/usage`, `/api/water/weekly`, `/api/water/breakdown`.
+   - Migrated dashboard CSV export buttons and data fetchers to `authFetch` with session credentials.
+
+10. **PERF-04 (Non-blocking FreeRTOS syncBatch Task)**:
+    - Moved `syncBatch()` from the main Arduino loop to `syncBatchTask` pinned to Core 0 with recursive mutex protection (`FsLock`), keeping Core 1 completely responsive for sensors and pump timing.
+
+---
+
+## 13. Phase 2 Implementation Summary (Committed & Verified)
+
+1. **BUG-02 (Encapsulated Schedule Count)**:
+   - Added `scheduleCount()` in `db.js` and removed raw `db.db` access in `server.js` (`db.scheduleCount() >= 20`).
+
+2. **BUG-03 (404 on Missing Schedule Delete)**:
+   - `DELETE /api/schedules/:id` checks SQLite changes count and returns `HTTP 404` with `{ ok: false, error: 'Schedule not found' }` if 0 rows were deleted.
+
+3. **BUG-08 (Offset Truncation Guard & Idempotent Sync)**:
+   - Clamped `sdSyncedOffset` to `fileSize` upon file truncation instead of resetting to 0.
+   - Enhanced `db.js` `insertOfflineBatch` to check existing timestamps for clock-valid offline records, ensuring sync is strictly idempotent.
+
+4. **LOGIC-03 (Preserve Water Consumption on Reboot)**:
+   - In `calculateWaterUsageForRows()`, when `curr < prev` (reboot reset), `curr` is now added to `totalUsage`, capturing water consumed between the reboot and the first reading.
+
+5. **LOGIC-04 (Today Water Breakdown Aligned to Local Date)**:
+   - `db.js` `getWaterUsage()` now returns `todayBreakdown`.
+   - `pages.js` `updateWater()` checks `todayBreakdown`, `today`, and matches `localDateStr` (`YYYY-MM-DD`). If absent, it renders 0.0 values rather than showing yesterday's breakdown.
+
+6. **LOGIC-05 (Water Range Supports 24h, 7d, 30d)**:
+   - `data.js` `refreshWaterUsage()` allows `'24h'`, `'7d'`, and `'30d'`.
+   - ESP32 `/api/water/usage` accepts `?range=24h` and returns 1 day of water breakdown.
+
+7. **LOGIC-07 (Align Schedule Duration Cap to 1440 Min)**:
+   - Set `MAX_SCHEDULE_DURATION_MIN = 1440` in `schedule.js`.
+   - Updated modal duration validation and `<input id="modal-dur" ... max="1440" />` in `index.html`.
+
+8. **LOGIC-08 & LOGIC-09 (Pre-RTC Markers, Backfill & 24h Exclusion)**:
+   - In `main.cpp`, `ActivityRecord` tracks `uptimeMs`. When the RTC synchronizes (NTP, backend time, manual `/api/time`), `backfillActivityTimestamps()` backfills any pre-RTC zero timestamps.
+   - Filtered out `historyRing[idx].ts < 1704067200000ULL` or `historyRing[idx].ts < since` when `since > 0` in `/api/readings` and `/api/reports/export`.
+
+9. **LOGIC-11 (Safe Schedule Deletion Rollback)**:
+   - Replaced flawed index-based loop in `main.cpp` with a pre-deletion snapshot of `schedules` and `scheduleCount`, restoring cleanly from backup if LittleFS persistence fails.
+
+10. **SEC-02 (Password Hashing & Timing-Safe Verification)**:
+    - Node.js backend uses `crypto.scryptSync` with random salt and `crypto.timingSafeEqual` for admin login verification.
+    - ESP32 firmware uses salted SHA-256 (`mbedtls_sha256`) and `constantTimeCompare` for password and token comparisons.
+
+11. **PERF-02 (Activity Log RAM Buffering & Throttled Flush)**:
+    - In `main.cpp`, `appendActivity()` writes to in-RAM circular buffer and marks `activityDirty = true`.
+    - Log is flushed to LittleFS on a 60-second timer, upon accumulating 10 entries, or before shutdown, minimizing flash sector wear.
+
+12. **PERF-03 (Incremental Pending Record Tracking)**:
+    - `sdPendingCount` is updated incrementally on SD writes and batch completions without performing blocking full-file scans during regular operation.
+
+---
+
+## Phase 3 Summary: Edge Cases, Protocol Hardening & Efficiency
+
+1. **LOGIC-06 (Preemption & Mist State Reset)**:
+   - In `main.cpp`, when a scheduled bath or clean takes over (`shouldBath || shouldClean` or active `schedBath`/`schedClean`), the misting cycle tracking variables (`mistCycleRunning = false`, `mistInOnPhase = false`, `thiOffSince = 0`) are explicitly reset. This prevents phantom mist re-triggers upon conclusion of scheduled cycles.
+
+2. **LOGIC-10 (Clean Up & Anchor in `weeklyWaterUsage()`)**:
+   - In `db.js`, `weeklyWaterUsage()` anchors reference time directly to `Date.now()` during regular dashboard operation (zero database overhead), while preserving historical replay capability when `sinceMs` is provided. `querySince` uses `Math.min(sinceMs, startMidnightUtc)`.
+
+3. **SEC-03 (Constant-Time Token Comparison)**:
+   - In `server.js`, `isAuthorized()` compares `AUTH_TOKEN` using `crypto.timingSafeEqual` with matching length guards.
+   - In `main.cpp`, token comparisons use `constantTimeCompare()` to eliminate timing attack vectors.
+
+4. **SEC-04 (Single Standardized Authorization Header & Clean CORS)**:
+   - In `dashboard/js/config.js`, `authFetch()` now emits only the standard `Authorization: Bearer <token>` header, eliminating redundant `X-Session-Token` and `X-Auth-Token` headers.
+   - In `server.js` and `main.cpp`, readers continue supporting cookie fallback and standard Bearer parsing.
+   - In `main.cpp`, CORS `Access-Control-Allow-Headers` has been cleaned up to `"Content-Type, Authorization"`.
+
+5. **PERF-01 (Backend Status Caching with Event Invalidation)**:
+   - In `server.js`, `GET /api/status` caches the full aggregated system status with a 2-second TTL (`STATUS_CACHE_TTL_MS = 2000`).
+   - Mutations (schedule creation/update/deletion, threshold updates, duration changes, relay manual control) call `invalidateStatusCache()` for immediate consistency.
+
+6. **PERF-05 (Idempotent Dashboard Polling Start/Stop)**:
+   - In `dashboard/js/data.js`, `DATA.start()` includes a running guard (`let _running = false`). Calling `DATA.start()` when already active early-returns without duplicating polling intervals.
+   - `DATA.stop()` safely clears and nullifies timers and resets `_running = false`.
+
+7. **RELB-01 (Safe Integer Indexing for Schedules)**:
+   - In `main.cpp`, `idx` in schedule PATCH/PUT and DELETE routes was converted from `int8_t` to standard `int`, removing the unsafe narrowing cast and preventing overflow if `MAX_SCHEDULES` is increased.
+
+8. **RELB-02 (Fixed Buffer Storage for SD Status & Error Strings)**:
+   - In `main.cpp`, `sdLastError` was converted from a bare pointer `const char*` to a fixed-size `static char sdLastError[80]` buffer, manipulated safely via `strlcpy()` and cleared via `sdLastError[0] = '\0'`. This eliminates pointer aliasing and lifetime issues.

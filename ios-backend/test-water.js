@@ -19,7 +19,8 @@ const {
   calculateWaterUsageForRows,
   usageByOperation,
   insertOfflineBatch,
-  getWaterUsage
+  getWaterUsage,
+  getTodayWaterUsage
 } = require('./src/db');
 
 console.log('=== Running Water Usage Unit Tests ===\n');
@@ -124,27 +125,27 @@ try {
   console.log('PASS: 500 rows spanning Manila midnight yielded 6 L on Tue, 4 L on Wed (Total: 10 L)\n');
 
 
-  // Test 4: usageByOperation per-operation attribution & split
-  console.log('Test 4: usageByOperation per-operation attribution & equal split');
+  // Test 4: usageByOperation per-operation attribution with scheduled overriding auto-mist
+  console.log('Test 4: usageByOperation per-operation attribution (priority: clean > bath > mist > other)');
   const baseTs = manilaWedNoonUtcMs;
   const testRowsAttr = [
     { ts: baseTs,        used_l: 0 },
     { ts: baseTs + 1000, used_l: 2, mist_on: 1 },                      // delta 2 -> mist 2.0
     { ts: baseTs + 2000, used_l: 5, bath_on: 1 },                      // delta 3 -> bathe 3.0
     { ts: baseTs + 3000, used_l: 9, clean_on: 1 },                     // delta 4 -> clean 4.0
-    { ts: baseTs + 4000, used_l: 11, mist_on: 1, bath_on: 1 },         // delta 2 -> split: mist 1.0, bathe 1.0
-    { ts: baseTs + 5000, used_l: 13, pump_reason: 'manual' },          // delta 2 -> mist 2.0
+    { ts: baseTs + 4000, used_l: 11, mist_on: 1, bath_on: 1 },         // delta 2 -> scheduled bath overrides auto mist: bathe 2.0
+    { ts: baseTs + 5000, used_l: 13, pump_reason: 'manual' },          // delta 2 -> mist 2.0 (manual override)
     { ts: baseTs + 6000, used_l: 14 }                                  // delta 1 -> other 1.0
   ];
   const usageRes4 = usageByOperation(testRowsAttr);
   assert(usageRes4.length === 1, 'Expected 1 day result');
   const day4 = usageRes4[0];
-  assert.strictEqual(day4.mist, 5.0, `Expected mist 5.0, got ${day4.mist}`);
-  assert.strictEqual(day4.bathe, 4.0, `Expected bathe 4.0, got ${day4.bathe}`);
+  assert.strictEqual(day4.mist, 4.0, `Expected mist 4.0, got ${day4.mist}`);
+  assert.strictEqual(day4.bathe, 5.0, `Expected bathe 5.0, got ${day4.bathe}`);
   assert.strictEqual(day4.clean, 4.0, `Expected clean 4.0, got ${day4.clean}`);
   assert.strictEqual(day4.other, 1.0, `Expected other 1.0, got ${day4.other}`);
   assert.strictEqual(day4.total, 14.0, `Expected total 14.0, got ${day4.total}`);
-  console.log('PASS: usageByOperation correctly attributes mist, bathe, clean, split, manual, and other\n');
+  console.log('PASS: usageByOperation correctly attributes mist, bathe, clean, override priority, manual, and other\n');
 
 
   // Test 5: usageByOperation counter reset (reboot: curr < prev)
@@ -247,6 +248,147 @@ try {
   assert.strictEqual(redCount2, 2, 'readings must still have exactly 2 rows after replay');
   console.log('PASS: Replay does not duplicate records in offline_readings, water_readings, or readings\n');
 
+  // Test 8: Realistic combined dataset (reboot mid-day, midnight crossing, duplicate batch replay, DHT-failure records)
+  console.log('Test 8: Realistic dataset: DHT failure, mid-day reboot, midnight crossing & replay');
+  db.exec('DELETE FROM offline_readings');
+  db.exec('DELETE FROM water_readings');
+  db.exec('DELETE FROM readings');
+
+  // Manila Thursday Oct 22, 2026 10:00:00 UTC+8 = 2026-10-22 02:00:00 UTC
+  const manilaThu10amUtcMs = Date.UTC(2026, 9, 22, 2, 0, 0);
+
+  // 1. Normal telemetry with valid DHT on Thursday (0 to 5 L, misting)
+  const batch1 = [
+    {
+      id: 'real-01',
+      ts: manilaThu10amUtcMs,
+      temp: 29.0, humidity: 75.0, thi: 78.5,
+      water_level: 90, flow_lpm: 1.0, water_used: 0.0,
+      mist_on: 1, pump_on: 1, pump_reason: 'auto'
+    },
+    {
+      id: 'real-02',
+      ts: manilaThu10amUtcMs + 60000,
+      temp: 29.2, humidity: 74.0, thi: 78.7,
+      water_level: 88, flow_lpm: 2.5, water_used: 5.0,
+      mist_on: 1, pump_on: 1, pump_reason: 'auto'
+    }
+  ];
+  const res1 = insertOfflineBatch(batch1);
+  assert.strictEqual(res1.inserted, 2);
+
+  // 2. DHT failure records (temp/hum/thi are null, but water metrics continue!)
+  // Counter rises from 5.0 L to 8.0 L during bathing (+3.0 L)
+  const batchDhtFail = [
+    {
+      id: 'real-03-dhtfail',
+      ts: manilaThu10amUtcMs + 120000,
+      temp: null, humidity: null, thi: null,
+      water_level: 85, flow_lpm: 3.0, water_used: 8.0,
+      bath_on: 1, pump_on: 1, pump_reason: 'sched'
+    }
+  ];
+  const resDht = insertOfflineBatch(batchDhtFail);
+  assert.strictEqual(resDht.inserted, 1);
+  // Verify readings table DID NOT get the DHT-failure row, but water_readings DID
+  const rDhtCount = db.prepare('SELECT COUNT(*) AS c FROM readings WHERE src_id = ?').get('real-03-dhtfail').c;
+  const wDhtCount = db.prepare('SELECT COUNT(*) AS c FROM water_readings WHERE src_id = ?').get('real-03-dhtfail').c;
+  assert.strictEqual(rDhtCount, 0, 'readings must ignore rows with null DHT');
+  assert.strictEqual(wDhtCount, 1, 'water_readings must ingest rows even when DHT is null');
+
+  // 3. Mid-day reboot: counter resets to 0.0, rises to 4.0 L during cleaning (+4.0 L)
+  const batchReboot = [
+    {
+      id: 'real-04-reboot',
+      ts: manilaThu10amUtcMs + 180000,
+      temp: 28.5, humidity: 70.0, thi: 77.0,
+      water_level: 80, flow_lpm: 2.0, water_used: 4.0,
+      clean_on: 1, pump_on: 1, pump_reason: 'sched'
+    }
+  ];
+  const resReboot = insertOfflineBatch(batchReboot);
+  assert.strictEqual(resReboot.inserted, 1);
+
+  // 4. Midnight crossing: crosses into Friday Oct 23 (2026-10-22 16:00:00 UTC = 2026-10-23 00:00:00 UTC+8)
+  const manilaFriMidnightUtcMs = Date.UTC(2026, 9, 22, 16, 0, 0);
+  const batchFriday = [
+    {
+      id: 'real-05-fri',
+      ts: manilaFriMidnightUtcMs + 3600000, // 01:00 Manila Friday
+      temp: 26.0, humidity: 80.0, thi: 74.0,
+      water_level: 75, flow_lpm: 1.5, water_used: 7.0, // counter rose from 4.0 to 7.0 (+3.0 L mist)
+      mist_on: 1, pump_on: 1, pump_reason: 'auto'
+    }
+  ];
+  const resFri = insertOfflineBatch(batchFriday);
+  assert.strictEqual(resFri.inserted, 1);
+
+  // 5. Replay all batches (SD replay / network retransmission)
+  const allBatches = [...batch1, ...batchDhtFail, ...batchReboot, ...batchFriday];
+  const resReplay = insertOfflineBatch(allBatches);
+  assert.strictEqual(resReplay.inserted, 0, 'Replayed records must have 0 inserted');
+  assert.strictEqual(resReplay.skipped, allBatches.length, 'All replayed records must be skipped');
+
+  // Verify weekly usage calculation with realistic dataset
+  const weeklyUsage = weeklyWaterUsage(manilaThu10amUtcMs);
+  const thuEntry = weeklyUsage.find(d => d.date === '2026-10-22');
+  const friEntry = weeklyUsage.find(d => d.date === '2026-10-23');
+
+  assert(thuEntry, 'Expected Thursday (2026-10-22) entry');
+  assert(friEntry, 'Expected Friday (2026-10-23) entry');
+
+  // Thursday expected: 5.0 (mist) + 3.0 (bathe) + 4.0 (clean) = 12.0 L
+  assert.strictEqual(thuEntry.mist, 5.0, `Thu mist expected 5.0, got ${thuEntry.mist}`);
+  assert.strictEqual(thuEntry.bathe, 3.0, `Thu bathe expected 3.0, got ${thuEntry.bathe}`);
+  assert.strictEqual(thuEntry.clean, 4.0, `Thu clean expected 4.0, got ${thuEntry.clean}`);
+  assert.strictEqual(thuEntry.total, 12.0, `Thu total expected 12.0, got ${thuEntry.total}`);
+
+  // Friday expected: 3.0 (mist) = 3.0 L
+  assert.strictEqual(friEntry.mist, 3.0, `Fri mist expected 3.0, got ${friEntry.mist}`);
+  assert.strictEqual(friEntry.total, 3.0, `Fri total expected 3.0, got ${friEntry.total}`);
+
+  // Verify 7 days returned and missing days filled with 0
+  assert.strictEqual(weeklyUsage.length, 7, 'weeklyWaterUsage must return exactly 7 days');
+  weeklyUsage.forEach(d => {
+    assert(d.date && typeof d.date === 'string', 'Day must have date string');
+    assert(d.day && typeof d.day === 'string', 'Day must have day string');
+    assert(typeof d.total === 'number', 'Day must have total number');
+    if (d.date !== '2026-10-22' && d.date !== '2026-10-23') {
+      assert.strictEqual(d.total, 0, `Day ${d.date} should have 0 usage`);
+    }
+  });
+
+  // Verify getWaterUsage('7d') structure
+  const wuReport = getWaterUsage('7d');
+  assert(wuReport.days && wuReport.days.length === 7, 'getWaterUsage should return 7 days');
+  assert(wuReport.totals && typeof wuReport.totals.total === 'number', 'getWaterUsage should return totals');
+  assert(wuReport.today != null && typeof wuReport.today === 'number', 'getWaterUsage should return today numeric total');
+
+  // Test 9: Scheduled operations override auto-misting attribution in realistic scenario
+  console.log('Test 9: Scheduled operations override auto-misting attribution');
+  db.exec('DELETE FROM water_readings');
+  const t0 = manilaWedNoonUtcMs;
+  insertWater({ level_pct: 80, used_l: 10, ts: t0, mist_on: 0, bath_on: 0, clean_on: 0 });
+  // Mist active alone: 10 -> 12 (+2L mist)
+  insertWater({ level_pct: 80, used_l: 12, ts: t0 + 1000, mist_on: 1, bath_on: 0, clean_on: 0 });
+  // Both mist and bath active: 12 -> 15 (+3L, scheduled bath overrides mist!)
+  insertWater({ level_pct: 80, used_l: 15, ts: t0 + 2000, mist_on: 1, bath_on: 1, clean_on: 0 });
+  // Both clean and mist active: 15 -> 20 (+5L, scheduled clean overrides mist!)
+  insertWater({ level_pct: 80, used_l: 20, ts: t0 + 3000, mist_on: 1, bath_on: 0, clean_on: 1 });
+  // Clean, bath, and mist all active: 20 -> 24 (+4L, clean has highest priority!)
+  insertWater({ level_pct: 80, used_l: 24, ts: t0 + 4000, mist_on: 1, bath_on: 1, clean_on: 1 });
+
+  const rowsOverride = db.prepare('SELECT * FROM water_readings ORDER BY ts ASC').all();
+  const overrideDays = usageByOperation(rowsOverride);
+  assert(overrideDays.length === 1, 'Expected 1 day for override test');
+  const dOverride = overrideDays[0];
+  assert.strictEqual(dOverride.mist, 2.0, `Expected mist 2.0, got ${dOverride.mist}`);
+  assert.strictEqual(dOverride.bathe, 3.0, `Expected bathe 3.0, got ${dOverride.bathe}`);
+  assert.strictEqual(dOverride.clean, 9.0, `Expected clean 9.0 (5+4), got ${dOverride.clean}`);
+  assert.strictEqual(dOverride.total, 14.0, `Expected total 14.0, got ${dOverride.total}`);
+  console.log('PASS: Priority override (clean > bath > mist) verified!\n');
+
+  console.log('PASS: Realistic dataset verified (DHT fail, reboot, midnight crossing, replay)\n');
   console.log('========================================');
   console.log('ALL WATER USAGE UNIT TESTS PASSED!');
   console.log('========================================');

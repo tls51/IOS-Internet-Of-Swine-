@@ -205,7 +205,14 @@ async function runTests() {
     const listAfterDel = await (await fetch(`http://127.0.0.1:${TEST_PORT}/api/schedules?type=bath`)).json();
     assert(!listAfterDel.some(s => s.id === bathId), 'Deleted bath schedule still exists');
 
-    console.log('PASS: Bath schedule CRUD completed successfully');
+    // Deleting again should return 404 (BUG-03)
+    const delAgain = await fetch(`http://127.0.0.1:${TEST_PORT}/api/schedules/${bathId}`, {
+      method: 'DELETE',
+      headers: authHeaders
+    });
+    assert.strictEqual(delAgain.status, 404, 'Deleting non-existent schedule must return 404');
+
+    console.log('PASS: Bath schedule CRUD completed successfully (including 404 on non-existent delete)');
   }
 
   // Test 4: clean CRUD operations

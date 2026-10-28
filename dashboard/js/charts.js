@@ -182,7 +182,17 @@ const CHARTS = (() => {
   /* ── Bar chart (Stacked) ──────────────────────────────────── */
   function drawBarChart(containerId, data, series) {
     const container = document.getElementById(containerId);
-    if (!container || !data || !data.length) return;
+    if (!container) return;
+
+    if (!Array.isArray(data) || data.length === 0) {
+      container.innerHTML = '';
+      const empty = document.createElement('p');
+      empty.className = 'muted chart-empty-state';
+      empty.textContent = 'No water usage recorded';
+      empty.style.cssText = 'text-align:center;padding:48px 16px;color:var(--text-muted,#8b949e);font-size:14px;';
+      container.appendChild(empty);
+      return;
+    }
 
     const W = container.clientWidth || 600;
     const H = container.clientHeight || 200;
@@ -202,7 +212,7 @@ const CHARTS = (() => {
       const y = scaleY(v, 0, maxV, H, padT, padB);
       svg.appendChild(el('line', { x1: padL, y1: y, x2: W - padR, y2: y, class: 'grid-line' }));
       const lbl = el('text', { x: padL - 4, y: y + 4, class: 'axis-label', 'text-anchor': 'end' });
-      lbl.textContent = (v % 1 === 0) ? v : v.toFixed(1);
+      lbl.textContent = (v % 1 === 0) ? `${v} L` : `${v.toFixed(1)} L`;
       svg.appendChild(lbl);
     }
 
@@ -216,8 +226,14 @@ const CHARTS = (() => {
       const bx = cx - barW / 2;
       let currentY = H - padB;
 
+      const seriesSum = series.reduce((sum, s) => sum + (Number(d[s.key]) || 0), 0);
+      const totalNum = Number(d.total) || 0;
+
       series.forEach((s) => {
-        const val = Number(d[s.key]) || 0;
+        let val = Number(d[s.key]) || 0;
+        if (s.key === 'other' && val <= 0 && seriesSum <= 0 && totalNum > 0) {
+          val = totalNum;
+        }
         if (val <= 0) return;
         const bh = (val / maxV) * (H - padT - padB);
         const by = currentY - bh;
@@ -258,18 +274,25 @@ const CHARTS = (() => {
 
       const d = data[idx];
       let header = d.date || d.day || '';
-      if (d.date && d.day) header = `${d.date} (${d.day})`;
+      if (d.date && d.day && d.date !== '—') header = `${d.date} (${d.day})`;
       let html = `<div class="tt-row" style="font-weight:600;color:var(--text);margin-bottom:4px">${header}</div>`;
       let totalL = 0;
+      const seriesSum = series.reduce((sum, s) => sum + (Number(d[s.key]) || 0), 0);
+      const totalNum = Number(d.total) || 0;
+
       series.forEach(s => {
-        const val = Number(d[s.key]) || 0;
+        let val = Number(d[s.key]) || 0;
+        if (s.key === 'other' && val <= 0 && seriesSum <= 0 && totalNum > 0) {
+          val = totalNum;
+        }
         totalL += val;
         html += `<div class="tt-row"><span><span class="tt-dot" style="background:${s.color}"></span>${s.label}</span><span style="color:${s.color};font-weight:600">${val.toFixed(2)} L</span></div>`;
       });
-      html += `<div class="tt-row" style="border-top:1px solid rgba(255,255,255,.1);margin-top:4px;padding-top:4px;font-weight:600"><span>Total</span><span>${(d.total != null ? Number(d.total) : totalL).toFixed(2)} L</span></div>`;
+      const displayedTotal = (d.total != null && Number.isFinite(Number(d.total))) ? Number(d.total) : totalL;
+      html += `<div class="tt-row" style="border-top:1px solid rgba(255,255,255,.1);margin-top:4px;padding-top:4px;font-weight:600"><span>Total</span><span>${displayedTotal.toFixed(2)} L</span></div>`;
       tt.innerHTML = html;
       tt.classList.add('visible');
-      const tl = Math.min(Math.max(mx + 12, padL), W - 150);
+      const tl = Math.min(Math.max(mx + 12, padL), W - 160);
       tt.style.left = tl + 'px';
       tt.style.top  = '10px';
     });

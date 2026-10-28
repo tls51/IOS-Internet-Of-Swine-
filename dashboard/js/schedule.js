@@ -9,6 +9,7 @@ const SCHEDULE = (() => {
 
   const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
   const DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const MAX_SCHEDULE_DURATION_MIN = 1440;
 
   let _modalType = 'bath';
   let _selectedDays = ['Mon','Wed','Fri'];
@@ -240,8 +241,8 @@ const SCHEDULE = (() => {
     showError('');
     const time  = document.getElementById('modal-time').value;
     const dur   = Number(document.getElementById('modal-dur').value);
-    if (!Number.isInteger(dur) || dur < 1 || dur > 60) {
-      showError('Duration must be a whole number from 1 to 60 minutes.');
+    if (!Number.isInteger(dur) || dur < 1 || dur > MAX_SCHEDULE_DURATION_MIN) {
+      showError(`Duration must be a whole number from 1 to ${MAX_SCHEDULE_DURATION_MIN} minutes.`);
       return;
     }
 

@@ -32,11 +32,41 @@ const crypto = require('crypto');
 
 const ADMIN_USER = process.env.IOS_ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.IOS_ADMIN_PASS || 'ios2024';
+const ADMIN_SALT = crypto.randomBytes(16);
+const ADMIN_PASSWORD_HASH = crypto.scryptSync(ADMIN_PASSWORD, ADMIN_SALT, 32);
+
+function verifyAdminCredentials(user, pass) {
+  const userBuf = Buffer.from(String(user || ''));
+  const adminUserBuf = Buffer.from(String(ADMIN_USER));
+  const userMatch = userBuf.length === adminUserBuf.length && crypto.timingSafeEqual(userBuf, adminUserBuf);
+
+  let passMatch = false;
+  try {
+    const passHash = crypto.scryptSync(String(pass || ''), ADMIN_SALT, 32);
+    passMatch = crypto.timingSafeEqual(ADMIN_PASSWORD_HASH, passHash);
+  } catch (_) {
+    passMatch = false;
+  }
+
+  return userMatch && passMatch;
+}
 const AUTH_TOKEN = process.env.IOS_AUTH_TOKEN || 'ios-control-secret-token';
 const SESSION_TTL_MS = 24 * 3600 * 1000; // 24 hours
 
 let relayState = false;
 let manualPumpActive = false;
+
+/* Short-TTL status cache (PERF-01) */
+let statusCache = {
+  ts: 0,
+  data: null
+};
+const STATUS_CACHE_TTL_MS = 2000;
+
+function invalidateStatusCache() {
+  statusCache.ts = 0;
+  statusCache.data = null;
+}
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
@@ -92,7 +122,13 @@ function isAuthorized(req) {
   const token = getSessionTokenFromReq(req);
   if (!token) return false;
   if (isValidSession(token)) return true;
-  if (AUTH_TOKEN && token === AUTH_TOKEN) return true;
+  if (AUTH_TOKEN) {
+    const tokenBuf = Buffer.from(String(token));
+    const authBuf = Buffer.from(String(AUTH_TOKEN));
+    if (tokenBuf.length === authBuf.length && crypto.timingSafeEqual(tokenBuf, authBuf)) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -113,7 +149,7 @@ app.post('/api/login', (req, res) => {
   const u = (username !== undefined ? username : user || '').trim();
   const p = (password !== undefined ? password : pass || '');
 
-  if (u === ADMIN_USER && p === ADMIN_PASSWORD) {
+  if (verifyAdminCredentials(u, p)) {
     const { token, expiresIn } = createSession(u);
     res.setHeader('Set-Cookie', `ios_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${expiresIn}`);
     return res.json({ ok: true, token, expiresIn });
@@ -121,7 +157,7 @@ app.post('/api/login', (req, res) => {
 
   return res.status(401).json({
     ok: false,
-    error: 'Invalid credentials. Try admin / ios2024'
+    error: 'Invalid credentials'
   });
 });
 
@@ -144,7 +180,7 @@ app.post('/api/time', requireAuth, (req, res) => {
   return res.json({ ok: true, epoch, rtcOk: true });
 });
 
-app.get('/api/reports/summary', (req, res) => res.json({ ...db.reportSummary(), source: 'sqlite', supportedRanges: Object.keys(REPORT_RANGES) }));
+app.get('/api/reports/summary', requireAuth, (req, res) => res.json({ ...db.reportSummary(), source: 'sqlite', supportedRanges: Object.keys(REPORT_RANGES) }));
 
 
 /* ============================================================
@@ -188,7 +224,7 @@ function thiLevel(thi, thresholds = db.getTHIThresholds()) {
     };
   }
 
-  if (thi <= stressMax) {
+  if (thi < stressMax) {
     return {
       label: 'Stressful',
       cls: 'badge-warn',
@@ -196,7 +232,7 @@ function thiLevel(thi, thresholds = db.getTHIThresholds()) {
     };
   }
 
-  if (thi <= extremeMax) {
+  if (thi < extremeMax) {
     return {
       label: 'Extreme Heat',
       cls: 'badge-orange',
@@ -417,14 +453,14 @@ app.post('/api/readings', (req, res) => {
 
 
   // THI alerts
-  if (thi > thiThresholds.extremeMax) {
+  if (thi >= thiThresholds.extremeMax) {
 
     db.logActivity(
       'Alert',
       `DANGER: THI ${thi} — immediate cooling required`
     );
 
-  } else if (thi > thiThresholds.stressMax) {
+  } else if (thi >= thiThresholds.stressMax) {
 
     db.logActivity(
       'Alert',
@@ -455,7 +491,11 @@ app.post('/api/water', (req, res) => {
     mist_on,
     bath_on,
     clean_on,
-    src_id
+    src_id,
+    mist_l,
+    bath_l,
+    clean_l,
+    other_l
   } = req.body;
 
   const prev = db.latestWater();
@@ -520,7 +560,11 @@ app.post('/api/water', (req, res) => {
     mist_on: mist_on != null ? (mist_on ? 1 : 0) : null,
     bath_on: bath_on != null ? (bath_on ? 1 : 0) : null,
     clean_on: clean_on != null ? (clean_on ? 1 : 0) : null,
-    src_id: src_id || null
+    src_id: src_id || null,
+    mist_l: typeof mist_l === 'number' ? mist_l : null,
+    bath_l: typeof bath_l === 'number' ? bath_l : null,
+    clean_l: typeof clean_l === 'number' ? clean_l : null,
+    other_l: typeof other_l === 'number' ? other_l : null
   });
 
 
@@ -556,6 +600,10 @@ app.post('/api/water', (req, res) => {
    ============================================================ */
 
 app.get('/api/status', (req, res) => {
+  const now = Date.now();
+  if (statusCache.data && (now - statusCache.ts < STATUS_CACHE_TTL_MS)) {
+    return res.json(statusCache.data);
+  }
 
   const reading =
     db.latestReading();
@@ -611,9 +659,6 @@ app.get('/api/status', (req, res) => {
      ---------------------------------------------------------- */
 
   const malfunctions = [];
-
-  const now =
-    Date.now();
 
 
   if (
@@ -750,15 +795,17 @@ app.get('/api/status', (req, res) => {
     cleanActive ||
     (isTelemFresh && telem.pump_on != null ? !!telem.pump_on : false);
 
-  const waterUsed = db.getTodayWaterUsage ? db.getTodayWaterUsage() : 0;
+  const waterUsedToday = db.getTodayWaterUsage ? db.getTodayWaterUsage() : 0;
+  const waterUsed = waterUsedToday;
   const waterUsedSinceBoot = water ? (water.used_l || 0) : 0;
+  const waterUsage = db.getWaterUsage ? db.getWaterUsage('7d') : null;
 
 
   /* ----------------------------------------------------------
      RETURN STATUS
      ---------------------------------------------------------- */
 
-  res.json({
+  const statusPayload = {
 
     temp,
 
@@ -803,9 +850,13 @@ app.get('/api/status', (req, res) => {
         ? water.level_pct
         : null,
 
+    waterUsedToday,
+
     waterUsed,
 
     waterUsedSinceBoot,
+
+    waterUsage,
 
     flowRate:
       water
@@ -861,7 +912,11 @@ app.get('/api/status', (req, res) => {
       water
         ? water.ts
         : null
-  });
+  };
+
+  statusCache.ts = Date.now();
+  statusCache.data = statusPayload;
+  res.json(statusPayload);
 });
 
 
@@ -895,16 +950,50 @@ app.get('/api/readings/history', (req, res) => {
    WATER USAGE & WEEKLY SUMMARY
    ============================================================ */
 
-app.get('/api/water/usage', (req, res) => {
+app.get('/api/water/usage', requireAuth, (req, res) => {
   const range = req.query.range || '7d';
   res.json(db.getWaterUsage(range));
 });
 
-app.get('/api/water/weekly', (req, res) => {
+app.get('/api/water/weekly', requireAuth, (req, res) => {
 
   res.json(
     db.weeklyWaterUsage()
   );
+});
+
+app.get('/api/water/breakdown', requireAuth, (req, res) => {
+  const range = req.query.range || 'today';
+  const validRanges = ['today', '7d', '30d'];
+  if (!validRanges.includes(range)) {
+    return res.status(400).json({ ok: false, error: `range must be one of: ${validRanges.join(', ')}` });
+  }
+  const dbRange = range === 'today' ? '24h' : range;
+  const usage = db.getWaterUsage(dbRange);
+  const totals = usage.totals || { mist: 0, bathe: 0, clean: 0, other: 0, total: 0 };
+  if (range === 'today') {
+    const todayEntry = usage.days && usage.days.length > 0
+      ? usage.days[usage.days.length - 1]
+      : { mist: 0, bathe: 0, clean: 0, other: 0, total: 0 };
+    return res.json({
+      ok: true,
+      range,
+      mist: todayEntry.mist,
+      bathe: todayEntry.bathe,
+      clean: todayEntry.clean,
+      other: todayEntry.other,
+      total: todayEntry.total
+    });
+  }
+  res.json({
+    ok: true,
+    range,
+    mist: totals.mist,
+    bathe: totals.bathe,
+    clean: totals.clean,
+    other: totals.other,
+    total: totals.total
+  });
 });
 
 
@@ -986,7 +1075,7 @@ app.post('/api/schedules', requireAuth, (req, res) => {
     });
   }
 
-  if (db.db.prepare('SELECT COUNT(*) AS n FROM schedules').get().n >= 20) {
+  if (db.scheduleCount() >= 20) {
     return res.status(409).json({ error: 'Maximum of 20 backend schedules reached. Delete an unused schedule first.' });
   }
 
@@ -1012,6 +1101,7 @@ app.post('/api/schedules', requireAuth, (req, res) => {
     `New ${type} schedule created: "${row.label}" at ${row.time} for ${row.duration} min on ${JSON.parse(row.days).join(', ')}`
   );
 
+  invalidateStatusCache();
 
   res.status(201).json({
 
@@ -1056,6 +1146,7 @@ const handleUpdateSchedule = (req, res) => {
     `Schedule "${row.label}" updated: ${row.time}, ${row.duration} min, ${JSON.parse(row.days).join(', ')}, ${row.active ? 'enabled' : 'disabled'}`
   );
 
+  invalidateStatusCache();
   res.json({
     ...row,
     days: JSON.parse(row.days),
@@ -1072,11 +1163,11 @@ app.put('/api/schedules/:id', requireAuth, handleUpdateSchedule);
 */
 
 app.delete('/api/schedules/:id', requireAuth, (req, res) => {
-
-  db.deleteSchedule(
-    req.params.id
-  );
-
+  const result = db.deleteSchedule(req.params.id);
+  if (!result || result.changes === 0) {
+    return res.status(404).json({ ok: false, error: 'Schedule not found' });
+  }
+  invalidateStatusCache();
   res.status(204).end();
 });
 
@@ -1168,6 +1259,7 @@ app.post('/api/settings/threshold', requireAuth, (req, res) => {
     `Mist cooling threshold updated to ${value}°C`
   );
 
+  invalidateStatusCache();
 
   res.json({
     value
@@ -1215,6 +1307,7 @@ app.post('/api/settings/durations', requireAuth, (req, res) => {
     `Operation durations updated: Misting ${updated.mistOnSec} s ON / ${updated.mistPauseSec} s pause`
   );
 
+  invalidateStatusCache();
 
   res.json(updated);
 });
@@ -1266,6 +1359,7 @@ app.post('/api/settings/thi', requireAuth, (req, res) => {
     `THI thresholds updated: Normal<${updated.normalMax}, Stress<=${updated.stressMax}, Extreme<=${updated.extremeMax}`
   );
 
+  invalidateStatusCache();
 
   res.json(updated);
 });
@@ -1275,7 +1369,7 @@ app.post('/api/settings/thi', requireAuth, (req, res) => {
    SYSTEM REPORT CSV
    ============================================================ */
 
-app.get('/api/reports/export', (req, res) => {
+app.get('/api/reports/export', requireAuth, (req, res) => {
 
   const type =
     req.query.type;
@@ -1451,6 +1545,7 @@ app.post('/api/relay/control', requireAuth, (req, res) => {
     `Water pump manual override command queued: ${active ? 'ON' : 'OFF'}`
   );
 
+  invalidateStatusCache();
 
   res.json({
 
@@ -1831,6 +1926,9 @@ app.use((err, req, res, next) => {
    ============================================================ */
 
 app.listen(PORT, () => {
+  if (!process.env.IOS_ADMIN_PASS) {
+    console.warn('[SECURITY WARNING] IOS_ADMIN_PASS environment variable is not set! Using fallback credentials. Set IOS_ADMIN_PASS in production.');
+  }
 
   console.log(
     `IoS backend listening on http://0.0.0.0:${PORT}`

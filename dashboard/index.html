@@ -64,6 +64,10 @@
       </nav>
 
       <div class="sidebar-footer">
+        <div class="sidebar-clock" id="sidebar-clock">
+          <span class="sidebar-clock-date" id="sidebar-clock-date">—</span>
+          <span class="sidebar-clock-time" id="sidebar-clock-time">—</span>
+        </div>
         <div class="conn-dot-wrap">
           <span class="conn-dot" id="conn-dot"></span>
           <span class="conn-label" id="conn-label">Connecting…</span>
@@ -87,10 +91,10 @@
         </div>
         <div class="topbar-right">
           <span id="thi-chip" class="badge">THI — · —</span>
-          <span id="live-env" class="live-env">🌡 —°C ·  —%</span>
-          <span id="live-time" class="live-time"></span>
-          <button id="btn-sync-time-top" class="btn btn-sm btn-outline" data-mode="device" title="Sync RTC with phone time"> Set time</button>
-          <button id="btn-token-top" class="btn btn-sm btn-outline" title="Set device access token"> Token</button>
+          <span id="live-env" class="live-env">🌡 —°C · 💧 —%</span>
+          <span id="live-time" class="live-time" title="Current System Time & Date"></span>
+          <button id="btn-sync-time-top" class="btn btn-sm btn-outline" data-mode="device" title="Sync RTC with phone time">🕒 Set time</button>
+          <button id="btn-token-top" class="btn btn-sm btn-outline" title="Set device access token">🔑 Token</button>
         </div>
       </header>
 
@@ -100,6 +104,16 @@
         <!-- DASHBOARD -->
         <section id="page-dashboard" class="page active">
           <div id="alert-banner" class="alert-banner hidden"></div>
+          <div class="dash-clock-banner mb-20">
+            <div class="dash-clock-content">
+              <span class="dash-clock-icon">🕒</span>
+              <div>
+                <div class="dash-clock-label">Current System Time &amp; Date</div>
+                <div class="dash-clock-value" id="dash-live-datetime">—</div>
+              </div>
+            </div>
+            <div class="dash-clock-badge badge badge-muted" id="dash-clock-source">Hardware RTC</div>
+          </div>
           <div class="grid-3 mb-20">
             <div class="card stat-card">
               <div class="stat-top">
@@ -289,7 +303,13 @@
               </div>
             </div>
             <div class="card">
-              <div class="field-label mb-12">Consumption Breakdown (Today)</div>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <div class="field-label" id="breakdown-title">Consumption Breakdown</div>
+                <div class="range-tabs" id="breakdown-range-tabs">
+                  <button class="range-tab active" data-range="today">Today</button>
+                  <button class="range-tab" data-range="7d">7 Days</button>
+                </div>
+              </div>
               <div class="breakdown-list" id="water-breakdown"></div>
             </div>
           </div>
@@ -361,7 +381,7 @@
                 <div class="pump-indicator-icon"></div>
                 <div>
                   <div class="pump-title">RTC Status: <span id="rtc-status-text" class="color-green">OK</span></div>
-                  <div class="pump-meta muted small" id="rtc-time-meta">Hardware clock in UTC · Converted to local time for display</div>
+                  <div class="pump-meta muted small" id="rtc-time-meta">Hardware clock: <span id="rtc-live-datetime" style="color:var(--text); font-weight:500;">—</span> (Local Time)</div>
                 </div>
               </div>
               <div>
@@ -663,7 +683,7 @@
       </div>
       <div class="field-group">
         <label class="field-label">Duration (minutes)</label>
-        <input id="modal-dur" type="number" class="inp" value="15" min="1" max="60" />
+        <input id="modal-dur" type="number" class="inp" value="15" min="1" max="1440" />
       </div>
       <div class="field-group">
         <label class="field-label">Days</label>
