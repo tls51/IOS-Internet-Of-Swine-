@@ -1,0 +1,31 @@
+# fly.toml app configuration file for Internet of Swine (IoS)
+# Documentation: https://fly.io/docs/reference/configuration/
+
+# Change this to your exact fly.io app name if it differs:
+app = "internet-of-swine"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+  IOS_DB_PATH = "/data/ios.db"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[mounts]]
+  source = "ios_data"
+  destination = "/data"
+  initial_size = "1gb"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

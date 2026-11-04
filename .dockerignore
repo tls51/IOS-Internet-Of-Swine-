@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+ios-backend/node_modules
+arduino
+*.log
+.pio
+.gemini
+ios-backend/*.db
+ios-backend/*.db-wal
+ios-backend/*.db-shm
+ios-backend/*.bak

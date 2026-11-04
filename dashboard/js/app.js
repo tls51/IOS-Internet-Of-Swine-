@@ -211,6 +211,7 @@
     auto:      'Automatic Systems',
     reports:   'Reports',
     users:     'User Accounts',
+    settings:  'Device Settings',
   };
 
   function showPage(key) {
@@ -245,6 +246,12 @@
     if (key === 'water') DATA.refreshWaterUsage();
     if (key === 'auto') loadDevicesList();
     if (key === 'users') loadUsersList();
+    if (key === 'settings') {
+      loadWifiStatus();
+      loadDeviceConfig();
+      loadCloudStatus();
+      loadPinStatus();
+    }
   }
 
   function initNav() {
@@ -558,6 +565,14 @@
     }
 
     async function tryRegister() {
+      const isDeviceMode = (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.mode === 'device');
+      if (isDeviceMode) {
+        if (regErrEl) {
+          regErrEl.textContent = 'Account creation requires the online cloud backend.';
+          regErrEl.classList.remove('hidden');
+        }
+        return;
+      }
       const u = (document.getElementById('reg-user').value || '').trim();
       const d = (document.getElementById('reg-name').value || '').trim();
       const p = document.getElementById('reg-pass').value || '';
@@ -962,7 +977,12 @@
     startClock();
     initNav();
     initDeviceControls();
+    initPinControls();
+    initMultiPenControls();
+    initAccountingSyncControls();
+    initCloudBindingControls();
     initUserManagementControls();
+    initWifiControls();
     SCHEDULE.init();
     initThresholdSlider();
     initTHIThresholdControls();
@@ -1101,6 +1121,591 @@
     tokenInp.value = token;
     if (copyBtn) copyBtn.textContent = '📋 Copy';
     modal.classList.remove('hidden');
+  }
+
+  
+  
+  /* ── Multi-Pen Card View System (Phase 13) ─────────────────── */
+  let selectedPenId = null;
+
+  async function loadPensOverview() {
+    const grid = document.getElementById('pens-grid');
+    if (!grid) return;
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+
+    try {
+      const res = await authFetch(API + '/api/devices');
+      if (!res.ok) return;
+      const data = await res.json();
+      const devices = data.devices || [];
+
+      if (devices.length === 0) {
+        grid.innerHTML = `
+          <div style="grid-column: 1 / -1; background:var(--bg, #0d1117); border:1px dashed var(--border, #30363d); border-radius:8px; padding:30px; text-align:center;">
+            <span style="font-size:32px; display:block; margin-bottom:10px;">🐖</span>
+            <strong style="font-size:15px; display:block; margin-bottom:6px;">No Swine Pens Connected Yet</strong>
+            <p class="muted small" style="max-width:440px; margin:0 auto 16px auto;">
+              Link your first ESP32 sensor or water controller to this account to begin live swine welfare monitoring.
+            </p>
+            <button class="btn btn-primary btn-sm btn-trigger-add-pen">+ Connect First Pen</button>
+          </div>`;
+
+        const btnTrigger = grid.querySelector('.btn-trigger-add-pen');
+        if (btnTrigger) {
+          btnTrigger.addEventListener('click', () => {
+            const modal = document.getElementById('add-pen-modal');
+            if (modal) modal.classList.remove('hidden');
+          });
+        }
+        return;
+      }
+
+      let html = '';
+      devices.forEach(dev => {
+        const penName = dev.pen_name ? escapeHtml(dev.pen_name) : 'Unnamed Pen';
+        const did = escapeHtml(dev.device_id);
+        const isOnline = !!dev.online;
+        const onlineText = isOnline ? 'Online' : 'Offline';
+        const dotClass = isOnline ? 'online' : 'offline';
+        const thiStatus = dev.thi_status || { label: '—', cls: 'badge-muted' };
+
+        const r = dev.latest_reading || {};
+        const tempStr = (typeof r.temp === 'number') ? r.temp.toFixed(1) + '°C' : '—';
+        const humStr = (typeof r.humidity === 'number') ? r.humidity.toFixed(0) + '%' : '—';
+        const thiStr = (typeof r.thi === 'number') ? r.thi.toFixed(1) : '—';
+
+        const w = dev.latest_water || {};
+        const tankStr = (typeof w.water_level === 'number') ? (w.water_level > 0 ? w.water_level.toFixed(0) + '%' : '—') : '—';
+
+        const lastSeenStr = dev.last_seen ? formatTimeAgo(dev.last_seen) : 'Never';
+        const isFocused = (selectedPenId === dev.device_id);
+
+        html += `
+          <div class="pen-card ${isFocused ? 'active-focus' : ''}" data-device-id="${did}">
+            <div class="pen-card-header">
+              <div>
+                <h3 class="pen-card-title">🐖 ${penName}</h3>
+                <div class="pen-card-subtitle">${did}</div>
+              </div>
+              <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
+                <span class="badge ${thiStatus.cls}" style="font-size:11px;">${escapeHtml(thiStatus.label)}</span>
+                <span style="font-size:11px; color:var(--muted); display:flex; align-items:center;">
+                  <span class="pen-online-dot ${dotClass}"></span> ${onlineText}
+                </span>
+              </div>
+            </div>
+
+            <div class="pen-metrics-grid">
+              <div class="pen-metric-item">
+                <span class="pen-metric-label">Temp</span>
+                <span class="pen-metric-val">${tempStr}</span>
+              </div>
+              <div class="pen-metric-item">
+                <span class="pen-metric-label">Hum</span>
+                <span class="pen-metric-val" style="color:#60a5fa;">${humStr}</span>
+              </div>
+              <div class="pen-metric-item">
+                <span class="pen-metric-label">THI</span>
+                <span class="pen-metric-val" style="color:${thiStatus.color || '#e6edf3'};">${thiStr}</span>
+              </div>
+              <div class="pen-metric-item">
+                <span class="pen-metric-label">Tank</span>
+                <span class="pen-metric-val" style="color:#34d399;">${tankStr}</span>
+              </div>
+            </div>
+
+            <div class="pen-card-drawer hidden" id="drawer-${did}">
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:10px;">
+                <div><span class="muted">Type:</span> <strong>${escapeHtml(dev.device_type || 'Sensor Node')}</strong></div>
+                <div><span class="muted">Last Seen:</span> <strong>${lastSeenStr}</strong></div>
+              </div>
+              <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;">
+                <button class="btn btn-sm btn-outline btn-pen-focus" data-did="${did}">${isFocused ? '✓ Active Pen' : 'Focus Live Gauges'}</button>
+                <button class="btn btn-sm btn-outline btn-pen-rotate" data-id="${dev.id}">Rotate Token</button>
+                <button class="btn-danger-sm btn-pen-unlink" data-id="${dev.id}" data-did="${did}">Unlink</button>
+              </div>
+            </div>
+
+            <div class="pen-card-footer">
+              <span class="muted smaller">Last active: ${lastSeenStr}</span>
+              <button class="btn btn-sm btn-outline btn-toggle-drawer" data-did="${did}">
+                <span>Details ▾</span>
+              </button>
+            </div>
+          </div>`;
+      });
+
+      grid.innerHTML = html;
+
+      // Event Listeners for pen cards
+      grid.querySelectorAll('.btn-toggle-drawer').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const did = btn.dataset.did;
+          const drawer = document.getElementById('drawer-' + did);
+          if (drawer) {
+            const isHidden = drawer.classList.toggle('hidden');
+            btn.querySelector('span').textContent = isHidden ? 'Details ▾' : 'Collapse ▴';
+          }
+        });
+      });
+
+      grid.querySelectorAll('.btn-pen-focus').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const did = btn.dataset.did;
+          selectedPenId = (selectedPenId === did) ? null : did;
+          loadPensOverview();
+          NOTIFY.show(selectedPenId ? 'Focused live telemetry for pen: ' + did : 'Showing farm overview', 'info');
+        });
+      });
+
+      grid.querySelectorAll('.btn-pen-rotate').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.id;
+          if (!confirm('Rotate device token for this pen node?')) return;
+          try {
+            const rotRes = await authFetch(API + '/api/devices/' + id + '/rotate-token', { method: 'POST' });
+            const rotData = await rotRes.json();
+            if (rotRes.ok && rotData.ok) {
+              alert('New device token: ' + rotData.device_token + '\nSave this token to configure your hardware node.');
+              loadPensOverview();
+            } else {
+              alert(rotData.error || 'Failed to rotate token.');
+            }
+          } catch (e) {
+            alert('Error: ' + e.message);
+          }
+        });
+      });
+
+      grid.querySelectorAll('.btn-pen-unlink').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.id;
+          const did = btn.dataset.did;
+          if (!confirm('Unlink pen node "' + did + '" from this account?')) return;
+          try {
+            const delRes = await authFetch(API + '/api/devices/' + id, { method: 'DELETE' });
+            if (delRes.ok) {
+              NOTIFY.show('Pen node unlinked successfully.', 'info');
+              loadPensOverview();
+              loadDevicesList();
+            } else {
+              const delData = await delRes.json();
+              alert(delData.error || 'Failed to unlink device.');
+            }
+          } catch (e) {
+            alert('Error: ' + e.message);
+          }
+        });
+      });
+
+    } catch (_) {}
+  }
+
+  function formatTimeAgo(ts) {
+    if (!ts) return 'Never';
+    const diff = Math.floor((Date.now() - ts) / 1000);
+    if (diff < 10) return 'Just now';
+    if (diff < 60) return diff + 's ago';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
+  }
+
+  
+  /* ── Bidirectional Additive Accounting Sync ──────────────── */
+  function initAccountingSyncControls() {
+    const btnSync = document.getElementById('btn-trigger-accounting-sync');
+    if (btnSync) {
+      btnSync.addEventListener('click', async () => {
+        btnSync.disabled = true;
+        btnSync.textContent = 'Syncing Accounting…';
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+
+        try {
+          // Fetch local schedules
+          const locRes = await authFetch(API + '/api/schedules?type=all');
+          const localSchedules = locRes.ok ? await locRes.json() : [];
+
+          // Push to sync accounting
+          const syncRes = await authFetch(API + '/api/sync/schedules', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(localSchedules)
+          });
+          const syncData = await syncRes.json();
+
+          if (syncRes.ok && syncData.ok) {
+            NOTIFY.show(`Accounting sync complete! ${syncData.added_to_cloud || 0} missing items added to cloud.`, 'success');
+            if (typeof loadSchedules === 'function') loadSchedules();
+          } else {
+            NOTIFY.show('Accounting sync: ' + (syncData.error || 'Server error'), 'warn');
+          }
+        } catch (err) {
+          NOTIFY.show('Accounting sync error: ' + err.message, 'danger');
+        } finally {
+          btnSync.disabled = false;
+          btnSync.textContent = 'Sync Accounting Now';
+        }
+      });
+    }
+  }
+
+  function initMultiPenControls() {
+    const btnRefresh = document.getElementById('btn-refresh-pens');
+    if (btnRefresh) {
+      btnRefresh.addEventListener('click', () => {
+        loadPensOverview();
+      });
+    }
+
+    const btnAddPenGuide = document.getElementById('btn-add-pen-guide');
+    const modal = document.getElementById('add-pen-modal');
+    const btnClose = document.getElementById('add-pen-modal-close');
+    const btnDone = document.getElementById('btn-add-pen-done');
+
+    if (btnAddPenGuide && modal) {
+      btnAddPenGuide.addEventListener('click', () => {
+        modal.classList.remove('hidden');
+      });
+    }
+    if (btnClose && modal) {
+      btnClose.addEventListener('click', () => {
+        modal.classList.add('hidden');
+      });
+    }
+    if (btnDone && modal) {
+      btnDone.addEventListener('click', () => {
+        modal.classList.add('hidden');
+      });
+    }
+  }
+
+  /* ── Device Security PIN Controls ───────────────────────── */
+  let devicePinEnabled = false;
+
+  async function loadPinStatus() {
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+    try {
+      const res = await authFetch(API + '/api/device/pin/status');
+      if (!res.ok) return;
+      const data = await res.json();
+      devicePinEnabled = !!data.enabled;
+
+      const badge = document.getElementById('pin-status-badge');
+      const activeInfo = document.getElementById('pin-active-info');
+      const setupBox = document.getElementById('pin-setup-box');
+      const changeBox = document.getElementById('pin-change-box');
+
+      if (devicePinEnabled) {
+        if (badge) {
+          badge.className = 'badge badge-green';
+          badge.textContent = 'Protected (PIN On)';
+        }
+        if (activeInfo) activeInfo.classList.remove('hidden');
+        if (changeBox) changeBox.classList.remove('hidden');
+        if (setupBox) setupBox.classList.add('hidden');
+      } else {
+        if (badge) {
+          badge.className = 'badge badge-muted';
+          badge.textContent = 'Disabled (No PIN)';
+        }
+        if (activeInfo) activeInfo.classList.add('hidden');
+        if (changeBox) changeBox.classList.add('hidden');
+        if (setupBox) setupBox.classList.remove('hidden');
+      }
+    } catch (_) {}
+  }
+
+  function promptPinUnlockModal() {
+    return new Promise((resolve) => {
+      const modal = document.getElementById('pin-unlock-modal');
+      const inp = document.getElementById('modal-inp-unlock-pin');
+      const err = document.getElementById('modal-unlock-pin-err');
+      const btnSubmit = document.getElementById('modal-btn-unlock-submit');
+      const btnCancel = document.getElementById('modal-btn-unlock-cancel');
+
+      if (!modal || !inp) {
+        const direct = window.prompt('Enter Security PIN:');
+        if (direct) {
+          setSecurityPin(direct);
+          resolve(true);
+        } else {
+          resolve(false);
+        }
+        return;
+      }
+
+      inp.value = '';
+      if (err) err.classList.add('hidden');
+      modal.classList.remove('hidden');
+      inp.focus();
+
+      const cleanup = () => {
+        modal.classList.add('hidden');
+        btnSubmit.removeEventListener('click', onSubmit);
+        btnCancel.removeEventListener('click', onCancel);
+        inp.removeEventListener('keydown', onKey);
+      };
+
+      const onSubmit = async () => {
+        const pinVal = inp.value.trim();
+        if (!pinVal) {
+          if (err) {
+            err.textContent = 'Please enter your Security PIN.';
+            err.classList.remove('hidden');
+          }
+          return;
+        }
+
+        btnSubmit.disabled = true;
+        btnSubmit.textContent = 'Verifying…';
+
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        try {
+          const res = await fetch(API + '/api/device/pin/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin: pinVal })
+          });
+          const data = await res.json();
+
+          if (res.ok && data.ok) {
+            setSecurityPin(pinVal);
+            NOTIFY.show('Settings unlocked for this session.', 'success');
+            cleanup();
+            resolve(true);
+          } else {
+            if (err) {
+              err.textContent = data.error || 'Incorrect Security PIN.';
+              err.classList.remove('hidden');
+            }
+          }
+        } catch (e) {
+          if (err) {
+            err.textContent = 'Verification error: ' + e.message;
+            err.classList.remove('hidden');
+          }
+        } finally {
+          btnSubmit.disabled = false;
+          btnSubmit.textContent = 'Unlock';
+        }
+      };
+
+      const onCancel = () => {
+        cleanup();
+        resolve(false);
+      };
+
+      const onKey = (e) => {
+        if (e.key === 'Enter') onSubmit();
+        if (e.key === 'Escape') onCancel();
+      };
+
+      btnSubmit.addEventListener('click', onSubmit);
+      btnCancel.addEventListener('click', onCancel);
+      inp.addEventListener('keydown', onKey);
+    });
+  }
+  window.promptPinUnlockModal = promptPinUnlockModal;
+
+  function initPinControls() {
+    // 1. Set PIN button
+    const btnEnable = document.getElementById('btn-pin-enable');
+    const inpNew = document.getElementById('inp-pin-new');
+    const inpConfirm = document.getElementById('inp-pin-confirm');
+    const setupErr = document.getElementById('pin-setup-err');
+
+    if (btnEnable) {
+      btnEnable.addEventListener('click', async () => {
+        const p1 = (inpNew.value || '').trim();
+        const p2 = (inpConfirm.value || '').trim();
+
+        if (p1.length < 4 || p1.length > 8) {
+          if (setupErr) {
+            setupErr.textContent = 'PIN must be between 4 and 8 characters.';
+            setupErr.classList.remove('hidden');
+          }
+          return;
+        }
+
+        if (p1 !== p2) {
+          if (setupErr) {
+            setupErr.textContent = 'PIN confirmation does not match.';
+            setupErr.classList.remove('hidden');
+          }
+          return;
+        }
+
+        btnEnable.disabled = true;
+        btnEnable.textContent = 'Setting PIN…';
+        if (setupErr) setupErr.classList.add('hidden');
+
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        try {
+          const res = await authFetch(API + '/api/device/pin/set', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ new_pin: p1 })
+          });
+          const data = await res.json();
+          if (res.ok && data.ok) {
+            setSecurityPin(p1);
+            inpNew.value = '';
+            inpConfirm.value = '';
+            NOTIFY.show('Security PIN successfully enabled!', 'success');
+            await loadPinStatus();
+          } else {
+            if (setupErr) {
+              setupErr.textContent = data.error || 'Failed to set PIN.';
+              setupErr.classList.remove('hidden');
+            }
+          }
+        } catch (err) {
+          if (setupErr) {
+            setupErr.textContent = 'Error: ' + err.message;
+            setupErr.classList.remove('hidden');
+          }
+        } finally {
+          btnEnable.disabled = false;
+          btnEnable.textContent = 'Set & Enable PIN';
+        }
+      });
+    }
+
+    // 2. Change PIN button
+    const btnUpdate = document.getElementById('btn-pin-update');
+    const inpCurrent = document.getElementById('inp-pin-current');
+    const inpChangeNew = document.getElementById('inp-pin-change-new');
+    const inpChangeConfirm = document.getElementById('inp-pin-change-confirm');
+    const changeErr = document.getElementById('pin-change-err');
+
+    if (btnUpdate) {
+      btnUpdate.addEventListener('click', async () => {
+        const cur = (inpCurrent.value || '').trim();
+        const nw = (inpChangeNew.value || '').trim();
+        const conf = (inpChangeConfirm.value || '').trim();
+
+        if (!cur) {
+          if (changeErr) {
+            changeErr.textContent = 'Please enter your current PIN.';
+            changeErr.classList.remove('hidden');
+          }
+          return;
+        }
+
+        if (nw.length < 4 || nw.length > 8) {
+          if (changeErr) {
+            changeErr.textContent = 'New PIN must be between 4 and 8 characters.';
+            changeErr.classList.remove('hidden');
+          }
+          return;
+        }
+
+        if (nw !== conf) {
+          if (changeErr) {
+            changeErr.textContent = 'New PIN confirmation does not match.';
+            changeErr.classList.remove('hidden');
+          }
+          return;
+        }
+
+        btnUpdate.disabled = true;
+        btnUpdate.textContent = 'Updating…';
+        if (changeErr) changeErr.classList.add('hidden');
+
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        try {
+          const res = await authFetch(API + '/api/device/pin/set', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ current_pin: cur, new_pin: nw })
+          });
+          const data = await res.json();
+          if (res.ok && data.ok) {
+            setSecurityPin(nw);
+            inpCurrent.value = '';
+            inpChangeNew.value = '';
+            inpChangeConfirm.value = '';
+            NOTIFY.show('Security PIN updated successfully!', 'success');
+            await loadPinStatus();
+          } else {
+            if (changeErr) {
+              changeErr.textContent = data.error || 'Failed to update PIN.';
+              changeErr.classList.remove('hidden');
+            }
+          }
+        } catch (err) {
+          if (changeErr) {
+            changeErr.textContent = 'Error: ' + err.message;
+            changeErr.classList.remove('hidden');
+          }
+        } finally {
+          btnUpdate.disabled = false;
+          btnUpdate.textContent = 'Change PIN';
+        }
+      });
+    }
+
+    // 3. Disable PIN button
+    const btnDisable = document.getElementById('btn-pin-disable');
+    if (btnDisable) {
+      btnDisable.addEventListener('click', async () => {
+        const cur = (inpCurrent.value || '').trim();
+        if (!cur) {
+          if (changeErr) {
+            changeErr.textContent = 'Enter current PIN to disable protection.';
+            changeErr.classList.remove('hidden');
+          }
+          return;
+        }
+
+        if (!confirm('Are you sure you want to disable PIN protection on this device?')) return;
+
+        btnDisable.disabled = true;
+        btnDisable.textContent = 'Disabling…';
+        if (changeErr) changeErr.classList.add('hidden');
+
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        try {
+          const res = await authFetch(API + '/api/device/pin/disable', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ current_pin: cur })
+          });
+          const data = await res.json();
+          if (res.ok && data.ok) {
+            setSecurityPin('');
+            inpCurrent.value = '';
+            inpChangeNew.value = '';
+            inpChangeConfirm.value = '';
+            NOTIFY.show('Security PIN disabled.', 'info');
+            await loadPinStatus();
+          } else {
+            if (changeErr) {
+              changeErr.textContent = data.error || 'Failed to disable PIN.';
+              changeErr.classList.remove('hidden');
+            }
+          }
+        } catch (err) {
+          if (changeErr) {
+            changeErr.textContent = 'Error: ' + err.message;
+            changeErr.classList.remove('hidden');
+          }
+        } finally {
+          btnDisable.disabled = false;
+          btnDisable.textContent = 'Disable PIN Protection';
+        }
+      });
+    }
+
+    // 4. Lock session button
+    const btnLock = document.getElementById('btn-pin-lock-toggle');
+    if (btnLock) {
+      btnLock.addEventListener('click', () => {
+        setSecurityPin('');
+        NOTIFY.show('Settings locked. PIN required for next change.', 'info');
+      });
+    }
   }
 
   function initDeviceControls() {
@@ -1381,9 +1986,650 @@
       .replace(/'/g, '&#39;');
   }
 
+
+  /* ── Wi-Fi Manager (Phone-Style Scan & Connect) ────────── */
+  async function loadWifiStatus() {
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+    try {
+      const res = await authFetch(API + '/api/wifi/status');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const badge = document.getElementById('wifi-badge');
+      const ssidEl = document.getElementById('wifi-stat-ssid');
+      const ipEl = document.getElementById('wifi-stat-ip');
+      const rssiEl = document.getElementById('wifi-stat-rssi');
+      const macEl = document.getElementById('wifi-stat-mac');
+      const btnDisconnect = document.getElementById('btn-wifi-disconnect');
+      const apEl = document.getElementById('wifi-stat-hotspot');
+
+      if (macEl && data.mac) macEl.textContent = data.mac;
+      if (apEl && data.ap_ssid) {
+        apEl.innerHTML = `Access Point: <strong>${escapeHtml(data.ap_ssid)}</strong> (${escapeHtml(data.ap_ip || '192.168.4.1')})`;
+      }
+
+      if (data.connected && data.ssid) {
+        if (badge) {
+          badge.className = 'badge badge-green';
+          badge.textContent = 'Connected';
+        }
+        if (ssidEl) ssidEl.textContent = data.ssid;
+        if (ipEl) ipEl.textContent = data.ip || '—';
+        if (rssiEl) rssiEl.textContent = (data.rssi ? data.rssi + ' dBm' : 'Good');
+        if (btnDisconnect) btnDisconnect.classList.remove('hidden');
+      } else {
+        if (badge) {
+          badge.className = 'badge badge-warn';
+          badge.textContent = 'Disconnected';
+        }
+        if (ssidEl) ssidEl.textContent = 'Not connected';
+        if (ipEl) ipEl.textContent = '—';
+        if (rssiEl) rssiEl.textContent = '—';
+        if (btnDisconnect) btnDisconnect.classList.add('hidden');
+      }
+    } catch (_) {}
+  }
+
+  async function scanWifiNetworks() {
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+    const btnScan = document.getElementById('btn-wifi-scan');
+    const loading = document.getElementById('wifi-scan-loading');
+    const list = document.getElementById('wifi-networks-list');
+
+    if (btnScan) btnScan.disabled = true;
+    if (loading) loading.classList.remove('hidden');
+    if (list) list.innerHTML = '';
+
+    try {
+      // Trigger async scan on the ESP32
+      const startRes = await authFetch(API + '/api/wifi/scan');
+      if (!startRes.ok) throw new Error('Failed to start Wi-Fi scan');
+
+      // Poll /api/wifi/scan/results until ready (max 15 s)
+      let networks = [];
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 1200));
+        const pollRes = await authFetch(API + '/api/wifi/scan/results');
+        if (!pollRes.ok) throw new Error('Scan results error');
+        const pollData = await pollRes.json();
+        if (pollData.ready) {
+          networks = pollData.networks || [];
+          break;
+        }
+      }
+
+      if (networks.length === 0) {
+        list.innerHTML = '<p class="muted small" style="text-align:center; padding:20px 0;">No wireless networks detected. Try scanning again.</p>';
+        return;
+      }
+
+      let html = '';
+      networks.forEach(net => {
+        const signalPct = Math.max(0, Math.min(100, 2 * (net.rssi + 100)));
+        const bars = signalPct >= 70 ? '▂▄▆█' : (signalPct >= 45 ? '▂▄▆' : (signalPct >= 20 ? '▂▄' : '▂'));
+        const lockIcon = net.secure ? '🔒' : '🔓';
+        html += `
+          <div class="wifi-net-item" data-ssid="${escapeHtml(net.ssid)}" data-secure="${net.secure}">
+            <div class="wifi-net-info">
+              <span class="wifi-signal-bars" title="${net.rssi} dBm">${bars}</span>
+              <div>
+                <span class="wifi-net-name">${escapeHtml(net.ssid)}</span>
+                <span class="wifi-net-sec">${lockIcon} ${escapeHtml(net.auth || (net.secure ? 'Secure' : 'Open'))}</span>
+              </div>
+            </div>
+            <button class="btn btn-sm btn-outline">Connect</button>
+          </div>
+        `;
+      });
+      list.innerHTML = html;
+
+      // Add click listeners to scanned items
+      list.querySelectorAll('.wifi-net-item').forEach(item => {
+        item.addEventListener('click', () => {
+          const ssid = item.dataset.ssid;
+          openWifiConnectModal(ssid);
+        });
+      });
+
+    } catch (err) {
+      if (list) list.innerHTML = `<p class="login-err" style="text-align:center; padding:16px;">Scan error: ${escapeHtml(err.message)}</p>`;
+    } finally {
+      if (btnScan) btnScan.disabled = false;
+      if (loading) loading.classList.add('hidden');
+    }
+  }
+
+  function openWifiConnectModal(ssid) {
+    const modal = document.getElementById('modal-wifi-connect');
+    const ssidInp = document.getElementById('inp-wifi-ssid');
+    const passInp = document.getElementById('inp-wifi-pass');
+    const errEl = document.getElementById('wifi-connect-err');
+
+    if (!modal) return;
+    if (ssidInp) {
+      ssidInp.value = ssid || '';
+      ssidInp.removeAttribute('readonly');
+    }
+    if (passInp) passInp.value = '';
+    if (errEl) errEl.classList.add('hidden');
+    modal.classList.remove('hidden');
+    if (ssid) {
+      if (passInp) passInp.focus();
+    } else {
+      if (ssidInp) ssidInp.focus();
+    }
+  }
+
+  function closeWifiConnectModal() {
+    const modal = document.getElementById('modal-wifi-connect');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  async function submitWifiConnect() {
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+    const ssid = (document.getElementById('inp-wifi-ssid').value || '').trim();
+    const password = document.getElementById('inp-wifi-pass').value || '';
+    const btnSubmit = document.getElementById('btn-wifi-modal-submit');
+    const errEl = document.getElementById('wifi-connect-err');
+
+    if (!ssid) {
+      if (errEl) { errEl.textContent = 'SSID is required.'; errEl.classList.remove('hidden'); }
+      return;
+    }
+
+    if (btnSubmit) {
+      btnSubmit.disabled = true;
+      btnSubmit.textContent = 'Connecting…';
+    }
+    if (errEl) errEl.classList.add('hidden');
+
+    try {
+      // POST to initiate — ESP32 returns 202 immediately, task runs in background
+      const res = await authFetch(API + '/api/wifi/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ssid, password })
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data.ok) {
+        if (errEl) {
+          errEl.textContent = data.error || 'Failed to initiate connection.';
+          errEl.classList.remove('hidden');
+        }
+        return;
+      }
+
+      // Poll /api/wifi/connect/status until connected or failed (max 20 s)
+      if (btnSubmit) btnSubmit.textContent = 'Connecting… (0s)';
+      const deadline = Date.now() + 20000;
+      let elapsed = 0;
+      let connected = false;
+      let resultData = null;
+
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 1500));
+        elapsed += 1500;
+        if (btnSubmit) btnSubmit.textContent = `Connecting… (${Math.round(elapsed / 1000)}s)`;
+
+        try {
+          const statusRes = await authFetch(API + '/api/wifi/connect/status');
+          if (!statusRes.ok) continue;
+          const statusData = await statusRes.json();
+
+          if (statusData.status === 'connected') {
+            connected = true;
+            resultData = statusData;
+            break;
+          } else if (statusData.status === 'failed') {
+            if (errEl) {
+              errEl.textContent = statusData.error || 'Failed to connect. Check password and try again.';
+              errEl.classList.remove('hidden');
+            }
+            return;
+          }
+          // status === 'connecting' or 'idle' — keep polling
+        } catch (_) { /* network hiccup during transition — keep trying */ }
+      }
+
+      if (connected && resultData) {
+        closeWifiConnectModal();
+        NOTIFY.show(`Connected to ${ssid}! IP: ${resultData.ip || ''}`, 'success');
+        await loadWifiStatus();
+      } else {
+        if (errEl) {
+          errEl.textContent = 'Connection timed out. Check password and try again.';
+          errEl.classList.remove('hidden');
+        }
+      }
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = 'Connection error: ' + err.message;
+        errEl.classList.remove('hidden');
+      }
+    } finally {
+      if (btnSubmit) {
+        btnSubmit.disabled = false;
+        btnSubmit.textContent = 'Connect Now';
+      }
+    }
+  }
+
+  function initWifiControls() {
+    const btnScan = document.getElementById('btn-wifi-scan');
+    if (btnScan) btnScan.addEventListener('click', scanWifiNetworks);
+
+    const btnManual = document.getElementById('btn-wifi-manual');
+    if (btnManual) {
+      btnManual.addEventListener('click', () => {
+        openWifiConnectModal('');
+      });
+    }
+
+    const btnDisconnect = document.getElementById('btn-wifi-disconnect');
+    if (btnDisconnect) {
+      btnDisconnect.addEventListener('click', async () => {
+        if (!confirm('Disconnect from current Wi-Fi network?')) return;
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        try {
+          await authFetch(API + '/api/wifi/disconnect', { method: 'POST' });
+          NOTIFY.show('Disconnected from Wi-Fi.', 'info');
+          loadWifiStatus();
+        } catch (_) {}
+      });
+    }
+
+    const btnClose = document.getElementById('btn-wifi-modal-close');
+    if (btnClose) btnClose.addEventListener('click', closeWifiConnectModal);
+
+    const btnCancel = document.getElementById('btn-wifi-modal-cancel');
+    if (btnCancel) btnCancel.addEventListener('click', closeWifiConnectModal);
+
+    const btnSubmit = document.getElementById('btn-wifi-modal-submit');
+    if (btnSubmit) btnSubmit.addEventListener('click', submitWifiConnect);
+
+    const passInp = document.getElementById('inp-wifi-pass');
+    if (passInp) {
+      passInp.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitWifiConnect();
+      });
+    }
+
+    const btnTogglePass = document.getElementById('btn-toggle-wifi-pass');
+    if (btnTogglePass && passInp) {
+      btnTogglePass.addEventListener('click', () => {
+        passInp.type = passInp.type === 'password' ? 'text' : 'password';
+      });
+    }
+  }
+
+
+  /* ── Device Configuration, Reboot & Factory Reset ──────── */
+  async function loadDeviceConfig() {
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+    try {
+      const res = await authFetch(API + '/api/device/config');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const inpName = document.getElementById('inp-dev-name');
+      const inpPen = document.getElementById('inp-dev-pen');
+      const inpModel = document.getElementById('inp-dev-model');
+      const inpApSsid = document.getElementById('inp-dev-ap-ssid');
+      const selTz = document.getElementById('sel-dev-tz');
+      const lblMac = document.getElementById('lbl-dev-mac');
+      const lblFw = document.getElementById('lbl-dev-fw');
+      const lblHeap = document.getElementById('lbl-dev-heap');
+
+      if (inpName) inpName.value = data.name || '';
+      if (inpPen) inpPen.value = data.pen_name || '';
+      if (inpModel) inpModel.value = data.model || '';
+      if (inpApSsid) inpApSsid.value = data.ap_ssid || '';
+      if (selTz && data.timezone_sec !== undefined) selTz.value = String(data.timezone_sec);
+      if (lblMac && data.mac) lblMac.textContent = data.mac;
+      if (lblFw && data.firmware) lblFw.textContent = data.firmware;
+      if (lblHeap && data.heap_free) {
+        lblHeap.textContent = Math.round(data.heap_free / 1024) + ' KB';
+      }
+    } catch (_) {}
+  }
+
+  function showUncancellableRebootModal(msg) {
+    const modal = document.getElementById('modal-device-reboot');
+    const msgEl = document.getElementById('reboot-modal-msg');
+    const btnReboot = document.getElementById('btn-device-reboot-now');
+    const countWrap = document.getElementById('reboot-countdown-wrap');
+    const countText = document.getElementById('reboot-countdown-text');
+
+    if (!modal) return;
+    if (msgEl && msg) msgEl.textContent = msg;
+    if (countWrap) countWrap.classList.add('hidden');
+    if (btnReboot) {
+      btnReboot.classList.remove('hidden');
+      btnReboot.disabled = false;
+      btnReboot.textContent = 'Reboot Now';
+    }
+    modal.classList.remove('hidden');
+
+    btnReboot.onclick = async () => {
+      btnReboot.classList.add('hidden');
+      if (countWrap) countWrap.classList.remove('hidden');
+
+      const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+      try {
+        await authFetch(API + '/api/device/reboot', { method: 'POST' });
+      } catch (_) {}
+
+      let remaining = 10;
+      const timer = setInterval(() => {
+        remaining--;
+        if (countText) countText.textContent = `Reconnecting in ${remaining}s…`;
+        if (remaining <= 0) {
+          clearInterval(timer);
+          window.location.reload();
+        }
+      }, 1000);
+    };
+  }
+
+  function initDeviceControls() {
+    const btnSave = document.getElementById('btn-save-device-config');
+    if (btnSave) {
+      btnSave.addEventListener('click', async () => {
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        const name = (document.getElementById('inp-dev-name').value || '').trim();
+        const pen_name = (document.getElementById('inp-dev-pen').value || '').trim();
+        const model = (document.getElementById('inp-dev-model').value || '').trim();
+        const ap_ssid = (document.getElementById('inp-dev-ap-ssid').value || '').trim();
+        const ap_password = document.getElementById('inp-dev-ap-pass').value || '';
+        const tzVal = parseInt(document.getElementById('sel-dev-tz').value, 10);
+
+        if (ap_password && ap_password.length < 8) {
+          alert('Access Point password must be at least 8 characters.');
+          return;
+        }
+
+        btnSave.disabled = true;
+        btnSave.textContent = 'Saving…';
+
+        try {
+          const payload = { name, pen_name, model, ap_ssid, timezone_sec: tzVal };
+          if (ap_password) payload.ap_password = ap_password;
+
+          const res = await authFetch(API + '/api/device/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+
+          if (res.ok && data.ok) {
+            if (data.reboot_required) {
+              showUncancellableRebootModal(data.message);
+            } else {
+              NOTIFY.show('Device settings updated successfully.', 'success');
+              document.getElementById('inp-dev-ap-pass').value = '';
+            }
+          } else {
+            alert(data.error || 'Failed to save device settings.');
+          }
+        } catch (err) {
+          alert('Error saving settings: ' + err.message);
+        } finally {
+          btnSave.disabled = false;
+          btnSave.textContent = 'Save Device Settings';
+        }
+      });
+    }
+
+    const btnToggleApPass = document.getElementById('btn-toggle-ap-pass');
+    const apPassInp = document.getElementById('inp-dev-ap-pass');
+    if (btnToggleApPass && apPassInp) {
+      btnToggleApPass.addEventListener('click', () => {
+        apPassInp.type = apPassInp.type === 'password' ? 'text' : 'password';
+      });
+    }
+
+    const btnCopyMac = document.getElementById('btn-copy-mac');
+    if (btnCopyMac) {
+      btnCopyMac.addEventListener('click', () => {
+        const mac = document.getElementById('lbl-dev-mac').textContent;
+        if (mac && mac !== '—') {
+          navigator.clipboard.writeText(mac).then(() => {
+            NOTIFY.show('MAC address copied to clipboard: ' + mac, 'info');
+          });
+        }
+      });
+    }
+
+    // Factory Reset phrase validation and action
+    const resetPhraseInp = document.getElementById('inp-factory-reset-phrase');
+    const btnReset = document.getElementById('btn-factory-reset-submit');
+    const REQUIRED_PHRASE = 'Yes, I would like to factory reset this device';
+
+    if (resetPhraseInp && btnReset) {
+      resetPhraseInp.addEventListener('input', () => {
+        const matches = (resetPhraseInp.value.trim() === REQUIRED_PHRASE);
+        btnReset.disabled = !matches;
+        btnReset.style.opacity = matches ? '1.0' : '0.4';
+        btnReset.style.cursor = matches ? 'pointer' : 'not-allowed';
+      });
+
+      btnReset.addEventListener('click', async () => {
+        if (resetPhraseInp.value.trim() !== REQUIRED_PHRASE) return;
+        btnReset.disabled = true;
+        btnReset.textContent = 'Resetting…';
+
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        try {
+          const res = await authFetch(API + '/api/device/factory-reset', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirmation_phrase: REQUIRED_PHRASE })
+          });
+          const data = await res.json();
+          if (res.ok && data.ok) {
+            showUncancellableRebootModal('Factory reset successful. Hardware is restarting into default configuration.');
+          } else {
+            alert(data.error || 'Factory reset failed.');
+            btnReset.disabled = false;
+            btnReset.textContent = 'Factory Reset Device';
+          }
+        } catch (err) {
+          alert('Reset error: ' + err.message);
+          btnReset.disabled = false;
+          btnReset.textContent = 'Factory Reset Device';
+        }
+      });
+    }
+  }
+
+
+  /* ── Cloud Account Pairing & Synchronization ───────────── */
+  async function loadCloudStatus() {
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+    try {
+      const res = await authFetch(API + '/api/info');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const badge = document.getElementById('cloud-pair-badge');
+      const statText = document.getElementById('cloud-status-text');
+      const btnUnbind = document.getElementById('btn-cloud-unbind');
+      const urlInp = document.getElementById('inp-cloud-url');
+      const penInp = document.getElementById('inp-cloud-pen');
+
+      if (urlInp && data.backendUrl && !urlInp.value) {
+        urlInp.value = data.backendUrl;
+      }
+      if (penInp && data.pen_name && !penInp.value) {
+        penInp.value = data.pen_name;
+      }
+
+      if (data.paired) {
+        if (badge) {
+          badge.className = 'badge badge-green';
+          badge.textContent = 'Linked to Account';
+        }
+        if (statText) {
+          statText.innerHTML = '✅ <strong>Linked to Cloud:</strong> Sensor data is actively syncing to your swine farm account.';
+          statText.style.color = '#22C55E';
+        }
+        if (btnUnbind) btnUnbind.classList.remove('hidden');
+
+        const unpairedBanner = document.getElementById('unpaired-banner');
+        if (unpairedBanner) unpairedBanner.classList.add('hidden');
+      } else {
+        if (badge) {
+          badge.className = 'badge badge-warn';
+          badge.textContent = 'Not Paired';
+        }
+        if (statText) {
+          statText.innerHTML = '⚠️ <strong>Unlinked:</strong> Sensor data is recorded locally on SD card but not syncing to the cloud.';
+          statText.style.color = '#f59e0b';
+        }
+        if (btnUnbind) btnUnbind.classList.add('hidden');
+      }
+    } catch (_) {}
+  }
+
+  function initCloudBindingControls() {
+    const btnBind = document.getElementById('btn-cloud-bind');
+    const errEl = document.getElementById('cloud-bind-err');
+
+    if (btnBind) {
+      btnBind.addEventListener('click', async () => {
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        const backend_url = (document.getElementById('inp-cloud-url').value || '').trim();
+        const username = (document.getElementById('inp-cloud-user').value || '').trim();
+        const password = document.getElementById('inp-cloud-pass').value || '';
+        const pen_name = (document.getElementById('inp-cloud-pen').value || '').trim();
+
+        if (!username || !password) {
+          if (errEl) {
+            errEl.textContent = 'Cloud account username and password are required.';
+            errEl.classList.remove('hidden');
+          }
+          return;
+        }
+
+        btnBind.disabled = true;
+        btnBind.textContent = 'Connecting…';
+        if (errEl) errEl.classList.add('hidden');
+
+        try {
+          const res = await authFetch(API + '/api/device/bind', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ backend_url, username, password, pen_name })
+          });
+          const data = await res.json();
+
+          if (res.ok && data.ok) {
+            NOTIFY.show('ESP32 successfully linked to account: ' + (data.username || username), 'success');
+            document.getElementById('inp-cloud-pass').value = '';
+            await loadCloudStatus();
+          } else {
+            if (errEl) {
+              errEl.textContent = data.error || 'Failed to bind device to account.';
+              errEl.classList.remove('hidden');
+            }
+          }
+        } catch (err) {
+          if (errEl) {
+            errEl.textContent = 'Binding error: ' + err.message;
+            errEl.classList.remove('hidden');
+          }
+        } finally {
+          btnBind.disabled = false;
+          btnBind.textContent = 'Connect to Account';
+        }
+      });
+    }
+
+    const btnUnbind = document.getElementById('btn-cloud-unbind');
+    if (btnUnbind) {
+      btnUnbind.addEventListener('click', async () => {
+        if (!confirm('Unlink this ESP32 from your cloud account? Sensor readings will stop uploading.')) return;
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        try {
+          await authFetch(API + '/api/device/unbind', { method: 'POST' });
+          NOTIFY.show('Device unlinked from cloud account.', 'info');
+          await loadCloudStatus();
+        } catch (_) {}
+      });
+    }
+
+    const btnToggleCloudPass = document.getElementById('btn-toggle-cloud-pass');
+    const cloudPassInp = document.getElementById('inp-cloud-pass');
+    if (btnToggleCloudPass && cloudPassInp) {
+      btnToggleCloudPass.addEventListener('click', () => {
+        cloudPassInp.type = cloudPassInp.type === 'password' ? 'text' : 'password';
+      });
+    }
+
+    const btnTest = document.getElementById('btn-cloud-test');
+    if (btnTest) {
+      btnTest.addEventListener('click', async () => {
+        const rawUrl = (document.getElementById('inp-cloud-url').value || '').trim();
+        if (!rawUrl) {
+          alert('Please enter a Cloud Server URL first.');
+          return;
+        }
+        btnTest.disabled = true;
+        btnTest.textContent = 'Testing…';
+        try {
+          const testRes = await fetch(rawUrl + '/api/health', { signal: AbortSignal.timeout(3500) });
+          const testData = await testRes.json();
+          if (testRes.ok && testData.ok) {
+            NOTIFY.show('Cloud server reachable! Health status OK.', 'success');
+          } else {
+            alert('Cloud server responded but returned invalid health status.');
+          }
+        } catch (err) {
+          alert('Could not reach cloud server: ' + err.message);
+        } finally {
+          btnTest.disabled = false;
+          btnTest.textContent = 'Test Server Health';
+        }
+      });
+    }
+  }
+
   /* ── Entry point ─────────────────────────────────────────── */
   document.addEventListener('DOMContentLoaded', async () => {
     initLogin();
+
+    if (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.ready) {
+      try { await IOS_CONFIG.ready; } catch (_) {}
+    }
+
+    const isDeviceMode = (typeof IOS_CONFIG !== 'undefined' && (IOS_CONFIG.mode === 'device' || !IOS_CONFIG.authRequired));
+
+    if (isDeviceMode) {
+      // In offline/device mode, AP Wi-Fi password is the gate - bypass login screen
+      const loginScreen = document.getElementById('login-screen');
+      const appShell    = document.getElementById('app-shell');
+      if (loginScreen) loginScreen.classList.add('hidden');
+      if (appShell) appShell.classList.remove('hidden');
+      saveSession();
+
+      // Show Configure Me banner if device is not paired
+      if (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.paired === false) {
+        const unpairedBanner = document.getElementById('unpaired-banner');
+        if (unpairedBanner) {
+          unpairedBanner.classList.remove('hidden');
+          const btnCloud = document.getElementById('btn-banner-cloud-setup');
+          if (btnCloud) {
+            btnCloud.addEventListener('click', () => showPage('settings'));
+          }
+        }
+      }
+
+      await boot();
+      return;
+    }
 
     /* Auto-resume session after a page refresh if session is valid */
     if (isSessionActive()) {

@@ -1210,6 +1210,61 @@ function hashDeviceToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
 
+
+function bindDeviceByCredentials({ username, password, mac, penName = '' }) {
+  const cleanUser = String(username || '').trim();
+  const cleanPass = String(password || '');
+  const cleanMac = String(mac || '').trim().toUpperCase().replace(/[^A-F0-9]/g, '');
+
+  if (!cleanUser || !cleanPass) throw new Error('Username and password are required');
+  if (!cleanMac || cleanMac.length < 6) throw new Error('Valid MAC address is required (at least 6 hex characters)');
+
+  const user = verifyUserPassword(cleanUser, cleanPass);
+  if (!user) {
+    const err = new Error('Invalid username or password');
+    err.status = 401;
+    throw err;
+  }
+
+  const existing = db.prepare('SELECT id, account_id, device_id, pen_name, device_token FROM device_registry WHERE device_id = ?').get(cleanMac);
+
+  if (existing) {
+    const rawToken = 'ios_dev_' + crypto.randomBytes(24).toString('hex');
+    const tokenHash = hashDeviceToken(rawToken);
+    const assignedPen = penName || existing.pen_name || 'Pen 1';
+
+    db.prepare('UPDATE device_registry SET account_id = ?, pen_name = ?, device_token = ?, registered_at = ? WHERE id = ?')
+      .run(user.id, assignedPen, tokenHash, Date.now(), existing.id);
+
+    return {
+      ok: true,
+      device_id: cleanMac,
+      account_id: user.id,
+      username: user.username,
+      pen_name: assignedPen,
+      token: rawToken,
+      message: 'Device re-bound and fresh token issued.'
+    };
+  }
+
+  const registered = registerDevice({
+    accountId: user.id,
+    deviceId: cleanMac,
+    deviceType: 'sensor_node',
+    penName: penName || 'Pen 1'
+  });
+
+  return {
+    ok: true,
+    device_id: cleanMac,
+    account_id: user.id,
+    username: user.username,
+    pen_name: registered.pen_name,
+    token: registered.device_token,
+    message: 'Device successfully registered and bound to account.'
+  };
+}
+
 function registerDevice({ accountId = 1, deviceId, deviceType = 'sensor', penName = '' }) {
   const cleanDeviceId = String(deviceId || '').trim();
   if (!cleanDeviceId) throw new Error('deviceId is required');
@@ -1294,15 +1349,112 @@ function deleteDevice(id, accountId = null) {
   return res.changes > 0;
 }
 
+
+function calcThiLevel(thi, thresholds) {
+  if (thi == null) return { label: '—', cls: 'badge-muted', color: '#8B949E' };
+  const normalMax  = (thresholds && thresholds.normalMax != null)  ? thresholds.normalMax  : 74;
+  const stressMax  = (thresholds && thresholds.stressMax != null)  ? thresholds.stressMax  : 78;
+  const extremeMax = (thresholds && thresholds.extremeMax != null) ? thresholds.extremeMax : 83;
+
+  if (thi < normalMax)   return { label: 'Normal',       cls: 'badge-blue',   color: '#3B82F6' };
+  if (thi < stressMax)   return { label: 'Stressful',    cls: 'badge-warn',   color: '#F59E0B' };
+  if (thi < extremeMax)  return { label: 'Extreme Heat', cls: 'badge-orange', color: '#F97316' };
+  return                        { label: 'Danger Zone',  cls: 'badge-danger', color: '#EF4444' };
+}
+
+function getDevicesWithStatus(accountId = 1) {
+  const devices = getDevicesByAccount(accountId);
+  const thiThresholds = getTHIThresholds(accountId);
+
+  return devices.map(dev => {
+    // 1. Latest environmental reading for this device
+    const reading = db.prepare(`
+      SELECT temp, humidity, thi, ts
+      FROM readings
+      WHERE account_id = ? AND device_id = ?
+      ORDER BY ts DESC LIMIT 1
+    `).get(accountId, dev.device_id);
+
+    // 2. Latest water reading
+    const water = db.prepare(`
+      SELECT level_pct AS water_level, used_l AS water_used, flow_lpm AS flow_rate, ts
+      FROM water_readings
+      WHERE account_id = ? AND (device_id = ? OR device_id = 'esp32-tank' OR device_id = 'esp32-water' OR device_id IS NULL)
+      ORDER BY ts DESC LIMIT 1
+    `).get(accountId, dev.device_id);
+
+    // Online status: received reading within 90 seconds
+    const lastTs = Math.max(
+      reading ? reading.ts : 0,
+      water ? water.ts : 0
+    );
+    const online = Boolean(lastTs > 0 && (Date.now() - lastTs) < 90000);
+
+    let thiStatus = { label: 'No Data', cls: 'badge-muted', color: '#8B949E' };
+    if (reading && reading.thi != null) {
+      thiStatus = calcThiLevel(reading.thi, thiThresholds);
+    }
+
+    return {
+      ...dev,
+      latest_reading: reading || null,
+      latest_water: water || null,
+      last_seen: lastTs > 0 ? lastTs : null,
+      online,
+      thi_status: thiStatus
+    };
+  });
+}
+
+
+function syncSchedulesAccounting(deviceSchedules = [], accountId = 1) {
+  const current = listSchedules('all', accountId);
+  let addedCount = 0;
+
+  for (const ds of deviceSchedules) {
+    if (!ds || !ds.time || !ds.type) continue;
+    const dsDays = Array.isArray(ds.days) ? ds.days : (typeof ds.days === 'string' ? JSON.parse(ds.days || '[]') : []);
+    const dsDaysSorted = JSON.stringify(dsDays.slice().sort());
+
+    const exists = current.some(c => {
+      if (ds.id && String(c.id) === String(ds.id)) return true;
+      const cDays = Array.isArray(c.days) ? c.days : (typeof c.days === 'string' ? JSON.parse(c.days || '[]') : []);
+      const cDaysSorted = JSON.stringify(cDays.slice().sort());
+      return c.type === ds.type && c.time === ds.time && cDaysSorted === dsDaysSorted;
+    });
+
+    if (!exists) {
+      createSchedule({
+        type: ds.type,
+        label: ds.label || (ds.type === 'bath' ? 'Bathing Schedule' : 'Cleaning Schedule'),
+        time: ds.time,
+        duration: parseInt(ds.duration, 10) || 15,
+        days: dsDays,
+        accountId
+      });
+      addedCount++;
+    }
+  }
+
+  const merged = listSchedules('all', accountId);
+  return {
+    added: addedCount,
+    schedules: merged
+  };
+}
+
 module.exports = {
+  bindDeviceByCredentials,
   createUser, getUserByUsername, getUserById, verifyUserPassword, updateUserPassword, listUsers, deleteUser,
-  registerDevice, getDeviceByToken, getDevicesByAccount, getDeviceById, rotateDeviceToken, deleteDevice, seedAccountDefaults,
+  registerDevice, getDeviceByToken, getDevicesByAccount,
+  getDevicesWithStatus, getDeviceById, rotateDeviceToken, deleteDevice, seedAccountDefaults,
   db,
   insertReading, latestReading, readingsSince, reportSummary,
   getAggregatedReadings, rawReadingsIterator,
   insertWater, latestWater, weeklyWaterUsage, calculateWaterUsageForRows,
   usageByOperation, getWaterUsage, getTodayWaterUsage, latestTelemetry,
-  listSchedules, createSchedule, updateSchedule, toggleSchedule, deleteSchedule, scheduleCount,
+  listSchedules, createSchedule,
+  syncSchedulesAccounting, updateSchedule, toggleSchedule, deleteSchedule, scheduleCount,
   getSetting, setSetting, getTHIThresholds, setTHIThresholds,
   getOperationDurations, setOperationDurations,
   logActivity, recentActivity,

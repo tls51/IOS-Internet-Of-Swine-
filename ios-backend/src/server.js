@@ -270,6 +270,157 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+
+// ── Mock Wi-Fi Routes for Cloud / Development ────────────────
+app.get('/api/wifi/status', (req, res) => {
+  return res.json({
+    ok: true,
+    connected: true,
+    status: 'connected',
+    ssid: 'Simulated-Cloud-Network',
+    ip: '192.168.1.50',
+    rssi: -55,
+    ap_ssid: 'ESP32-Misting-System',
+    ap_ip: '192.168.4.1',
+    mac: 'A4CF12F8B3E2'
+  });
+});
+
+app.get('/api/wifi/scan', (req, res) => {
+  return res.json({
+    ok: true,
+    count: 3,
+    networks: [
+      { ssid: 'FarmOffice_5G', rssi: -48, secure: true, auth: 'WPA2' },
+      { ssid: 'SwinePen_Barn1', rssi: -62, secure: true, auth: 'WPA2' },
+      { ssid: 'Guest_WiFi', rssi: -80, secure: false, auth: 'Open' }
+    ]
+  });
+});
+
+app.post('/api/wifi/connect', (req, res) => {
+  if (!isDevicePinAuthorized(req)) return res.status(403).json({ ok: false, error: 'Security PIN required or incorrect' });
+  const { ssid } = req.body || {};
+  return res.json({
+    ok: true,
+    status: 'connected',
+    ssid: ssid || 'FarmOffice_5G',
+    ip: '192.168.1.77',
+    rssi: -50
+  });
+});
+
+app.post('/api/wifi/disconnect', (req, res) => {
+  if (!isDevicePinAuthorized(req)) return res.status(403).json({ ok: false, error: 'Security PIN required or incorrect' });
+  return res.json({ ok: true, status: 'disconnected' });
+});
+
+
+
+// ── Mock Device Security PIN State (Node / Cloud / Dev) ──────
+let mockPinEnabled = false;
+let mockPinHash = '';
+
+function isDevicePinAuthorized(req) {
+  if (!mockPinEnabled || !mockPinHash) return true;
+  const headerPin = req.headers['x-security-pin'];
+  const bodyPin = req.body && req.body.pin;
+  const pin = headerPin || bodyPin;
+  if (!pin) return false;
+  const hash = crypto.createHash('sha256').update(String(pin)).digest('hex');
+  return hash === mockPinHash;
+}
+
+app.get('/api/device/pin/status', (req, res) => {
+  return res.json({ ok: true, enabled: mockPinEnabled });
+});
+
+app.post('/api/device/pin/verify', (req, res) => {
+  const { pin } = req.body || {};
+  if (!mockPinEnabled || !mockPinHash) {
+    return res.json({ ok: true, valid: true, message: 'No PIN is currently configured.' });
+  }
+  const hash = crypto.createHash('sha256').update(String(pin || '')).digest('hex');
+  if (hash === mockPinHash) {
+    return res.json({ ok: true, valid: true });
+  }
+  return res.status(403).json({ ok: false, valid: false, error: 'Incorrect Security PIN.' });
+});
+
+app.post('/api/device/pin/set', (req, res) => {
+  const { current_pin, new_pin } = req.body || {};
+  if (mockPinEnabled && mockPinHash) {
+    const curHash = crypto.createHash('sha256').update(String(current_pin || '')).digest('hex');
+    if (curHash !== mockPinHash) {
+      return res.status(403).json({ ok: false, error: 'Current PIN is incorrect.' });
+    }
+  }
+  if (!new_pin || String(new_pin).length < 4 || String(new_pin).length > 8) {
+    return res.status(400).json({ ok: false, error: 'PIN must be between 4 and 8 characters.' });
+  }
+  mockPinHash = crypto.createHash('sha256').update(String(new_pin)).digest('hex');
+  mockPinEnabled = true;
+  return res.json({ ok: true, enabled: true, message: 'Security PIN set successfully.' });
+});
+
+app.post('/api/device/pin/disable', (req, res) => {
+  const { current_pin } = req.body || {};
+  if (mockPinEnabled && mockPinHash) {
+    const curHash = crypto.createHash('sha256').update(String(current_pin || '')).digest('hex');
+    if (curHash !== mockPinHash) {
+      return res.status(403).json({ ok: false, error: 'Current PIN is incorrect.' });
+    }
+  }
+  mockPinEnabled = false;
+  mockPinHash = '';
+  return res.json({ ok: true, enabled: false, message: 'Security PIN has been disabled.' });
+});
+
+// ── Mock Device Configuration Routes for Cloud / Development ─
+app.get('/api/device/config', (req, res) => {
+  return res.json({
+    ok: true,
+    name: 'Pen 1 Controller',
+    pen_name: 'Pen 1',
+    model: 'ESP32-S3-DevKitC-1',
+    ap_ssid: 'IOS-Setup-B3E2',
+    timezone_sec: 28800,
+    mac: 'A4CF12F8B3E2',
+    firmware: '2.1.0-cloud-sim',
+    heap_free: 184320,
+    flash_size: 8388608
+  });
+});
+
+app.post('/api/device/config', (req, res) => {
+  if (!isDevicePinAuthorized(req)) return res.status(403).json({ ok: false, error: 'Security PIN required or incorrect' });
+  const { ap_ssid, ap_password } = req.body || {};
+  const rebootRequired = !!(ap_ssid || ap_password);
+  return res.json({
+    ok: true,
+    reboot_required: rebootRequired,
+    message: rebootRequired
+      ? 'Settings saved. Hardware restart required to apply Access Point changes.'
+      : 'Device settings saved successfully.'
+  });
+});
+
+app.post('/api/device/reboot', (req, res) => {
+  if (!isDevicePinAuthorized(req)) return res.status(403).json({ ok: false, error: 'Security PIN required or incorrect' });
+  return res.json({ ok: true, message: 'Device reboot initiated.' });
+});
+
+app.post('/api/device/factory-reset', (req, res) => {
+  if (!isDevicePinAuthorized(req)) return res.status(403).json({ ok: false, error: 'Security PIN required or incorrect' });
+  const { confirmation_phrase } = req.body || {};
+  if (confirmation_phrase !== 'Yes, I would like to factory reset this device') {
+    return res.status(400).json({ ok: false, error: 'Confirmation phrase did not match.' });
+  }
+  mockPinEnabled = false;
+  mockPinHash = '';
+  return res.json({ ok: true, message: 'Factory reset successful.' });
+});
+
 app.get('/api/info', (req, res) => res.json({ mode: 'cloud', authRequired: true, reports: 'sqlite' }));
 
 app.post('/api/login', (req, res) => {
@@ -442,6 +593,25 @@ app.post('/api/users/:id/password', requireAuth, (req, res) => {
   }
 });
 
+
+// ── Account-Credential Device Binding (Phase 10) ─────────────
+app.post('/api/devices/bind', (req, res) => {
+  const { username, password, mac, pen_name } = req.body || {};
+  try {
+    const result = db.bindDeviceByCredentials({
+      username,
+      password,
+      mac,
+      penName: pen_name
+    });
+    db.logActivity('Info', `Device ${result.device_id} bound to account ${result.username} (${result.pen_name})`, null, result.account_id);
+    return res.status(200).json(result);
+  } catch (err) {
+    const status = err.status || 400;
+    return res.status(status).json({ ok: false, error: err.message || 'Binding failed' });
+  }
+});
+
 app.post('/api/devices', requireAuth, (req, res) => {
   const accountId = getReqAccountId(req);
   const { device_id, device_type, pen_name } = req.body || {};
@@ -481,7 +651,7 @@ app.get('/api/devices', requireAuth, (req, res) => {
     const allDevices = db.db.prepare('SELECT id, account_id, device_id, device_type, pen_name, registered_at FROM device_registry ORDER BY id ASC').all();
     return res.json({ ok: true, devices: allDevices });
   }
-  const devices = db.getDevicesByAccount(accountId);
+  const devices = (typeof db.getDevicesWithStatus === "function") ? db.getDevicesWithStatus(accountId) : db.getDevicesByAccount(accountId);
   return res.json({ ok: true, devices });
 });
 
@@ -1327,6 +1497,50 @@ app.get('/api/water/breakdown', requireAuth, (req, res) => {
 
    /api/schedules?type=clean
 */
+
+
+/* ============================================================
+   BIDIRECTIONAL ADDITIVE-ONLY ACCOUNTING SYNC (PHASE 14)
+   ============================================================ */
+
+app.post('/api/sync/schedules', requireDeviceAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
+  const deviceSchedules = Array.isArray(req.body) ? req.body : (req.body && req.body.schedules ? req.body.schedules : []);
+  const result = db.syncSchedulesAccounting(deviceSchedules, accountId);
+  return res.json({
+    ok: true,
+    added_to_cloud: result.added,
+    schedules: result.schedules
+  });
+});
+
+app.post('/api/sync/settings', requireDeviceAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
+  const { temp_threshold, mist_on_sec, mist_pause_sec, thi_normal, thi_stress, thi_extreme } = req.body || {};
+
+  if (typeof temp_threshold === 'number' && temp_threshold >= 20 && temp_threshold <= 50) {
+    db.setSetting('threshold', temp_threshold, accountId);
+  }
+  if (typeof mist_on_sec === 'number' || typeof mist_pause_sec === 'number') {
+    db.setOperationDurations({ mistOnSec: mist_on_sec, mistPauseSec: mist_pause_sec }, accountId);
+  }
+  if (typeof thi_normal === 'number' || typeof thi_stress === 'number' || typeof thi_extreme === 'number') {
+    db.setTHIThresholds({ normalMax: thi_normal, stressMax: thi_stress, extremeMax: thi_extreme }, accountId);
+  }
+
+  const curThreshold = parseFloat(db.getSetting('threshold', '32', accountId));
+  const curDurations = db.getOperationDurations(accountId);
+  const curThi = db.getTHIThresholds(accountId);
+
+  return res.json({
+    ok: true,
+    settings: {
+      threshold: curThreshold,
+      durations: curDurations,
+      thi: curThi
+    }
+  });
+});
 
 app.get('/api/schedules', (req, res) => {
   const accountId = getReqAccountId(req);

@@ -12,6 +12,7 @@
 #include <SD.h>
 #include <HTTPClient.h>
 #include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -45,6 +46,208 @@ ScheduleDiag scheduleDiag;
 
 #include "DHT.h"
 #include "secrets.h"
+
+// ============================================================
+// NVS DYNAMIC CONFIGURATION (Preferences)
+// ============================================================
+#ifndef DEFAULT_AP_PASSWORD
+#define DEFAULT_AP_PASSWORD "iossetup"
+#endif
+
+#ifndef DEFAULT_BACKEND_HOST
+#define DEFAULT_BACKEND_HOST "192.168.1.33"
+#endif
+
+#ifndef DEFAULT_BACKEND_PORT
+#define DEFAULT_BACKEND_PORT 3000
+#endif
+
+// Runtime variables populated from NVS
+String nvsWifiSsid = "";
+String nvsWifiPassword = "";
+
+// WiFi async connect state (for non-blocking FreeRTOS connect task)
+static volatile uint8_t wifiConnectState = 0; // 0=idle 1=connecting 2=connected 3=failed
+static String wifiConnectIp   = "";
+static String wifiConnectSsid = "";
+String nvsApSsid = "";
+String nvsApPassword = "";
+String nvsBackendHost = "";
+int    nvsBackendPort = 3000;
+bool   nvsUseHttps = false;
+
+String nvsDeviceName = "IOS Node";
+String nvsPenName = "Pen 1";
+String nvsDeviceModel = "ESP32-S3-DevKitC-1";
+String nvsDeviceToken = "";
+int    nvsTimezoneOffsetSec = 8 * 3600; // default UTC+8
+bool   nvsPinEnabled = false;
+String nvsPinHash = "";
+
+String getBackendBaseUrl() {
+    String proto = nvsUseHttps ? "https://" : "http://";
+    String url = proto + nvsBackendHost;
+    if ((nvsUseHttps && nvsBackendPort != 443) || (!nvsUseHttps && nvsBackendPort != 80 && nvsBackendPort > 0)) {
+        url += ":" + String(nvsBackendPort);
+    }
+    return url;
+}
+
+void loadNvsConfig() {
+    Preferences netPref;
+    if (netPref.begin("ios_net", true)) {
+        nvsWifiSsid     = netPref.getString("ssid", "");
+        nvsWifiPassword = netPref.getString("wifi_pass", "");
+        nvsApPassword   = netPref.getString("ap_pass", "");
+        nvsBackendHost  = netPref.getString("host", "");
+        nvsBackendPort  = netPref.getInt("port", 0);
+        nvsUseHttps     = netPref.getBool("use_https", false);
+        netPref.end();
+    }
+
+    Preferences devPref;
+    if (devPref.begin("ios_device", true)) {
+        nvsDeviceName        = devPref.getString("name", "IOS Node");
+        nvsPenName           = devPref.getString("pen_name", "Pen 1");
+        nvsDeviceModel       = devPref.getString("model", "ESP32-S3");
+        nvsApSsid            = devPref.getString("ap_ssid", "");
+        nvsDeviceToken       = devPref.getString("token", "");
+        nvsTimezoneOffsetSec = devPref.getInt("tz_sec", 8 * 3600);
+        nvsPinEnabled        = devPref.getBool("pin_enabled", false);
+        nvsPinHash           = devPref.getString("pin", "");
+        if (nvsPinHash.length() == 0) nvsPinEnabled = false;
+        devPref.end();
+    }
+
+    // Fallbacks from secrets.h if NVS is not yet configured
+    #ifdef WIFI_SSID
+    if (nvsWifiSsid.length() == 0 && strlen(WIFI_SSID) > 0) {
+        nvsWifiSsid = WIFI_SSID;
+    }
+    #endif
+
+    #ifdef WIFI_PASSWORD
+    if (nvsWifiPassword.length() == 0 && strlen(WIFI_PASSWORD) > 0) {
+        nvsWifiPassword = WIFI_PASSWORD;
+    }
+    #endif
+
+    #ifdef AP_PASSWORD
+    if (nvsApPassword.length() == 0 && strlen(AP_PASSWORD) > 0) {
+        nvsApPassword = AP_PASSWORD;
+    }
+    #endif
+    if (nvsApPassword.length() < 8) {
+        nvsApPassword = DEFAULT_AP_PASSWORD;
+    }
+
+    #ifdef BACKEND_HOST
+    if (nvsBackendHost.length() == 0 && strlen(BACKEND_HOST) > 0) {
+        nvsBackendHost = BACKEND_HOST;
+    }
+    #endif
+    if (nvsBackendHost.length() == 0) {
+        nvsBackendHost = DEFAULT_BACKEND_HOST;
+    }
+
+    #ifdef BACKEND_PORT
+    if (nvsBackendPort <= 0 && BACKEND_PORT > 0) {
+        nvsBackendPort = BACKEND_PORT;
+    }
+    #endif
+    if (nvsBackendPort <= 0) {
+        nvsBackendPort = DEFAULT_BACKEND_PORT;
+    }
+
+    #ifdef AUTH_TOKEN
+    if (nvsDeviceToken.length() == 0 && strlen(AUTH_TOKEN) > 0 && strcmp(AUTH_TOKEN, "replace-with-control-or-device-token") != 0) {
+        nvsDeviceToken = AUTH_TOKEN;
+    }
+    #endif
+
+    // SoftAP SSID fallback: "IOS-Setup-<last 4 hex digits of MAC>"
+    if (nvsApSsid.length() == 0) {
+        char macSuffix[8];
+        uint64_t mac = ESP.getEfuseMac();
+        snprintf(macSuffix, sizeof(macSuffix), "%04X", (uint16_t)(mac & 0xFFFF));
+        nvsApSsid = String("IOS-Setup-") + macSuffix;
+    }
+
+    Serial.printf("[NVS] Loaded config. AP SSID: %s, Backend: %s:%d, Token: %s\n",
+                  nvsApSsid.c_str(), nvsBackendHost.c_str(), nvsBackendPort,
+                  (nvsDeviceToken.length() > 0 ? "Configured" : "None"));
+}
+
+void saveNetConfig(const String &ssid, const String &pass, const String &apPass, const String &host, int port, bool useHttps) {
+    Preferences netPref;
+    if (netPref.begin("ios_net", false)) {
+        if (ssid.length() > 0) netPref.putString("ssid", ssid);
+        if (pass.length() > 0) netPref.putString("wifi_pass", pass);
+        if (apPass.length() > 0) netPref.putString("ap_pass", apPass);
+        if (host.length() > 0) netPref.putString("host", host);
+        if (port > 0) netPref.putInt("port", port);
+        netPref.putBool("use_https", useHttps);
+        netPref.end();
+    }
+}
+
+
+String hashPin(const String &pin) {
+    if (pin.length() == 0) return "";
+    unsigned char output[32];
+    mbedtls_sha256_ret((const unsigned char*)pin.c_str(), pin.length(), output, 0);
+    char hexBuf[65];
+    for (int i = 0; i < 32; i++) {
+        sprintf(&hexBuf[i*2], "%02x", output[i]);
+    }
+    hexBuf[64] = '\0';
+    return String(hexBuf);
+}
+
+void savePinConfig(bool enabled, const String &hash) {
+    Preferences devPref;
+    if (devPref.begin("ios_device", false)) {
+        devPref.putBool("pin_enabled", enabled);
+        devPref.putString("pin", hash);
+        devPref.end();
+    }
+    nvsPinEnabled = enabled;
+    nvsPinHash = hash;
+}
+
+bool isPinAuthorized(AsyncWebServerRequest *request, const JsonObject *obj = nullptr) {
+    if (!nvsPinEnabled || nvsPinHash.length() == 0) {
+        return true; // No PIN configured: open access
+    }
+    if (request->hasHeader("X-Security-PIN")) {
+        String headerPin = request->header("X-Security-PIN");
+        if (hashPin(headerPin) == nvsPinHash) {
+            return true;
+        }
+    }
+    if (obj != nullptr) {
+        if ((*obj)["pin"].is<const char*>()) {
+            String bodyPin = (*obj)["pin"].as<const char*>();
+            if (hashPin(bodyPin) == nvsPinHash) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void saveDeviceConfig(const String &name, const String &pen, const String &model, const String &apSsid, const String &token, int tzSec) {
+    Preferences devPref;
+    if (devPref.begin("ios_device", false)) {
+        if (name.length() > 0) devPref.putString("name", name);
+        if (pen.length() > 0) devPref.putString("pen_name", pen);
+        if (model.length() > 0) devPref.putString("model", model);
+        if (apSsid.length() > 0) devPref.putString("ap_ssid", apSsid);
+        if (token.length() > 0) devPref.putString("token", token);
+        if (tzSec != 0) devPref.putInt("tz_sec", tzSec);
+        devPref.end();
+    }
+}
 
 
 // ============================================================
@@ -95,7 +298,7 @@ bool rtcOk = false;
 bool rtcTimeValid = false;
 
 // RTC runs in UTC internally; convert to local timezone only for display
-const int LOCAL_TIMEZONE_OFFSET_SEC = 8 * 3600; // UTC+8 (Asia/Manila)
+#define LOCAL_TIMEZONE_OFFSET_SEC nvsTimezoneOffsetSec
 
 // SDA = GPIO 8
 // SCL = GPIO 9
@@ -637,6 +840,59 @@ void populateSdInfo(JsonObject sd) {
     }
 }
 
+
+// ============================================================
+// UNIFIED HTTP / HTTPS BACKEND CLIENT FOR FLY.IO & CLOUD
+// ============================================================
+class BackendHttpClient {
+private:
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
+    bool isSecure = false;
+
+public:
+    HTTPClient http;
+
+    bool begin(const String &url) {
+        isSecure = nvsUseHttps || url.startsWith("https://");
+        if (isSecure) {
+            secureClient.setInsecure();
+            return http.begin(secureClient, url);
+        } else {
+            return http.begin(plainClient, url);
+        }
+    }
+
+    void setTimeout(uint16_t timeoutMs) {
+        http.setTimeout(timeoutMs);
+    }
+
+    void addHeader(const String &name, const String &value) {
+        http.addHeader(name, value);
+    }
+
+    int GET() {
+        return http.GET();
+    }
+
+    int POST(const String &payload) {
+        return http.POST(payload);
+    }
+
+    String getString() {
+        return http.getString();
+    }
+
+    void end() {
+        http.end();
+        if (isSecure) {
+            secureClient.stop();
+        } else {
+            plainClient.stop();
+        }
+    }
+};
+
 bool sendDiagnosticsToBackend() {
     if (WiFi.status() != WL_CONNECTED || !backendOnline) {
         return false;
@@ -671,17 +927,19 @@ bool sendDiagnosticsToBackend() {
     String payload;
     serializeJson(doc, payload);
 
-    WiFiClient client;
-    HTTPClient http;
-    http.setTimeout(2500);
-    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/diagnostics";
-    if (!http.begin(client, url)) {
+    BackendHttpClient client;
+    client.setTimeout(2500);
+    String url = getBackendBaseUrl() + "/api/diagnostics";
+    if (!client.begin(url)) {
         return false;
     }
-    http.addHeader("Content-Type", "application/json");
-    int code = http.POST(payload);
+    if (nvsDeviceToken.length() > 0) {
+        client.addHeader("X-Auth-Token", nvsDeviceToken.c_str());
+    }
+    client.addHeader("Content-Type", "application/json");
+    int code = client.POST(payload);
     bool ok = (code == 200 || code == 201);
-    http.end();
+    client.end();
     if (ok) {
         Serial.println("Diagnostics: Sent hardware status & MicroSD report to Node backend.");
     }
@@ -885,20 +1143,19 @@ bool checkBackendHealth() {
         return false;
     }
 
-    WiFiClient client;
-    HTTPClient http;
-    http.setTimeout(1500); // 1.5s non-blocking timeout
+    BackendHttpClient client;
+    client.setTimeout(1500); // 1.5s non-blocking timeout
 
-    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/health";
-    if (!http.begin(client, url)) {
+    String url = getBackendBaseUrl() + "/api/health";
+    if (!client.begin(url)) {
         backendOnline = false;
         return false;
     }
 
-    int httpCode = http.GET();
+    int httpCode = client.GET();
     bool ok = false;
     if (httpCode == HTTP_CODE_OK) {
-        String payload = http.getString();
+        String payload = client.getString();
         JsonDocument response;
         if (!deserializeJson(response, payload) && response["ok"].as<bool>()) {
             ok = true;
@@ -918,7 +1175,7 @@ bool checkBackendHealth() {
             }
         }
     }
-    http.end();
+    client.end();
 
     if (ok != backendOnline) {
         backendOnline = ok;
@@ -1075,22 +1332,24 @@ bool sendTelemetryDirect(float temp, float hum, float thi,
     String payload;
     serializeJson(arr, payload);
 
-    WiFiClient client;
-    HTTPClient http;
-    http.setTimeout(2500);
-    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/readings/batch";
-    if (!http.begin(client, url)) {
+    BackendHttpClient client;
+    client.setTimeout(2500);
+    String url = getBackendBaseUrl() + "/api/readings/batch";
+    if (!client.begin(url)) {
         backendOnline = false;
         return false;
     }
-    http.addHeader("Content-Type", "application/json");
+    if (nvsDeviceToken.length() > 0) {
+        client.addHeader("X-Auth-Token", nvsDeviceToken.c_str());
+    }
+    client.addHeader("Content-Type", "application/json");
 
-    int code = http.POST(payload);
+    int code = client.POST(payload);
     bool success = false;
     if (code == 200 || code == 201) {
         backendOnline = true;
         JsonDocument acknowledgement;
-        bool parsed = !deserializeJson(acknowledgement, http.getString());
+        bool parsed = !deserializeJson(acknowledgement, client.getString());
         success = parsed && acknowledgement["ok"].as<bool>()
             && (acknowledgement["failed"] | 0) == 0;
         bool found = false;
@@ -1106,7 +1365,7 @@ bool sendTelemetryDirect(float temp, float hum, float thi,
         backendOnline = false;
         Serial.printf("Direct telemetry push failed (HTTP %d).\n", code);
     }
-    http.end();
+    client.end();
     return success;
 }
 
@@ -1204,20 +1463,22 @@ void syncBatch() {
     String payload;
     serializeJson(arr, payload);
 
-    WiFiClient client;
-    HTTPClient http;
-    http.setTimeout(3500);
-    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/readings/batch";
-    if (!http.begin(client, url)) {
+    BackendHttpClient client;
+    client.setTimeout(3500);
+    String url = getBackendBaseUrl() + "/api/readings/batch";
+    if (!client.begin(url)) {
         backendOnline = false;
         syncInProgress = false;
         return;
     }
-    http.addHeader("Content-Type", "application/json");
+    if (nvsDeviceToken.length() > 0) {
+        client.addHeader("X-Auth-Token", nvsDeviceToken.c_str());
+    }
+    client.addHeader("Content-Type", "application/json");
 
-    int code = http.POST(payload);
+    int code = client.POST(payload);
     if (code == 200 || code == 201) {
-        String resStr = http.getString();
+        String resStr = client.getString();
         JsonDocument resDoc;
         DeserializationError resErr = deserializeJson(resDoc, resStr);
 
@@ -1259,7 +1520,7 @@ void syncBatch() {
         Serial.printf("SYNC FAILED: HTTP %d. Pausing sync.\n", code);
         backendOnline = false;
     }
-    http.end();
+    client.end();
     syncInProgress = false;
 }
 
@@ -1590,25 +1851,167 @@ static void loadBackendSchedules() {
     }
 }
 
-static void fetchBackendSchedules() {
+
+static void fetchBackendSchedules();
+static void syncAccounting() {
     scheduleDiag.localCount = scheduleCount;
     if (!backendOnline || WiFi.status() != WL_CONNECTED) {
         scheduleDiag.lastPullOk = false;
         scheduleDiag.lastError = !backendOnline ? "backend_offline" : "wifi_disconnected";
         return;
     }
-    WiFiClient client;
-    HTTPClient http;
-    http.setTimeout(1500);
-    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/schedules?type=all";
-    if (!http.begin(client, url)) {
+
+    // 1. Build payload of all local schedules in schedules[]
+    JsonDocument outDoc;
+    JsonArray outArr = outDoc.to<JsonArray>();
+    for (uint8_t i = 0; i < scheduleCount; i++) {
+        scheduleToJson(outArr.add<JsonObject>(), schedules[i]);
+    }
+
+    String outPayload;
+    serializeJson(outDoc, outPayload);
+
+    BackendHttpClient client;
+    client.setTimeout(3500);
+    String syncUrl = getBackendBaseUrl() + "/api/sync/schedules";
+
+    if (!client.begin(syncUrl)) {
         scheduleDiag.lastPullOk = false;
         scheduleDiag.lastError = "http_begin_failed";
         return;
     }
-    int code = http.GET();
-    String payload = code == 200 ? http.getString() : "";
-    http.end();
+
+    if (nvsDeviceToken.length() > 0) {
+        client.addHeader("X-Auth-Token", nvsDeviceToken.c_str());
+        client.addHeader("X-Device-Token", nvsDeviceToken.c_str());
+    }
+    client.addHeader("Content-Type", "application/json");
+
+    int code = client.POST(outPayload);
+    String payload = (code == 200 || code == 201) ? client.getString() : "";
+    client.end();
+
+    if (code != 200 && code != 201) {
+        // Fallback to legacy GET /api/schedules?type=all if sync endpoint unavailable
+        BackendHttpClient getClient;
+        getClient.setTimeout(2000);
+        String getUrl = getBackendBaseUrl() + "/api/schedules?type=all";
+        if (getClient.begin(getUrl)) {
+            if (nvsDeviceToken.length() > 0) {
+                getClient.addHeader("X-Auth-Token", nvsDeviceToken.c_str());
+            }
+            code = getClient.GET();
+            if (code == 200) {
+                payload = getClient.getString();
+            }
+            getClient.end();
+        }
+    }
+
+    if (code != 200 && code != 201) {
+        scheduleDiag.lastPullOk = false;
+        scheduleDiag.lastError = String("http_") + code;
+        return;
+    }
+
+    scheduleDiag.lastPullOk = true;
+    scheduleDiag.lastPullMs = millis();
+    scheduleDiag.lastError = "none";
+
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err) {
+        scheduleDiag.lastPullOk = false;
+        scheduleDiag.lastError = "json_parse_failed";
+        return;
+    }
+
+    JsonArray cloudArr;
+    if (doc.is<JsonArray>()) {
+        cloudArr = doc.as<JsonArray>();
+    } else if (doc["schedules"].is<JsonArray>()) {
+        cloudArr = doc["schedules"].as<JsonArray>();
+    } else {
+        return;
+    }
+
+    // Additive-only accounting: compare cloud items against local schedules
+    bool localModified = false;
+    for (JsonObject cSched : cloudArr) {
+        if (!validateScheduleJson(cSched, false)) continue;
+        String cId = cSched["id"].as<String>();
+        const char* cType = cSched["type"] | "";
+        const char* cTime = cSched["time"] | "";
+
+        bool exists = false;
+        for (uint8_t i = 0; i < scheduleCount; i++) {
+            if (cId.length() > 0 && strcmp(schedules[i].id, cId.c_str()) == 0) {
+                exists = true;
+                break;
+            }
+            if (strcmp(schedules[i].type, cType) == 0 && strcmp(schedules[i].time, cTime) == 0) {
+                exists = true;
+                break;
+            }
+        }
+
+        if (!exists && scheduleCount < MAX_SCHEDULES) {
+            Schedule &s = schedules[scheduleCount++];
+            strlcpy(s.id, cId.c_str(), sizeof(s.id));
+            strlcpy(s.type, cType, sizeof(s.type));
+            strlcpy(s.label, cSched["label"] | "", sizeof(s.label));
+            strlcpy(s.time, cTime, sizeof(s.time));
+            s.duration = cSched["duration"].as<uint16_t>();
+            s.active = cSched["active"].isNull() ? true : cSched["active"].as<bool>();
+            s.dayCount = 0;
+            if (cSched["days"].is<JsonArray>()) {
+                for (const char* d : cSched["days"].as<JsonArray>()) {
+                    if (s.dayCount < 7) {
+                        strlcpy(s.days[s.dayCount++], d, sizeof(s.days[0]));
+                    }
+                }
+            }
+            localModified = true;
+        }
+    }
+
+    if (localModified) {
+        saveSchedules();
+        Serial.printf("[Accounting] Synced schedules: added missing cloud items to local flash. Total: %u\n", scheduleCount);
+    }
+
+    // Keep backendSchedules cache populated
+    importBackendSchedules(cloudArr);
+    backendScheduleSnapshot = payload;
+    scheduleDiag.backendCount = backendScheduleCount;
+    scheduleDiag.localCount = scheduleCount;
+}
+
+static void fetchBackendSchedules() {
+    syncAccounting();
+}
+
+static void oldFetchBackendSchedules() {
+    scheduleDiag.localCount = scheduleCount;
+    if (!backendOnline || WiFi.status() != WL_CONNECTED) {
+        scheduleDiag.lastPullOk = false;
+        scheduleDiag.lastError = !backendOnline ? "backend_offline" : "wifi_disconnected";
+        return;
+    }
+    BackendHttpClient client;
+    client.setTimeout(1500);
+    String url = getBackendBaseUrl() + "/api/schedules?type=all";
+    if (!client.begin(url)) {
+        scheduleDiag.lastPullOk = false;
+        scheduleDiag.lastError = "http_begin_failed";
+        return;
+    }
+    if (nvsDeviceToken.length() > 0) {
+        client.addHeader("X-Auth-Token", nvsDeviceToken.c_str());
+    }
+    int code = client.GET();
+    String payload = code == 200 ? client.getString() : "";
+    client.end();
 
     if (code != 200) {
         scheduleDiag.lastPullOk = false;
@@ -1847,20 +2250,9 @@ static String extractAuthToken(AsyncWebServerRequest *request) {
 }
 
 bool isAuthorized(AsyncWebServerRequest *request) {
-    String token = extractAuthToken(request);
-    if (token.length() == 0) {
-        return false;
-    }
-
-    if (isValidAdminSession(token)) {
-        return true;
-    }
-
-    if (AUTH_TOKEN && strlen(AUTH_TOKEN) > 0 && token.equals(AUTH_TOKEN)) {
-        return true;
-    }
-
-    return false;
+    // In standalone AP mode, the AP Wi-Fi password acts as the security boundary.
+    // Local web requests do not require a separate login session.
+    return true;
 }
 
 void sendUnauthorized(AsyncWebServerRequest *request) {
@@ -2579,20 +2971,19 @@ static void pollBackendRelayCommand()
 {
     if (!backendOnline || WiFi.status() != WL_CONNECTED) return;
 
-    WiFiClient client;
-    HTTPClient http;
-    http.setTimeout(1000); // Short non-blocking timeout
-    String url = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/relay/command";
-    if (!http.begin(client, url)) return;
+    BackendHttpClient client;
+    client.setTimeout(1000); // Short non-blocking timeout
+    String url = getBackendBaseUrl() + "/api/relay/command";
+    if (!client.begin(url)) return;
 
-    if (AUTH_TOKEN && strlen(AUTH_TOKEN) > 0) {
-        http.addHeader("X-Auth-Token", AUTH_TOKEN);
+    if (nvsDeviceToken.length() > 0) {
+        client.addHeader("X-Auth-Token", nvsDeviceToken.c_str());
     }
-    http.addHeader("Content-Type", "application/json");
+    client.addHeader("Content-Type", "application/json");
 
-    int code = http.GET();
-    String payload = (code == 200) ? http.getString() : "";
-    http.end();
+    int code = client.GET();
+    String payload = (code == 200) ? client.getString() : "";
+    client.end();
 
     if (code != 200 || payload.length() == 0) return;
 
@@ -2645,15 +3036,14 @@ static void pollBackendRelayCommand()
     }
 
     // Send ACK to Node to clear pendingRelayCommand and confirm actuation state
-    WiFiClient ackClient;
-    HTTPClient ackHttp;
-    ackHttp.setTimeout(1000);
-    String ackUrl = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT + "/api/relay/ack";
-    if (ackHttp.begin(ackClient, ackUrl)) {
-        if (AUTH_TOKEN && strlen(AUTH_TOKEN) > 0) {
-            ackHttp.addHeader("X-Auth-Token", AUTH_TOKEN);
+    BackendHttpClient ackClient;
+    ackClient.setTimeout(1000);
+    String ackUrl = getBackendBaseUrl() + "/api/relay/ack";
+    if (ackClient.begin(ackUrl)) {
+        if (nvsDeviceToken.length() > 0) {
+            ackClient.addHeader("X-Auth-Token", nvsDeviceToken.c_str());
         }
-        ackHttp.addHeader("Content-Type", "application/json");
+        ackClient.addHeader("Content-Type", "application/json");
 
         JsonDocument ackDoc;
         ackDoc["command"] = cmd;
@@ -2664,13 +3054,13 @@ static void pollBackendRelayCommand()
 
         String ackPayload;
         serializeJson(ackDoc, ackPayload);
-        int ackCode = ackHttp.POST(ackPayload);
+        int ackCode = ackClient.POST(ackPayload);
         if (ackCode == 200 || ackCode == 201) {
             Serial.printf("Relay: ACK sent to backend (%s)\n", statusStr);
         } else {
             Serial.printf("Relay: ACK failed (HTTP %d)\n", ackCode);
         }
-        ackHttp.end();
+        ackClient.end();
     }
 }
 
@@ -2683,21 +3073,43 @@ void setupWiFi()
     // STA + AP at the same time
     WiFi.mode(WIFI_AP_STA);
 
-    // Start ESP32 Access Point
-    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    // Register event handler to output detailed connection diagnostic logs
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+        switch (event) {
+            case ARDUINO_EVENT_WIFI_STA_START:
+                Serial.println("[WiFi] STA interface started");
+                break;
+            case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+                Serial.println("[WiFi] Associated with AP successfully");
+                break;
+            case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+                Serial.printf("[WiFi] Obtained IP address: %s\n", WiFi.localIP().toString().c_str());
+                break;
+            case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+                Serial.printf("[WiFi] Disconnected! Reason code: %d\n", info.wifi_sta_disconnected.reason);
+                break;
+            default:
+                break;
+        }
+    });
+
+    // Start ESP32 Access Point with NVS-configured SSID and password
+    WiFi.softAP(nvsApSsid.c_str(), nvsApPassword.c_str());
 
     // Start Captive Portal DNS server (redirects all domains to AP IP)
     dnsServer.start(53, "*", WiFi.softAPIP());
 
-    // Connect to router
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    // Connect to router if SSID is configured
+    if (nvsWifiSsid.length() > 0) {
+        Serial.printf("[WiFi] Connecting to %s...\n", nvsWifiSsid.c_str());
+        WiFi.begin(nvsWifiSsid.c_str(), nvsWifiPassword.c_str());
 
-    unsigned long startTime = millis();
-
-    while (WiFi.status() != WL_CONNECTED &&
-           millis() - startTime < 15000)
-    {
-        delay(500);
+        unsigned long startTime = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - startTime < 15000) {
+            delay(500);
+        }
+    } else {
+        Serial.println("[WiFi] No Wi-Fi SSID configured in NVS. Running in AP provisioning mode.");
     }
 }
 
@@ -2714,13 +3126,19 @@ void reconnectWiFi()
     }
     lastWiFiCheck = millis();
 
-    if (WiFi.status() == WL_CONNECTED)
+    // Guard: Do not interrupt ongoing manual connection attempt from web dashboard
+    if (wifiConnectState == 1)
+    {
+        return;
+    }
+
+    if (WiFi.status() == WL_CONNECTED || nvsWifiSsid.length() == 0)
     {
         return;
     }
 
     WiFi.disconnect();
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.begin(nvsWifiSsid.c_str(), nvsWifiPassword.c_str());
 }
 
 // ============================================================
@@ -3448,6 +3866,597 @@ void setupAuxRoutes(AsyncWebServer &srv) {
     });
 }
 
+// ============================================================
+// WI-FI MANAGER ROUTES (Phone-style Scan & Connect)
+// ============================================================
+// ─── WiFi connect FreeRTOS task ─────────────────────────────────────────────
+struct WifiConnectParams {
+    char ssid[64];
+    char pass[64];
+};
+
+static void wifiConnectTask(void *pvParam) {
+    WifiConnectParams *p = (WifiConnectParams *)pvParam;
+    wifiConnectState = 1; // connecting
+    wifiConnectIp    = "";
+
+    WiFi.disconnect(false);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    WiFi.begin(p->ssid, p->pass);
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        nvsWifiSsid     = String(p->ssid);
+        nvsWifiPassword = String(p->pass);
+        saveNetConfig(nvsWifiSsid, nvsWifiPassword, nvsApPassword,
+                      nvsBackendHost, nvsBackendPort, nvsUseHttps);
+        wifiConnectIp    = WiFi.localIP().toString();
+        wifiConnectSsid  = nvsWifiSsid;
+        wifiConnectState = 2; // connected
+        Serial.printf("[WiFi] Connected to %s — IP %s\n",
+                      p->ssid, wifiConnectIp.c_str());
+    } else {
+        wifiConnectState = 3; // failed
+        Serial.printf("[WiFi] Connection to %s timed out\n", p->ssid);
+        // Restore old STA connection if one existed
+        if (nvsWifiSsid.length() > 0) {
+            WiFi.begin(nvsWifiSsid.c_str(), nvsWifiPassword.c_str());
+        }
+    }
+    free(p);
+    vTaskDelete(NULL);
+}
+
+void setupWifiRoutes(AsyncWebServer &srv) {
+    // GET /api/wifi/status
+    srv.on("/api/wifi/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        bool isConnected = (WiFi.status() == WL_CONNECTED);
+        doc["ok"]        = true;
+        doc["connected"] = isConnected;
+        doc["status"]    = isConnected ? "connected" : "disconnected";
+        doc["ssid"]      = isConnected ? WiFi.SSID() : (nvsWifiSsid.length() > 0 ? nvsWifiSsid : "");
+        doc["ip"]        = isConnected ? WiFi.localIP().toString() : "";
+        doc["rssi"]      = isConnected ? WiFi.RSSI() : 0;
+        doc["ap_ssid"]   = nvsApSsid;
+        doc["ap_ip"]     = WiFi.softAPIP().toString();
+        char macBuf[24];
+        snprintf(macBuf, sizeof(macBuf), "%012llX", (unsigned long long)ESP.getEfuseMac());
+        doc["mac"] = macBuf;
+        String payload;
+        serializeJson(doc, payload);
+        request->send(200, "application/json", payload);
+    });
+
+    // GET /api/wifi/scan — triggers an async scan and returns 202, client polls /api/wifi/scan/results
+    srv.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *request) {
+        int scanStatus = WiFi.scanComplete();
+        if (scanStatus == WIFI_SCAN_RUNNING) {
+            request->send(202, "application/json", "{\"ok\":true,\"scanning\":true,\"message\":\"Scan in progress, poll /api/wifi/scan/results\"}");
+            return;
+        }
+        // Ensure WiFi is in AP_STA mode so scanning works while running SoftAP
+        if ((WiFi.getMode() & WIFI_MODE_STA) == 0) {
+            WiFi.mode(WIFI_AP_STA);
+        }
+        WiFi.scanDelete();
+        // passive scan = false, show_hidden = true, channel = 0 (all 14 channels)
+        WiFi.scanNetworks(true /*async*/, true /*show_hidden*/, false /*passive*/, 300 /*ms_per_chan*/, 0 /*all chan*/);
+        request->send(202, "application/json", "{\"ok\":true,\"scanning\":true,\"message\":\"Scan started, poll /api/wifi/scan/results\"}");
+    });
+
+    // GET /api/wifi/scan/results — returns results when scan complete, or scanning status
+    srv.on("/api/wifi/scan/results", HTTP_GET, [](AsyncWebServerRequest *request) {
+        int n = WiFi.scanComplete();
+        JsonDocument doc;
+
+        if (n == WIFI_SCAN_RUNNING) {
+            doc["ok"]       = true;
+            doc["scanning"] = true;
+            doc["ready"]    = false;
+            String payload;
+            serializeJson(doc, payload);
+            request->send(200, "application/json", payload);
+            return;
+        }
+        if (n == WIFI_SCAN_FAILED || n < 0) {
+            doc["ok"]       = false;
+            doc["scanning"] = false;
+            doc["ready"]    = true;
+            doc["error"]    = "Scan failed or not started";
+            String payload;
+            serializeJson(doc, payload);
+            request->send(200, "application/json", payload);
+            return;
+        }
+
+        // Results are ready
+        doc["ok"]       = true;
+        doc["scanning"] = false;
+        doc["ready"]    = true;
+        JsonArray arr = doc["networks"].to<JsonArray>();
+
+        for (int i = 0; i < n; i++) {
+            String ssid = WiFi.SSID(i);
+            if (ssid.length() == 0) continue;
+
+            int32_t rssi         = WiFi.RSSI(i);
+            wifi_auth_mode_t auth = WiFi.encryptionType(i);
+            bool secure          = (auth != WIFI_AUTH_OPEN);
+
+            // Deduplicate by SSID (keep strongest signal)
+            bool exists = false;
+            for (JsonObject item : arr) {
+                if (item["ssid"].as<String>() == ssid) {
+                    exists = true;
+                    if (rssi > item["rssi"].as<int>()) item["rssi"] = rssi;
+                    break;
+                }
+            }
+            if (!exists) {
+                JsonObject net  = arr.add<JsonObject>();
+                net["ssid"]     = ssid;
+                net["rssi"]     = rssi;
+                net["secure"]   = secure;
+                const char* authStr = "Open";
+                switch (auth) {
+                    case WIFI_AUTH_WEP:            authStr = "WEP"; break;
+                    case WIFI_AUTH_WPA_PSK:        authStr = "WPA"; break;
+                    case WIFI_AUTH_WPA2_PSK:       authStr = "WPA2"; break;
+                    case WIFI_AUTH_WPA_WPA2_PSK:   authStr = "WPA/WPA2"; break;
+                    case WIFI_AUTH_WPA2_ENTERPRISE: authStr = "WPA2-Enterprise"; break;
+                    case WIFI_AUTH_WPA3_PSK:       authStr = "WPA3"; break;
+                    case WIFI_AUTH_WPA2_WPA3_PSK:  authStr = "WPA2/WPA3"; break;
+                    default: authStr = secure ? "Secure" : "Open"; break;
+                }
+                net["auth"] = authStr;
+            }
+        }
+        doc["count"] = arr.size();
+        String payload;
+        serializeJson(doc, payload);
+        request->send(200, "application/json", payload);
+    });
+
+    // POST /api/wifi/connect {ssid, password} — returns 202 immediately, spawns FreeRTOS task
+    AsyncCallbackJsonWebHandler *connectWifiHandler = new AsyncCallbackJsonWebHandler("/api/wifi/connect",
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!json.is<JsonObject>()) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"Expected JSON object with ssid and password\"}");
+                return;
+            }
+            JsonObject obj        = json.as<JsonObject>();
+            const char* reqSsid   = obj["ssid"]     | "";
+            const char* reqPass   = obj["password"]  | "";
+
+            if (!isPinAuthorized(request, &obj)) {
+                request->send(403, "application/json", "{\"ok\":false,\"error\":\"Security PIN required or incorrect\"}");
+                return;
+            }
+            if (strlen(reqSsid) == 0) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"SSID cannot be empty\"}");
+                return;
+            }
+            if (wifiConnectState == 1) {
+                request->send(409, "application/json", "{\"ok\":false,\"error\":\"A connection attempt is already in progress\"}");
+                return;
+            }
+
+            // Reset state and launch background task
+            wifiConnectState = 1;
+            wifiConnectIp    = "";
+            wifiConnectSsid  = String(reqSsid);
+
+            WifiConnectParams *p = (WifiConnectParams *)malloc(sizeof(WifiConnectParams));
+            if (!p) {
+                wifiConnectState = 3;
+                request->send(500, "application/json", "{\"ok\":false,\"error\":\"Out of memory\"}");
+                return;
+            }
+            strlcpy(p->ssid, reqSsid, sizeof(p->ssid));
+            strlcpy(p->pass, reqPass, sizeof(p->pass));
+
+            BaseType_t created = xTaskCreate(
+                wifiConnectTask, "wifiConnect", 4096, p, 1, NULL
+            );
+            if (created != pdPASS) {
+                free(p);
+                wifiConnectState = 0;
+                request->send(500, "application/json", "{\"ok\":false,\"error\":\"Failed to start connection task\"}");
+                return;
+            }
+
+            Serial.printf("[WiFi] Connection task started for SSID: %s\n", reqSsid);
+            JsonDocument resp;
+            resp["ok"]      = true;
+            resp["status"]  = "connecting";
+            resp["ssid"]    = reqSsid;
+            resp["message"] = "Connection started, poll /api/wifi/connect/status";
+            String payload;
+            serializeJson(resp, payload);
+            request->send(202, "application/json", payload);
+        });
+    connectWifiHandler->setMethod(HTTP_POST);
+    srv.addHandler(connectWifiHandler);
+
+    // GET /api/wifi/connect/status — poll this after POSTing to /api/wifi/connect
+    srv.on("/api/wifi/connect/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        uint8_t state = wifiConnectState;
+        if (state == 0) {
+            doc["ok"]     = true;
+            doc["status"] = "idle";
+        } else if (state == 1) {
+            doc["ok"]     = true;
+            doc["status"] = "connecting";
+        } else if (state == 2) {
+            doc["ok"]     = true;
+            doc["status"] = "connected";
+            doc["ssid"]   = wifiConnectSsid;
+            doc["ip"]     = wifiConnectIp;
+            doc["rssi"]   = WiFi.RSSI();
+            wifiConnectState = 0; // reset after client reads it
+        } else {
+            doc["ok"]     = false;
+            doc["status"] = "failed";
+            doc["error"]  = "Failed to connect. Check password and try again.";
+            wifiConnectState = 0; // reset after client reads it
+        }
+        String payload;
+        serializeJson(doc, payload);
+        request->send(200, "application/json", payload);
+    });
+
+    // POST /api/wifi/disconnect
+    srv.on("/api/wifi/disconnect", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (!isPinAuthorized(request)) {
+            request->send(403, "application/json", "{\"ok\":false,\"error\":\"Security PIN required or incorrect\"}");
+            return;
+        }
+        WiFi.disconnect();
+        nvsWifiSsid = "";
+        nvsWifiPassword = "";
+        saveNetConfig(nvsWifiSsid, nvsWifiPassword, nvsApPassword, nvsBackendHost, nvsBackendPort, nvsUseHttps);
+        request->send(200, "application/json", "{\"ok\":true,\"status\":\"disconnected\"}");
+    });
+}
+
+// ============================================================
+// FACTORY RESET & DEVICE CONFIGURATION ROUTES
+// ============================================================
+void factoryResetAll() {
+    Preferences p;
+    if (p.begin("ios_net", false)) { p.clear(); p.end(); }
+    if (p.begin("ios_device", false)) { p.clear(); p.end(); }
+    if (p.begin("ios_settings", false)) { p.clear(); p.end(); }
+    if (p.begin("ios_water", false)) { p.clear(); p.end(); }
+    nvsPinEnabled = false;
+    nvsPinHash = "";
+    Serial.println("[System] NVS factory reset executed. All namespaces cleared.");
+}
+
+void setupDeviceRoutes(AsyncWebServer &srv) {
+    
+    // GET /api/device/pin/status
+    srv.on("/api/device/pin/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        doc["ok"] = true;
+        doc["enabled"] = nvsPinEnabled;
+        String out;
+        serializeJson(doc, out);
+        request->send(200, "application/json", out);
+    });
+
+    // POST /api/device/pin/verify {"pin":"..."}
+    AsyncCallbackJsonWebHandler *pinVerifyHandler = new AsyncCallbackJsonWebHandler("/api/device/pin/verify",
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+            JsonObject obj = json.as<JsonObject>();
+            const char* pin = obj["pin"] | "";
+            if (!nvsPinEnabled || nvsPinHash.length() == 0) {
+                request->send(200, "application/json", "{\"ok\":true,\"valid\":true,\"message\":\"No PIN configured\"}");
+                return;
+            }
+            if (hashPin(String(pin)) == nvsPinHash) {
+                request->send(200, "application/json", "{\"ok\":true,\"valid\":true}");
+            } else {
+                request->send(403, "application/json", "{\"ok\":false,\"valid\":false,\"error\":\"Incorrect Security PIN\"}");
+            }
+        });
+    pinVerifyHandler->setMethod(HTTP_POST);
+    srv.addHandler(pinVerifyHandler);
+
+    // POST /api/device/pin/set {"current_pin":"...", "new_pin":"..."}
+    AsyncCallbackJsonWebHandler *pinSetHandler = new AsyncCallbackJsonWebHandler("/api/device/pin/set",
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+            JsonObject obj = json.as<JsonObject>();
+            const char* cur = obj["current_pin"] | "";
+            const char* nw = obj["new_pin"] | "";
+
+            if (nvsPinEnabled && nvsPinHash.length() > 0) {
+                if (hashPin(String(cur)) != nvsPinHash) {
+                    request->send(403, "application/json", "{\"ok\":false,\"error\":\"Current PIN is incorrect\"}");
+                    return;
+                }
+            }
+
+            String newPinStr = String(nw);
+            if (newPinStr.length() < 4 || newPinStr.length() > 8) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"PIN must be between 4 and 8 characters\"}");
+                return;
+            }
+
+            String h = hashPin(newPinStr);
+            savePinConfig(true, h);
+            request->send(200, "application/json", "{\"ok\":true,\"enabled\":true,\"message\":\"Security PIN set successfully\"}");
+        });
+    pinSetHandler->setMethod(HTTP_POST);
+    srv.addHandler(pinSetHandler);
+
+    // POST /api/device/pin/disable {"current_pin":"..."}
+    AsyncCallbackJsonWebHandler *pinDisableHandler = new AsyncCallbackJsonWebHandler("/api/device/pin/disable",
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+            JsonObject obj = json.as<JsonObject>();
+            const char* cur = obj["current_pin"] | "";
+
+            if (nvsPinEnabled && nvsPinHash.length() > 0) {
+                if (hashPin(String(cur)) != nvsPinHash) {
+                    request->send(403, "application/json", "{\"ok\":false,\"error\":\"Current PIN is incorrect\"}");
+                    return;
+                }
+            }
+
+            savePinConfig(false, "");
+            request->send(200, "application/json", "{\"ok\":true,\"enabled\":false,\"message\":\"Security PIN has been disabled\"}");
+        });
+    pinDisableHandler->setMethod(HTTP_POST);
+    srv.addHandler(pinDisableHandler);
+
+    // GET /api/device/config
+    srv.on("/api/device/config", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument doc;
+        doc["ok"] = true;
+        doc["name"] = nvsDeviceName;
+        doc["pen_name"] = nvsPenName;
+        doc["model"] = nvsDeviceModel;
+        doc["ap_ssid"] = nvsApSsid;
+        doc["timezone_sec"] = nvsTimezoneOffsetSec;
+        char macBuf[24];
+        snprintf(macBuf, sizeof(macBuf), "%012llX", (unsigned long long)ESP.getEfuseMac());
+        doc["mac"] = macBuf;
+        doc["firmware"] = "2.1.0-nvs";
+        doc["heap_free"] = ESP.getFreeHeap();
+        doc["flash_size"] = ESP.getFlashChipSize();
+        String payload;
+        serializeJson(doc, payload);
+        request->send(200, "application/json", payload);
+    });
+
+    // POST /api/device/config
+    AsyncCallbackJsonWebHandler *postDeviceConfigHandler = new AsyncCallbackJsonWebHandler("/api/device/config",
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!json.is<JsonObject>()) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"Expected JSON object\"}");
+                return;
+            }
+            JsonObject obj = json.as<JsonObject>();
+            if (!isPinAuthorized(request, &obj)) {
+                request->send(403, "application/json", "{\"ok\":false,\"error\":\"Security PIN required or incorrect\"}");
+                return;
+            }
+            bool rebootRequired = false;
+
+            if (obj["name"].is<const char*>()) {
+                nvsDeviceName = obj["name"].as<String>();
+            }
+            if (obj["pen_name"].is<const char*>()) {
+                nvsPenName = obj["pen_name"].as<String>();
+            }
+            if (obj["model"].is<const char*>()) {
+                nvsDeviceModel = obj["model"].as<String>();
+            }
+            if (obj["timezone_sec"].is<int>()) {
+                nvsTimezoneOffsetSec = obj["timezone_sec"].as<int>();
+            }
+
+            if (obj["ap_ssid"].is<const char*>()) {
+                String newAp = obj["ap_ssid"].as<String>();
+                if (newAp.length() >= 2 && newAp != nvsApSsid) {
+                    nvsApSsid = newAp;
+                    rebootRequired = true;
+                }
+            }
+
+            if (obj["ap_password"].is<const char*>()) {
+                String newApPass = obj["ap_password"].as<String>();
+                if (newApPass.length() >= 8 && newApPass != nvsApPassword) {
+                    nvsApPassword = newApPass;
+                    rebootRequired = true;
+                }
+            }
+
+            saveDeviceConfig(nvsDeviceName, nvsPenName, nvsDeviceModel, nvsApSsid, nvsDeviceToken, nvsTimezoneOffsetSec);
+            saveNetConfig(nvsWifiSsid, nvsWifiPassword, nvsApPassword, nvsBackendHost, nvsBackendPort, nvsUseHttps);
+
+            JsonDocument resp;
+            resp["ok"] = true;
+            resp["reboot_required"] = rebootRequired;
+            resp["message"] = rebootRequired
+                ? "Settings saved. Hardware restart required to apply Access Point changes."
+                : "Device settings saved successfully.";
+            String payload;
+            serializeJson(resp, payload);
+            request->send(200, "application/json", payload);
+        });
+    postDeviceConfigHandler->setMethod(HTTP_POST);
+    srv.addHandler(postDeviceConfigHandler);
+
+    // POST /api/device/reboot
+    
+    // POST /api/device/bind {"username":"...", "password":"...", "pen_name":"...", "backend_url":"..."}
+    AsyncCallbackJsonWebHandler *bindDeviceHandler = new AsyncCallbackJsonWebHandler("/api/device/bind",
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!json.is<JsonObject>()) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"Expected JSON object\"}");
+                return;
+            }
+            JsonObject obj = json.as<JsonObject>();
+            if (!isPinAuthorized(request, &obj)) {
+                request->send(403, "application/json", "{\"ok\":false,\"error\":\"Security PIN required or incorrect\"}");
+                return;
+            }
+            const char* user = obj["username"] | "";
+            const char* pass = obj["password"] | "";
+            const char* pen = obj["pen_name"] | "";
+            const char* bUrl = obj["backend_url"] | "";
+
+            if (strlen(user) == 0 || strlen(pass) == 0) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"Username and password are required\"}");
+                return;
+            }
+
+            if (WiFi.status() != WL_CONNECTED) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"ESP32 is not connected to Wi-Fi. Please connect to Wi-Fi first in Network Settings.\"}");
+                return;
+            }
+
+            if (strlen(bUrl) > 0) {
+                String urlStr = String(bUrl);
+                bool isHttps = urlStr.startsWith("https://");
+                urlStr.replace("https://", "");
+                urlStr.replace("http://", "");
+                int slashIdx = urlStr.indexOf('/');
+                if (slashIdx >= 0) urlStr = urlStr.substring(0, slashIdx);
+                int colonIdx = urlStr.indexOf(':');
+                if (colonIdx >= 0) {
+                    nvsBackendHost = urlStr.substring(0, colonIdx);
+                    nvsBackendPort = urlStr.substring(colonIdx + 1).toInt();
+                } else {
+                    nvsBackendHost = urlStr;
+                    nvsBackendPort = isHttps ? 443 : 80;
+                }
+                nvsUseHttps = isHttps;
+            }
+
+            char macBuf[24];
+            snprintf(macBuf, sizeof(macBuf), "%012llX", (unsigned long long)ESP.getEfuseMac());
+
+            JsonDocument bindDoc;
+            bindDoc["username"] = user;
+            bindDoc["password"] = pass;
+            bindDoc["mac"] = macBuf;
+            if (strlen(pen) > 0) {
+                bindDoc["pen_name"] = pen;
+            } else {
+                bindDoc["pen_name"] = nvsPenName;
+            }
+
+            String bindPayload;
+            serializeJson(bindDoc, bindPayload);
+
+            BackendHttpClient client;
+            client.setTimeout(6000);
+            String targetUrl = getBackendBaseUrl() + "/api/devices/bind";
+
+            Serial.printf("[Cloud] Contacting %s to bind device (TLS/HTTPS ready)...\n", targetUrl.c_str());
+
+            if (!client.begin(targetUrl)) {
+                request->send(502, "application/json", "{\"ok\":false,\"error\":\"Could not reach cloud server at " + targetUrl + "\"}");
+                return;
+            }
+
+            client.addHeader("Content-Type", "application/json");
+            int httpCode = client.POST(bindPayload);
+            String responseStr = client.getString();
+            client.end();
+
+            if (httpCode == 200 || httpCode == 201) {
+                JsonDocument respDoc;
+                DeserializationError dErr = deserializeJson(respDoc, responseStr);
+                if (!dErr && respDoc["ok"].as<bool>() && respDoc["token"].is<const char*>()) {
+                    String token = respDoc["token"].as<String>();
+                    nvsDeviceToken = token;
+                    if (strlen(pen) > 0) nvsPenName = String(pen);
+
+                    saveDeviceConfig(nvsDeviceName, nvsPenName, nvsDeviceModel, nvsApSsid, nvsDeviceToken, nvsTimezoneOffsetSec);
+                    saveNetConfig(nvsWifiSsid, nvsWifiPassword, nvsApPassword, nvsBackendHost, nvsBackendPort, nvsUseHttps);
+
+                    Serial.printf("[Cloud] Device successfully bound to user %s! Token saved to NVS.\n", user);
+
+                    JsonDocument successDoc;
+                    successDoc["ok"] = true;
+                    successDoc["message"] = "Device successfully linked to account!";
+                    successDoc["username"] = user;
+                    successDoc["pen_name"] = nvsPenName;
+                    successDoc["mac"] = macBuf;
+                    String sPayload;
+                    serializeJson(successDoc, sPayload);
+                    request->send(200, "application/json", sPayload);
+                    return;
+                }
+            }
+
+            JsonDocument errDoc;
+            deserializeJson(errDoc, responseStr);
+            String errMsg = errDoc["error"] | "Cloud account binding rejected. Verify credentials.";
+            request->send(400, "application/json", "{\"ok\":false,\"error\":\"" + errMsg + "\"}");
+        });
+    bindDeviceHandler->setMethod(HTTP_POST);
+    srv.addHandler(bindDeviceHandler);
+
+    // POST /api/device/unbind
+    srv.on("/api/device/unbind", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (!isPinAuthorized(request)) {
+            request->send(403, "application/json", "{\"ok\":false,\"error\":\"Security PIN required or incorrect\"}");
+            return;
+        }
+        nvsDeviceToken = "";
+        saveDeviceConfig(nvsDeviceName, nvsPenName, nvsDeviceModel, nvsApSsid, nvsDeviceToken, nvsTimezoneOffsetSec);
+        request->send(200, "application/json", "{\"ok\":true,\"message\":\"Device unlinked from cloud account.\"}");
+    });
+
+    srv.on("/api/device/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (!isPinAuthorized(request)) {
+            request->send(403, "application/json", "{\"ok\":false,\"error\":\"Security PIN required or incorrect\"}");
+            return;
+        }
+        request->send(200, "application/json", "{\"ok\":true,\"message\":\"Device reboot initiated. Please reconnect in 10 seconds.\"}");
+        delay(600);
+        ESP.restart();
+    });
+
+    // POST /api/device/factory-reset
+    AsyncCallbackJsonWebHandler *resetHandler = new AsyncCallbackJsonWebHandler("/api/device/factory-reset",
+        [](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!json.is<JsonObject>()) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"Expected confirmation phrase\"}");
+                return;
+            }
+            JsonObject obj = json.as<JsonObject>();
+            if (!isPinAuthorized(request, &obj)) {
+                request->send(403, "application/json", "{\"ok\":false,\"error\":\"Security PIN required or incorrect\"}");
+                return;
+            }
+            const char* phrase = obj["confirmation_phrase"] | "";
+            const char* REQUIRED_PHRASE = "Yes, I would like to factory reset this device";
+
+            if (strcmp(phrase, REQUIRED_PHRASE) != 0) {
+                request->send(400, "application/json", "{\"ok\":false,\"error\":\"Confirmation phrase did not match. Reset cancelled.\"}");
+                return;
+            }
+
+            factoryResetAll();
+            request->send(200, "application/json", "{\"ok\":true,\"message\":\"Factory reset successful. Device restarting into default mode...\"}");
+            delay(800);
+            ESP.restart();
+        });
+    resetHandler->setMethod(HTTP_POST);
+    srv.addHandler(resetHandler);
+}
+
 void setupWebServer()
 {
     // Settings CRUD: GET/POST /api/settings, /api/settings/threshold, /api/settings/durations, /api/settings/thi
@@ -3461,13 +4470,24 @@ void setupWebServer()
 
     // Schedule CRUD: GET/POST /api/schedules, PATCH/PUT/DELETE /api/schedules/{id}
     setupScheduleRoutes(server);
+    setupWifiRoutes(server);
+    setupDeviceRoutes(server);
 
     // Mode discovery for dashboard
     server.on("/api/info", HTTP_GET, [](AsyncWebServerRequest *request) {
         JsonDocument doc;
         doc["mode"] = "device";
-        doc["authRequired"] = true;
-        doc["backendUrl"] = String("http://") + BACKEND_HOST + ":" + BACKEND_PORT;
+        doc["authRequired"] = false;
+        bool isPaired = (nvsDeviceToken.length() > 0 && nvsDeviceToken != "replace-with-control-or-device-token");
+        doc["paired"] = isPaired;
+        char macBuf[24];
+        snprintf(macBuf, sizeof(macBuf), "%012llX", (unsigned long long)ESP.getEfuseMac());
+        doc["mac"] = macBuf;
+        doc["name"] = nvsDeviceName;
+        doc["pen_name"] = nvsPenName;
+        doc["model"] = nvsDeviceModel;
+        doc["ap_ssid"] = nvsApSsid;
+        doc["backendUrl"] = getBackendBaseUrl();
         String payload;
         serializeJson(doc, payload);
         request->send(200, "application/json", payload);
@@ -3517,11 +4537,7 @@ void setupWebServer()
 
     // GET /api/session
     server.on("/api/session", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (isAuthorized(request)) {
-            request->send(200, "application/json", "{\"ok\":true,\"authenticated\":true}");
-        } else {
-            request->send(401, "application/json", "{\"ok\":false,\"authenticated\":false,\"error\":\"Unauthorized: Invalid or expired session\"}");
-        }
+        request->send(200, "application/json", "{\"ok\":true,\"authenticated\":true,\"mode\":\"device\"}");
     });
 
     server.on("/api/status", HTTP_GET, handleStatus);
@@ -4012,6 +5028,7 @@ void setup()
     // PREFERENCES (NVS) SETTINGS & WATER COUNTERS
     // --------------------------------------------------------
 
+    loadNvsConfig();
     loadSettings();
     loadWaterCounters();
 

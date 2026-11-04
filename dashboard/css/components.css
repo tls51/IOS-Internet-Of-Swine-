@@ -879,3 +879,203 @@
   background: #EF4444;
   color: #fff;
 }
+
+/* ── Wi-Fi Manager Styles ────────────────────────────────── */
+.wifi-net-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wifi-net-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: var(--bg, #0d1117);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.wifi-net-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--primary, #22C55E);
+  transform: translateY(-1px);
+}
+.wifi-net-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.wifi-signal-bars {
+  font-size: 16px;
+  min-width: 24px;
+  text-align: center;
+}
+.wifi-net-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text, #e6edf3);
+}
+.wifi-net-sec {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 8px;
+  background: rgba(139, 148, 158, 0.15);
+  color: var(--muted, #8b949e);
+}
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-card {
+  background: var(--card, #161b22);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 12px;
+  width: 90%;
+  max-width: 440px;
+  padding: 20px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border, #30363d);
+  padding-bottom: 12px;
+}
+.modal-close-btn {
+  background: none;
+  border: none;
+  color: var(--muted, #8b949e);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.modal-close-btn:hover {
+  color: var(--text, #e6edf3);
+}
+
+
+/* ============================================================
+   SWINE PENS MULTI-NODE PREVIEW CARDS (PHASE 13)
+   ============================================================ */
+.pens-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.pen-card {
+  background: var(--surface, #161b22);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 10px;
+  padding: 16px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  display: flex;
+  flex-direction: column;
+}
+
+.pen-card:hover {
+  border-color: #3b82f6;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+
+.pen-card.active-focus {
+  border-color: #22c55e;
+  box-shadow: 0 0 0 1px #22c55e;
+}
+
+.pen-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.pen-card-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0;
+  color: var(--text, #e6edf3);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pen-card-subtitle {
+  font-size: 11px;
+  color: var(--muted, #8b949e);
+  margin-top: 3px;
+  font-family: monospace;
+}
+
+.pen-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  background: var(--bg, #0d1117);
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #30363d);
+  margin-bottom: 12px;
+  text-align: center;
+}
+
+.pen-metric-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.pen-metric-label {
+  font-size: 10px;
+  color: var(--muted, #8b949e);
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+
+.pen-metric-val {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text, #e6edf3);
+}
+
+.pen-card-drawer {
+  background: var(--bg, #0d1117);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.pen-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.pen-online-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+}
+.pen-online-dot.online {
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55e;
+}
+.pen-online-dot.offline {
+  background: #6e7681;
+}

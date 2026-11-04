@@ -15,7 +15,7 @@ const IOS_CONFIG = {
   pollMs: 3000,        // how often the dashboard polls /api/status
   historyPollMs: 30000, // how often chart history/weekly data refreshes
   mode: 'device',      // 'device' | 'cloud' — from GET /api/info
-  authRequired: true,
+  authRequired: false,
   reportApiBase: '',   // Node archive when discovered from the ESP32
   reportSource: 'device',
 };
@@ -57,6 +57,22 @@ function promptForToken(message) {
   return null;
 }
 
+
+/* ── Security PIN Storage & Session Management ──────────────── */
+const PIN_STORAGE_KEY = 'ios_security_pin';
+
+function getSecurityPin() {
+  return sessionStorage.getItem(PIN_STORAGE_KEY) || '';
+}
+
+function setSecurityPin(pin) {
+  if (pin) {
+    sessionStorage.setItem(PIN_STORAGE_KEY, String(pin).trim());
+  } else {
+    sessionStorage.removeItem(PIN_STORAGE_KEY);
+  }
+}
+
 /* ── Auth Fetch Wrapper for Control Routes ─────────────────── */
 async function authFetch(url, options = {}) {
   const opts = { ...options };
@@ -67,6 +83,12 @@ async function authFetch(url, options = {}) {
   const token = getAuthToken();
   if (token) {
     opts.headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  // Attach Security PIN if unlocked in this browser session
+  const pin = getSecurityPin();
+  if (pin) {
+    opts.headers['X-Security-PIN'] = pin;
   }
 
   const res = await fetch(url, opts);
@@ -94,11 +116,15 @@ window.authFetch = authFetch;
 window.getAuthToken = getAuthToken;
 window.setAuthToken = setAuthToken;
 window.promptForToken = promptForToken;
+window.getSecurityPin = getSecurityPin;
+window.setSecurityPin = setSecurityPin;
 
 IOS_CONFIG.authFetch = authFetch;
 IOS_CONFIG.getAuthToken = getAuthToken;
 IOS_CONFIG.setAuthToken = setAuthToken;
 IOS_CONFIG.promptForToken = promptForToken;
+IOS_CONFIG.getSecurityPin = getSecurityPin;
+IOS_CONFIG.setSecurityPin = setSecurityPin;
 
 function applyDataMode(mode) {
   const resolved = (mode === 'cloud') ? 'cloud' : 'device';
@@ -116,6 +142,7 @@ async function fetchHostMode() {
     const data = await res.json();
     applyDataMode(data && data.mode);
     IOS_CONFIG.authRequired = !!data.authRequired;
+    IOS_CONFIG.paired = (data && data.paired !== undefined) ? !!data.paired : true;
     IOS_CONFIG.reportSource = IOS_CONFIG.mode;
     if (data.backendUrl) {
       try {
@@ -128,6 +155,7 @@ async function fetchHostMode() {
     }
   } catch (err) {
     applyDataMode('device');
+    IOS_CONFIG.authRequired = false;
   }
 }
 

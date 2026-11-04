@@ -31,14 +31,14 @@
         </div>
         <p id="login-err" class="login-err hidden"></p>
         <button id="btn-login" class="btn btn-primary btn-full">Sign In</button>
-        <div style="text-align:center; margin-top:16px;">
+        <div data-mode="cloud" style="text-align:center; margin-top:16px;">
           <span class="muted small">Don't have an account? </span>
           <button id="btn-show-register" class="btn btn-outline btn-full" style="margin-top:8px;">Create New Farm Account</button>
         </div>
       </div>
 
       <!-- Register Card -->
-      <div class="card login-card hidden" id="register-card">
+      <div class="card login-card hidden" id="register-card" data-mode="cloud">
         <div class="field-group">
           <label class="field-label">Username</label>
           <input id="reg-user" class="inp" type="text" placeholder="e.g. green_farm" />
@@ -87,6 +87,7 @@
           <li><button class="nav-btn" data-page="auto"><span></span> Auto Systems</button></li>
           <li><button class="nav-btn" data-page="reports"><span></span> Reports</button></li>
           <li data-admin-only class="hidden"><button class="nav-btn" data-page="users"><span>👥</span> User Accounts</button></li>
+          <li><button class="nav-btn" data-page="settings"><span>⚙️</span> Device Settings</button></li>
         </ul>
       </nav>
 
@@ -99,7 +100,7 @@
           <span class="conn-dot" id="conn-dot"></span>
           <span class="conn-label" id="conn-label">Connecting…</span>
         </div>
-        <button id="btn-logout" class="btn-logout">Sign Out</button>
+        <button id="btn-logout" class="btn-logout" data-mode="cloud">Sign Out</button>
       </div>
     </aside>
 
@@ -128,9 +129,36 @@
       <!-- Pages -->
       <main id="page-content">
 
+        <!-- UNPAIRED / CONFIGURE-ME BANNER -->
+        <div id="unpaired-banner" class="alert-banner alert-warning hidden" style="margin-bottom:20px; display:flex; align-items:center; justify-content:space-between; gap:12px; background:rgba(245,158,11,0.15); border:1px solid #f59e0b; color:#fbbf24; padding:12px 16px; border-radius:8px;">
+          <span>⚠️ <strong>Device Unlinked:</strong> This ESP32 is not connected to a cloud account. Readings are saved locally but not syncing to the cloud.</span>
+          <button id="btn-banner-cloud-setup" class="btn btn-sm btn-outline" style="white-space:nowrap; border-color:#f59e0b; color:#fbbf24;">Connect Account</button>
+        </div>
+
         <!-- DASHBOARD -->
         <section id="page-dashboard" class="page active">
           <div id="alert-banner" class="alert-banner hidden"></div>
+          <!-- SWINE PENS PREVIEW GRID (CLOUD MULTI-PEN) -->
+          <div id="pens-section" class="mb-20" data-mode="cloud">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:24px;">🐖</span>
+                <div>
+                  <h2 style="font-size:18px; font-weight:700; margin:0;">Swine Pens Overview</h2>
+                  <p class="muted small" style="margin:2px 0 0 0;">Live environmental and water monitoring across all pens linked to your account.</p>
+                </div>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button id="btn-refresh-pens" class="btn btn-outline btn-sm">🔄 Refresh</button>
+                <button id="btn-add-pen-guide" class="btn btn-primary btn-sm">+ Add New Pen</button>
+              </div>
+            </div>
+
+            <div id="pens-grid" class="pens-grid">
+              <p class="muted small" style="padding:16px;">Loading swine pens…</p>
+            </div>
+          </div>
+
           <div class="dash-clock-banner mb-20">
             <div class="dash-clock-content">
               <span class="dash-clock-icon">🕒</span>
@@ -220,6 +248,220 @@
             <div class="field-label mb-14">24-Hour Environmental Trend</div>
             <div class="chart-area" id="chart-dash"></div>
           </div>
+
+
+          <!-- CLOUD ACCOUNT SETUP & PAIRING CARD -->
+          <div class="card mb-20" id="cloud-setup-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:20px;">☁️</span>
+                <div>
+                  <h3 style="font-size:16px; margin:0; font-weight:600;">Cloud Account Synchronization &amp; Pairing</h3>
+                  <p class="muted small" style="margin:2px 0 0 0;">Link this ESP32 to your farm account so sensor readings and pens automatically sync online.</p>
+                </div>
+              </div>
+              <span id="cloud-pair-badge" class="badge badge-muted">Not Paired</span>
+            </div>
+
+            <!-- Current Binding Status Display -->
+            <div id="cloud-status-box" style="background:var(--bg, #0d1117); padding:14px; border-radius:8px; border:1px solid var(--border, #30363d); margin-bottom:16px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <span class="muted small" style="display:block;">Sync Status</span>
+                  <strong id="cloud-status-text" style="font-size:14px; color:#f59e0b;">⚠️ Unlinked — Local SD Logging Only</strong>
+                </div>
+                <button id="btn-cloud-unbind" class="btn btn-outline btn-sm hidden" style="border-color:#ef4444; color:#ef4444;">Unlink Account</button>
+              </div>
+            </div>
+
+            <!-- Binding Form -->
+            <div id="cloud-binding-form" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:16px; margin-bottom:16px;">
+              <div class="field-group">
+                <label class="field-label">Cloud Server URL</label>
+                <input id="inp-cloud-url" class="inp" type="text" placeholder="e.g. http://192.168.1.33:3000" />
+              </div>
+              <div class="field-group">
+                <label class="field-label">Account Username</label>
+                <input id="inp-cloud-user" class="inp" type="text" placeholder="e.g. green_farm" />
+              </div>
+              <div class="field-group">
+                <label class="field-label">Account Password</label>
+                <div style="position:relative;">
+                  <input id="inp-cloud-pass" class="inp" type="password" placeholder="Enter your cloud password" style="padding-right:40px;" />
+                  <button id="btn-toggle-cloud-pass" type="button" style="position:absolute; right:8px; top:50%; transform:translateY(-50%); background:none; border:none; color:var(--muted); cursor:pointer;">👁️</button>
+                </div>
+              </div>
+              <div class="field-group">
+                <label class="field-label">Swine Pen Assignment</label>
+                <input id="inp-cloud-pen" class="inp" type="text" placeholder="e.g. Pen 1 / Barn A" />
+              </div>
+            </div>
+
+            <p id="cloud-bind-err" class="login-err hidden" style="margin:0 0 14px 0;"></p>
+
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <button id="btn-cloud-test" class="btn btn-outline btn-sm">Test Server Health</button>
+              <button id="btn-cloud-bind" class="btn btn-primary">Connect to Account</button>
+            </div>
+          </div>
+
+          <!-- DEVICE IDENTITY & HARDWARE CONFIGURATION -->
+          <div class="card mb-20" id="device-identity-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:20px;">🏷️</span>
+                <div>
+                  <h3 style="font-size:16px; margin:0; font-weight:600;">Device Identity &amp; Access Point</h3>
+                  <p class="muted small" style="margin:2px 0 0 0;">Configure device labels, hardware timezone, and Wi-Fi hotspot credentials.</p>
+                </div>
+              </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:16px; margin-bottom:16px;">
+              <div class="field-group">
+                <label class="field-label">Device Name</label>
+                <input id="inp-dev-name" class="inp" type="text" placeholder="e.g. Pen 1 Controller" />
+              </div>
+              <div class="field-group">
+                <label class="field-label">Swine Pen Assignment</label>
+                <input id="inp-dev-pen" class="inp" type="text" placeholder="e.g. Pen 1 / Barn A" />
+              </div>
+              <div class="field-group">
+                <label class="field-label">Hardware Model</label>
+                <input id="inp-dev-model" class="inp" type="text" placeholder="e.g. ESP32-S3-DevKitC-1" />
+              </div>
+              <div class="field-group">
+                <label class="field-label">System Timezone</label>
+                <select id="sel-dev-tz" class="inp">
+                  <option value="-28800">UTC-08:00 (Pacific Time)</option>
+                  <option value="-18000">UTC-05:00 (Eastern Time)</option>
+                  <option value="0">UTC+00:00 (GMT / London)</option>
+                  <option value="25200">UTC+07:00 (Bangkok / Jakarta)</option>
+                  <option value="28800" selected>UTC+08:00 (Manila / Singapore)</option>
+                  <option value="32400">UTC+09:00 (Tokyo / Seoul)</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="field-label">Access Point Hotspot Name (SSID)</label>
+                <input id="inp-dev-ap-ssid" class="inp" type="text" placeholder="e.g. IOS-Setup-B3E2" />
+              </div>
+              <div class="field-group">
+                <label class="field-label">Hotspot Password (min. 8 chars)</label>
+                <div style="position:relative;">
+                  <input id="inp-dev-ap-pass" class="inp" type="password" placeholder="Leave blank to keep current" style="padding-right:40px;" />
+                  <button id="btn-toggle-ap-pass" type="button" style="position:absolute; right:8px; top:50%; transform:translateY(-50%); background:none; border:none; color:var(--muted); cursor:pointer;">👁️</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Hardware Metrics Bar -->
+            <div style="display:flex; flex-wrap:wrap; gap:16px; align-items:center; justify-content:space-between; background:var(--bg, #0d1117); padding:12px 16px; border-radius:8px; border:1px solid var(--border, #30363d); margin-bottom:16px;">
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span class="muted small">MAC Address:</span>
+                <strong id="lbl-dev-mac" style="font-family:monospace; font-size:13px;">—</strong>
+                <button id="btn-copy-mac" class="btn btn-sm btn-outline" style="padding:2px 8px; font-size:11px;">Copy</button>
+              </div>
+              <div style="display:flex; gap:16px; font-size:12px;" class="muted">
+                <span>Firmware: <strong id="lbl-dev-fw" style="color:var(--text);">v2.1.0-nvs</strong></span>
+                <span>Free RAM: <strong id="lbl-dev-heap" style="color:var(--text);">—</strong></span>
+              </div>
+            </div>
+
+            <div style="display:flex; justify-content:flex-end;">
+              <button id="btn-save-device-config" class="btn btn-primary">Save Device Settings</button>
+            </div>
+          </div>
+
+          
+          <!-- DEVICE SECURITY PIN CARD -->
+          <div class="card mb-20" id="security-pin-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:20px;">🔒</span>
+                <div>
+                  <h3 style="font-size:16px; margin:0; font-weight:600;">Device Security PIN</h3>
+                  <p class="muted small" style="margin:2px 0 0 0;">Protect hardware settings, Wi-Fi configuration, and binding while keeping live monitoring open.</p>
+                </div>
+              </div>
+              <span id="pin-status-badge" class="badge badge-muted">Checking…</span>
+            </div>
+
+            <!-- PIN Active State Info Box -->
+            <div id="pin-active-info" class="hidden" style="background:var(--bg, #0d1117); padding:14px; border-radius:8px; border:1px solid var(--border, #30363d); margin-bottom:16px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <span class="muted small" style="display:block;">PIN Protection</span>
+                  <strong style="font-size:14px; color:#22c55e;">🔒 Active — Settings changes require PIN authorization</strong>
+                </div>
+                <button id="btn-pin-lock-toggle" class="btn btn-outline btn-sm">Lock Session</button>
+              </div>
+            </div>
+
+            <!-- Form: When No PIN Enabled -->
+            <div id="pin-setup-box" class="hidden">
+              <p style="font-size:13px; color:var(--text, #e6edf3); margin-bottom:14px;">
+                No Security PIN is currently set. Anyone on the local network can alter Wi-Fi or device settings. Set a 4–8 character PIN below to lock settings changes:
+              </p>
+              <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:14px; margin-bottom:14px; max-width:600px;">
+                <div class="field-group">
+                  <label class="field-label">New PIN (4–8 characters)</label>
+                  <input id="inp-pin-new" class="inp" type="password" maxlength="8" placeholder="e.g. 1234" autocomplete="off" />
+                </div>
+                <div class="field-group">
+                  <label class="field-label">Confirm New PIN</label>
+                  <input id="inp-pin-confirm" class="inp" type="password" maxlength="8" placeholder="Repeat PIN" autocomplete="off" />
+                </div>
+              </div>
+              <p id="pin-setup-err" class="login-err hidden" style="margin:0 0 12px 0;"></p>
+              <button id="btn-pin-enable" class="btn btn-primary btn-sm">Set &amp; Enable PIN</button>
+            </div>
+
+            <!-- Form: When PIN IS Enabled -->
+            <div id="pin-change-box" class="hidden">
+              <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; margin-bottom:14px; max-width:700px;">
+                <div class="field-group">
+                  <label class="field-label">Current PIN</label>
+                  <input id="inp-pin-current" class="inp" type="password" maxlength="8" placeholder="Enter current PIN" autocomplete="off" />
+                </div>
+                <div class="field-group">
+                  <label class="field-label">New PIN (optional)</label>
+                  <input id="inp-pin-change-new" class="inp" type="password" maxlength="8" placeholder="4–8 chars" autocomplete="off" />
+                </div>
+                <div class="field-group">
+                  <label class="field-label">Confirm New PIN</label>
+                  <input id="inp-pin-change-confirm" class="inp" type="password" maxlength="8" placeholder="Repeat new PIN" autocomplete="off" />
+                </div>
+              </div>
+              <p id="pin-change-err" class="login-err hidden" style="margin:0 0 12px 0;"></p>
+              <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                <button id="btn-pin-update" class="btn btn-primary btn-sm">Change PIN</button>
+                <button id="btn-pin-disable" class="btn btn-outline btn-sm" style="border-color:#ef4444; color:#ef4444;">Disable PIN Protection</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- DANGER ZONE: FACTORY RESET CARD -->
+          <div class="card mb-20" id="factory-reset-card" style="border:1px solid rgba(239, 68, 68, 0.4); background:rgba(239, 68, 68, 0.03);">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+              <span style="font-size:20px;">⚠️</span>
+              <div>
+                <h3 style="font-size:16px; margin:0; font-weight:600; color:#ef4444;">Danger Zone: Factory Reset</h3>
+                <p class="muted small" style="margin:2px 0 0 0;">Erases all NVS configuration including saved Wi-Fi networks, AP settings, device tokens, and threshold preferences.</p>
+              </div>
+            </div>
+
+            <p style="font-size:13px; color:var(--text, #e6edf3); margin-bottom:12px;">
+              To prevent accidental erasure, type <code>Yes, I would like to factory reset this device</code> below:
+            </p>
+
+            <div style="display:flex; flex-direction:column; gap:10px; max-width:540px;">
+              <input id="inp-factory-reset-phrase" class="inp" type="text" placeholder="Type confirmation phrase exactly..." autocomplete="off" />
+              <div>
+                <button id="btn-factory-reset-submit" class="btn btn-danger-sm" disabled style="opacity:0.4; cursor:not-allowed; padding:8px 16px;">Factory Reset Device</button>
+              </div>
+            </div>
+          </div>
+
         </section>
 
         <!-- ENVIRONMENTAL -->
@@ -487,6 +729,7 @@
                     <div class="sys-desc" id="sched-pull-desc">Last pull: Never</div>
                   </div>
                   <span id="sched-pull-badge" class="badge badge-muted">Checking…</span>
+                  <button id="btn-trigger-accounting-sync" class="btn btn-sm btn-outline" style="margin-left:10px;">Sync Accounting Now</button>
                 </div>
               </div>
             </div>
@@ -723,6 +966,79 @@
           </div>
         </section>
 
+        <!-- SETTINGS PAGE -->
+        <section id="page-settings" class="page">
+          <div class="page-header" style="margin-bottom:20px;">
+            <h2 style="font-size:22px; font-weight:700; margin:0 0 6px 0;">Device Settings &amp; Network</h2>
+            <p class="muted" style="margin:0; font-size:13px;">Manage local device networking, Wi-Fi connectivity, and hardware configuration.</p>
+          </div>
+
+          <!-- WI-FI STATUS CARD -->
+          <div class="card mb-20" id="wifi-status-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+              <div style="display:flex; align-items:center; gap:10px;">
+                <span style="font-size:20px;">📶</span>
+                <div>
+                  <h3 style="font-size:16px; margin:0; font-weight:600;">Wi-Fi Station Connection</h3>
+                  <p class="muted small" style="margin:2px 0 0 0;">Connects this ESP32 to your farm router for online cloud synchronization.</p>
+                </div>
+              </div>
+              <span id="wifi-badge" class="badge badge-muted">Checking…</span>
+            </div>
+
+            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:14px; background:var(--bg, #0d1117); padding:14px; border-radius:8px; border:1px solid var(--border, #30363d); margin-bottom:14px;">
+              <div>
+                <span class="muted small" style="display:block;">Connected Network (SSID)</span>
+                <strong id="wifi-stat-ssid" style="font-size:14px;">—</strong>
+              </div>
+              <div>
+                <span class="muted small" style="display:block;">Assigned IP Address</span>
+                <strong id="wifi-stat-ip" style="font-size:14px;">—</strong>
+              </div>
+              <div>
+                <span class="muted small" style="display:block;">Signal Strength</span>
+                <strong id="wifi-stat-rssi" style="font-size:14px;">—</strong>
+              </div>
+              <div>
+                <span class="muted small" style="display:block;">Device MAC</span>
+                <strong id="wifi-stat-mac" style="font-size:14px; font-family:monospace;">—</strong>
+              </div>
+            </div>
+
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <span class="muted small" id="wifi-stat-hotspot">Access Point: <strong>ESP32 Hotspot</strong> (192.168.4.1)</span>
+              <button id="btn-wifi-disconnect" class="btn btn-outline btn-sm hidden" style="border-color:#ef4444; color:#ef4444;">Disconnect Wi-Fi</button>
+            </div>
+          </div>
+
+          <!-- WI-FI SCANNER CARD -->
+          <div class="card mb-20" id="wifi-scan-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+              <div>
+                <h3 style="font-size:16px; margin:0; font-weight:600;">Available Wi-Fi Networks</h3>
+                <p class="muted small" style="margin:2px 0 0 0;">Tap any nearby wireless network to connect and save credentials.</p>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button id="btn-wifi-manual" class="btn btn-outline btn-sm">
+                  <span>⌨️</span> <span>Connect Manually</span>
+                </button>
+                <button id="btn-wifi-scan" class="btn btn-primary btn-sm">
+                  <span id="wifi-scan-icon">🔍</span> <span id="wifi-scan-label">Scan Networks</span>
+                </button>
+              </div>
+            </div>
+
+            <div id="wifi-scan-loading" class="hidden" style="text-align:center; padding:30px 0;">
+              <span style="display:inline-block; font-size:24px; margin-bottom:8px;">⏳</span>
+              <p class="muted small" style="margin:0;">Scanning wireless channels for 2.4 GHz networks…</p>
+            </div>
+
+            <div id="wifi-networks-list" class="wifi-net-list">
+              <p class="muted small" style="text-align:center; padding:20px 0;">Tap "Scan Networks" to search for nearby Wi-Fi routers.</p>
+            </div>
+          </div>
+        </section>
+
       </main>
     </div><!-- /main-wrap -->
   </div><!-- /app-shell -->
@@ -853,5 +1169,117 @@
   <script src="js/data.js"></script>
   <script src="js/pages.js"></script>
   <script src="js/schedule.js"></script>
+
+  <!-- WI-FI CONNECT MODAL -->
+  <div id="modal-wifi-connect" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 style="margin:0; font-size:16px; font-weight:600;">Connect to Wi-Fi</h3>
+        <button id="btn-wifi-modal-close" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body" style="padding:16px 0;">
+        <div class="field-group" style="margin-bottom:14px;">
+          <label class="field-label">Network Name (SSID)</label>
+          <input id="inp-wifi-ssid" class="inp" type="text" placeholder="e.g. MyHomeNetwork or FarmWiFi" />
+        </div>
+        <div class="field-group" style="margin-bottom:14px;">
+          <label class="field-label">Password</label>
+          <div style="position:relative;">
+            <input id="inp-wifi-pass" class="inp" type="password" placeholder="Enter Wi-Fi password" style="padding-right:40px;" />
+            <button id="btn-toggle-wifi-pass" type="button" style="position:absolute; right:8px; top:50%; transform:translateY(-50%); background:none; border:none; color:var(--muted, #8b949e); cursor:pointer; font-size:14px;">👁️</button>
+          </div>
+        </div>
+        <p id="wifi-connect-err" class="login-err hidden" style="margin:0 0 10px 0;"></p>
+      </div>
+      <div class="modal-footer" style="display:flex; justify-content:flex-end; gap:10px;">
+        <button id="btn-wifi-modal-cancel" class="btn btn-outline">Cancel</button>
+        <button id="btn-wifi-modal-submit" class="btn btn-primary">Connect Now</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- UN-CANCELLABLE REBOOT MODAL -->
+  <div id="modal-device-reboot" class="modal-backdrop hidden" style="z-index:9999;">
+    <div class="modal-card" style="text-align:center; max-width:400px; border-color:#f59e0b;">
+      <div style="font-size:40px; margin-bottom:12px;">🔄</div>
+      <h3 style="margin:0 0 8px 0; font-size:18px; font-weight:700; color:#f59e0b;">Hardware Restart Required</h3>
+      <p style="font-size:13px; color:var(--text); margin-bottom:16px;" id="reboot-modal-msg">
+        Access Point or system settings have been modified. The ESP32 must reboot to apply these changes.
+      </p>
+      <div id="reboot-countdown-wrap" class="hidden" style="margin-bottom:16px;">
+        <span class="spinner" style="font-size:24px; display:inline-block; margin-bottom:8px;">⏳</span>
+        <p style="font-size:14px; font-weight:600; color:var(--text);" id="reboot-countdown-text">Rebooting hardware in 10s…</p>
+        <p class="muted small">Please reconnect your phone or laptop to the Wi-Fi hotspot once it restarts.</p>
+      </div>
+      <div>
+        <button id="btn-device-reboot-now" class="btn btn-full" style="background:#f59e0b; color:#000; font-weight:700; padding:12px;">Reboot Now</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- SECURITY PIN UNLOCK MODAL -->
+  <div id="pin-unlock-modal" class="modal-overlay hidden">
+    <div class="modal-box card" style="max-width:380px; text-align:center;">
+      <div style="font-size:32px; margin-bottom:12px;">🔒</div>
+      <h3 style="font-size:18px; margin:0 0 8px 0; font-weight:700;">Security PIN Required</h3>
+      <p class="muted small" style="margin:0 0 16px 0;">Enter device Security PIN to unlock settings and configuration controls.</p>
+      
+      <div class="field-group" style="text-align:left; margin-bottom:14px;">
+        <label class="field-label">Device PIN</label>
+        <input id="modal-inp-unlock-pin" class="inp" type="password" maxlength="8" placeholder="••••" style="font-size:20px; letter-spacing:6px; text-align:center;" autocomplete="off" />
+      </div>
+      <p id="modal-unlock-pin-err" class="login-err hidden" style="margin:0 0 14px 0; text-align:center;"></p>
+      
+      <div style="display:flex; gap:10px;">
+        <button id="modal-btn-unlock-cancel" class="btn btn-outline flex-1">Cancel</button>
+        <button id="modal-btn-unlock-submit" class="btn btn-primary flex-1">Unlock</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ADD NEW PEN GUIDANCE MODAL -->
+  <div id="add-pen-modal" class="modal-overlay hidden">
+    <div class="modal-box card" style="max-width:520px;">
+      <div class="modal-head">
+        <span class="modal-title" style="display:flex; align-items:center; gap:8px;">
+          <span>🐖</span> Add a New Swine Pen (ESP32 Node)
+        </span>
+        <button id="add-pen-modal-close" class="modal-close">×</button>
+      </div>
+      <div style="font-size:13px; line-height:1.6; color:var(--text, #e6edf3); margin:12px 0 16px 0;">
+        <p style="margin-top:0;">To attach a new ESP32 hardware controller to your account, follow these simple steps using the device's setup portal:</p>
+        
+        <ol style="padding-left:20px; margin:0 0 14px 0;">
+          <li style="margin-bottom:8px;">
+            <strong>Power on the new ESP32 node</strong> near its swine pen.
+          </li>
+          <li style="margin-bottom:8px;">
+            Connect your phone or laptop Wi-Fi to the ESP32 setup hotspot:<br>
+            <code style="color:var(--primary, #22c55e); font-size:12px;">IOS-Setup-XXXX</code> (default password: <code>swine1234</code>).
+          </li>
+          <li style="margin-bottom:8px;">
+            Open your browser to <a href="http://192.168.4.1" target="_blank" style="color:#58a6ff; text-decoration:underline;">http://192.168.4.1</a>.
+          </li>
+          <li style="margin-bottom:8px;">
+            Go to <strong>Device Settings &gt; Wi-Fi Station</strong> and connect it to your farm router.
+          </li>
+          <li>
+            Under <strong>Cloud Setup</strong>, enter your account username and password, specify the Pen Assignment (e.g. <em>Pen 2 / Farrowing</em>), and tap <strong>Connect to Account</strong>.
+          </li>
+        </ol>
+
+        <div style="background:rgba(59, 130, 246, 0.1); border:1px solid #3b82f6; border-radius:6px; padding:10px 12px; font-size:12px;">
+          💡 <strong>Physical Security:</strong> Devices can only be linked by physically connecting to their Wi-Fi hotspot, ensuring unauthorized accounts cannot claim your farm nodes.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-add-pen-done" class="btn btn-primary flex-1">Got It</button>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>
