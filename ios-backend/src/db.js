@@ -4,6 +4,7 @@
    ============================================================ */
 
 const path = require('path');
+const crypto = require('crypto');
 const Database = require('better-sqlite3');
 
 const DB_PATH = process.env.IOS_DB_PATH
@@ -93,12 +94,27 @@ CREATE TABLE IF NOT EXISTS offline_readings (
 );
 CREATE INDEX IF NOT EXISTS idx_offline_ts ON offline_readings(ts);
 CREATE TABLE IF NOT EXISTS sessions (
-  token_hash TEXT PRIMARY KEY,
-  username   TEXT NOT NULL,
-  created_at INTEGER NOT NULL,          -- unix ms
-  expires_at INTEGER NOT NULL           -- unix ms
+  token_hash   TEXT PRIMARY KEY,
+  username     TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,          -- unix ms
+  expires_at   INTEGER NOT NULL,          -- unix ms
+  account_id   INTEGER,
+  role         TEXT,
+  display_name TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT    NOT NULL,
+  salt          TEXT    NOT NULL,
+  role          TEXT    NOT NULL DEFAULT 'user',
+  display_name  TEXT,
+  created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+
 `);
 
 /* ── Schema migration: extend schedules.type to allow 'mist' ──────────────
@@ -211,6 +227,83 @@ migrateRemoveMistSchedules();
   db.exec(`CREATE INDEX IF NOT EXISTS idx_offline_ts ON offline_readings(ts);`);
 })();
 
+/* ── Schema migration: Multi-Account (Phase 2) ─────────── */
+(function migrateMultiAccount() {
+  const tables = ['readings', 'water_readings', 'schedules', 'activity_log', 'sensor_diagnostics', 'offline_readings'];
+  for (const t of tables) {
+    const tableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(t);
+    if (!tableInfo) continue;
+    const cols = db.prepare(`PRAGMA table_info(${t})`).all();
+    if (!cols.some(c => c.name === 'account_id')) {
+      db.exec(`ALTER TABLE ${t} ADD COLUMN account_id INTEGER DEFAULT 1;`);
+      console.log(`[db] ${t} table migrated: added account_id column`);
+    }
+    db.prepare(`UPDATE ${t} SET account_id = 1 WHERE account_id IS NULL`).run();
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_readings_account ON readings(account_id);
+    CREATE INDEX IF NOT EXISTS idx_water_account ON water_readings(account_id);
+    CREATE INDEX IF NOT EXISTS idx_schedules_account ON schedules(account_id);
+    CREATE INDEX IF NOT EXISTS idx_activity_account ON activity_log(account_id);
+    CREATE INDEX IF NOT EXISTS idx_offline_account ON offline_readings(account_id);
+  `);
+
+  // Settings table migration: compound (account_id, key) primary key
+  const settingsCols = db.prepare("PRAGMA table_info(settings)").all();
+  if (!settingsCols.some(c => c.name === 'account_id')) {
+    db.exec(`
+      BEGIN;
+      ALTER TABLE settings RENAME TO _settings_old;
+      CREATE TABLE settings (
+        account_id INTEGER NOT NULL DEFAULT 1,
+        key        TEXT NOT NULL,
+        value      TEXT NOT NULL,
+        PRIMARY KEY (account_id, key)
+      );
+      INSERT INTO settings (account_id, key, value)
+        SELECT 1, key, value FROM _settings_old;
+      DROP TABLE _settings_old;
+      COMMIT;
+    `);
+    console.log('[db] settings table migrated: compound (account_id, key) primary key enabled');
+  }
+
+  // Device registry table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS device_registry (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id    INTEGER NOT NULL,
+      device_id     TEXT    NOT NULL,
+      device_type   TEXT    NOT NULL DEFAULT 'sensor',
+      pen_name      TEXT,
+      device_token  TEXT    UNIQUE,
+      registered_at INTEGER NOT NULL,
+      UNIQUE (account_id, device_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_device_token ON device_registry(device_token);
+    CREATE INDEX IF NOT EXISTS idx_device_account ON device_registry(account_id);
+  `);
+
+  // Phase 5: Sessions table migration (account_id, role, display_name)
+  try {
+    const sessionCols = db.prepare('PRAGMA table_info(sessions)').all().map(c => c.name);
+    if (!sessionCols.includes('account_id')) {
+      db.prepare('ALTER TABLE sessions ADD COLUMN account_id INTEGER').run();
+    }
+    if (!sessionCols.includes('role')) {
+      db.prepare('ALTER TABLE sessions ADD COLUMN role TEXT').run();
+    }
+    if (!sessionCols.includes('display_name')) {
+      db.prepare('ALTER TABLE sessions ADD COLUMN display_name TEXT').run();
+    }
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_sessions_account_id ON sessions(account_id)').run();
+  } catch (err) {
+    console.warn('[db] Session column migration notice:', err.message);
+  }
+})();
+
+
 /* ── Seed defaults (only if empty) ─────────────────────────── */
 // Preserve the original device time when an invalid RTC needs receipt-time dating.
 const offlineCols = db.prepare('PRAGMA table_info(offline_readings)').all();
@@ -233,14 +326,58 @@ if (seedSettings.n === 0) {
   db.prepare(`INSERT INTO settings (key,value) VALUES ('threshold','32')`).run();
 }
 
-/* ── Readings ───────────────────────────────────────────── */
-function insertReading({ temp, humidity, thi, device_id, ts, src_id }) {
-  const stmt = db.prepare(`INSERT OR IGNORE INTO readings (ts,temp,humidity,thi,device_id,src_id) VALUES (?,?,?,?,?,?)`);
-  return stmt.run(ts || Date.now(), temp, humidity, thi, device_id || 'esp32-dht', src_id || null);
+const seedUsers = db.prepare('SELECT COUNT(*) AS n FROM users').get();
+if (seedUsers.n === 0) {
+  const adminUser = process.env.IOS_ADMIN_USER || 'admin';
+  const adminPass = process.env.IOS_ADMIN_PASS || 'ios2024';
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = crypto.scryptSync(adminPass, salt, 32).toString('hex');
+  db.prepare(`
+    INSERT INTO users (username, password_hash, salt, role, display_name, created_at)
+    VALUES (?, ?, ?, 'admin', 'Administrator', ?)
+  `).run(adminUser, passwordHash, salt, Date.now());
+  console.log(`[db] Initial admin user '${adminUser}' seeded.`);
 }
 
-function latestReading() {
-  return db.prepare(`SELECT * FROM readings ORDER BY ts DESC LIMIT 1`).get();
+
+
+function seedAccountDefaults(accountId) {
+  if (!accountId) return;
+  const defaults = [
+    ['threshold', '32'],
+    ['thi_normal_max', '74'],
+    ['thi_stress_max', '78'],
+    ['thi_extreme_max', '83'],
+    ['mist_on_sec', '10'],
+    ['mist_pause_sec', '5']
+  ];
+  const setStmt = db.prepare(`
+    INSERT OR IGNORE INTO settings (account_id, key, value)
+    VALUES (?, ?, ?)
+  `);
+  for (const [k, v] of defaults) {
+    setStmt.run(accountId, k, v);
+  }
+
+  const schedCount = db.prepare('SELECT COUNT(*) AS n FROM schedules WHERE account_id = ?').get(accountId);
+  if (schedCount.n === 0) {
+    const insert = db.prepare('INSERT INTO schedules (account_id,type,label,time,duration,days,active) VALUES (?,?,?,?,?,?,?)');
+    const all7 = JSON.stringify(['Mon','Tue','Wed','Thu','Fri','Sat','Sun']);
+    insert.run(accountId, 'bath', 'Morning Bath',   '06:00', 15, all7, 1);
+    insert.run(accountId, 'bath', 'Afternoon Bath', '14:00', 15, all7, 1);
+    insert.run(accountId, 'clean','Daily Flush',    '07:00', 10, all7, 1);
+    insert.run(accountId, 'clean','Evening Clean',  '18:00', 10, JSON.stringify(['Mon','Wed','Fri']), 0);
+  }
+}
+
+/* ── Readings ───────────────────────────────────────────── */
+function insertReading({ temp, humidity, thi, device_id, ts, src_id, accountId = 1 }) {
+  const stmt = db.prepare(`INSERT OR IGNORE INTO readings (ts,temp,humidity,thi,device_id,src_id,account_id) VALUES (?,?,?,?,?,?,?)`);
+  return stmt.run(ts || Date.now(), temp, humidity, thi, device_id || 'esp32-dht', src_id || null, accountId);
+}
+
+function latestReading(accountId = 1) {
+  return db.prepare(`SELECT * FROM readings WHERE account_id = ? ORDER BY ts DESC LIMIT 1`).get(accountId);
 }
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -258,22 +395,22 @@ function formatManilaBucketTime(tsMs) {
   };
 }
 
-function readingsSince(sinceMs, untilMs = Date.now()) {
-  return db.prepare(`SELECT * FROM readings WHERE ts >= ? AND ts <= ? ORDER BY ts ASC`).all(sinceMs, untilMs);
+function readingsSince(sinceMs, untilMs = Date.now(), accountId = 1) {
+  return db.prepare(`SELECT * FROM readings WHERE account_id = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`).all(accountId, sinceMs, untilMs);
 }
 
-function rawReadingsIterator(sinceMs, untilMs = Date.now()) {
-  return db.prepare(`SELECT ts, temp, humidity, thi FROM readings WHERE ts >= ? AND ts <= ? ORDER BY ts ASC`).iterate(sinceMs, untilMs);
+function rawReadingsIterator(sinceMs, untilMs = Date.now(), accountId = 1) {
+  return db.prepare(`SELECT ts, temp, humidity, thi FROM readings WHERE account_id = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC`).iterate(accountId, sinceMs, untilMs);
 }
 
-function getAggregatedReadings({ range = '24h', sinceMs, untilMs = Date.now(), bucketMs: explicitBucketMs } = {}) {
+function getAggregatedReadings({ range = '24h', sinceMs, untilMs = Date.now(), bucketMs: explicitBucketMs, accountId = 1 } = {}) {
   let bucketMs = explicitBucketMs;
   let since = sinceMs;
 
   if (range === 'all') {
     if (since == null) since = 0;
     if (!bucketMs) {
-      const bounds = db.prepare('SELECT MIN(ts) AS minTs, MAX(ts) AS maxTs FROM readings WHERE ts >= ? AND ts <= ?').get(since, untilMs);
+      const bounds = db.prepare('SELECT MIN(ts) AS minTs, MAX(ts) AS maxTs FROM readings WHERE account_id = ? AND ts >= ? AND ts <= ?').get(accountId, since, untilMs);
       if (!bounds || bounds.minTs == null) return [];
       const spanMs = (bounds.maxTs || untilMs) - bounds.minTs;
       const rawBucket = Math.max(5 * 60 * 1000, Math.ceil(spanMs / 400));
@@ -309,12 +446,12 @@ function getAggregatedReadings({ range = '24h', sinceMs, untilMs = Date.now(), b
       MAX(thi) AS max_thi,
       COUNT(*) AS n
     FROM readings
-    WHERE ts >= ? AND ts <= ?
+    WHERE account_id = ? AND ts >= ? AND ts <= ?
     GROUP BY b_idx
     ORDER BY b_idx ASC
   `;
 
-  const rows = db.prepare(query).all(bucketMs, bucketMs, bucketMs, since, untilMs);
+  const rows = db.prepare(query).all(bucketMs, bucketMs, bucketMs, accountId, since, untilMs);
 
   return rows.map(r => {
     const ts = r.bucket_ts;
@@ -334,9 +471,9 @@ function getAggregatedReadings({ range = '24h', sinceMs, untilMs = Date.now(), b
   });
 }
 
-function reportSummary() {
-  const readingsRow = db.prepare('SELECT COUNT(*) AS count, MIN(ts) AS firstTs, MAX(ts) AS lastTs FROM readings').get();
-  const offlineRow = db.prepare('SELECT COUNT(*) AS count, MIN(ts) AS firstTs, MAX(ts) AS lastTs FROM offline_readings').get();
+function reportSummary(accountId = 1) {
+  const readingsRow = db.prepare('SELECT COUNT(*) AS count, MIN(ts) AS firstTs, MAX(ts) AS lastTs FROM readings WHERE account_id = ?').get(accountId);
+  const offlineRow = db.prepare('SELECT COUNT(*) AS count, MIN(ts) AS firstTs, MAX(ts) AS lastTs FROM offline_readings WHERE account_id = ?').get(accountId);
 
   const count = readingsRow ? readingsRow.count : 0;
   const offlineCount = offlineRow ? offlineRow.count : 0;
@@ -393,8 +530,8 @@ function reportSummary() {
 }
 
 /* ── Water ──────────────────────────────────────────────── */
-function insertWater({ level_pct, used_l, flow_lpm, device_id, ts, mist_on, bath_on, clean_on, src_id, mist_l, bath_l, clean_l, other_l }) {
-  const stmt = db.prepare(`INSERT OR IGNORE INTO water_readings (ts,level_pct,used_l,flow_lpm,device_id,mist_on,bath_on,clean_on,src_id,mist_l,bath_l,clean_l,other_l) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+function insertWater({ level_pct, used_l, flow_lpm, device_id, ts, mist_on, bath_on, clean_on, src_id, mist_l, bath_l, clean_l, other_l, accountId = 1 }) {
+  const stmt = db.prepare(`INSERT OR IGNORE INTO water_readings (ts,level_pct,used_l,flow_lpm,device_id,mist_on,bath_on,clean_on,src_id,mist_l,bath_l,clean_l,other_l,account_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   return stmt.run(
     ts || Date.now(),
     level_pct != null ? level_pct : 0,
@@ -408,17 +545,18 @@ function insertWater({ level_pct, used_l, flow_lpm, device_id, ts, mist_on, bath
     mist_l != null ? mist_l : 0,
     bath_l != null ? bath_l : 0,
     clean_l != null ? clean_l : 0,
-    other_l != null ? other_l : 0
+    other_l != null ? other_l : 0,
+    accountId
   );
 }
 
-function latestWater() {
-  return db.prepare(`SELECT * FROM water_readings ORDER BY ts DESC LIMIT 1`).get();
+function latestWater(accountId = 1) {
+  return db.prepare(`SELECT * FROM water_readings WHERE account_id = ? ORDER BY ts DESC LIMIT 1`).get(accountId);
 }
 
-function latestTelemetry() {
-  const off = db.prepare(`SELECT ts, pump_on, pump_reason, mist_on, bath_on, clean_on FROM offline_readings ORDER BY ts DESC LIMIT 1`).get();
-  const wat = db.prepare(`SELECT ts, mist_on, bath_on, clean_on FROM water_readings ORDER BY ts DESC LIMIT 1`).get();
+function latestTelemetry(accountId = 1) {
+  const off = db.prepare(`SELECT ts, pump_on, pump_reason, mist_on, bath_on, clean_on FROM offline_readings WHERE account_id = ? ORDER BY ts DESC LIMIT 1`).get(accountId);
+  const wat = db.prepare(`SELECT ts, mist_on, bath_on, clean_on FROM water_readings WHERE account_id = ? ORDER BY ts DESC LIMIT 1`).get(accountId);
   if (!off && !wat) return null;
   if (off && (!wat || off.ts >= wat.ts)) return off;
   return wat;
@@ -434,7 +572,6 @@ function calculateWaterUsageForRows(rows) {
     const prev = rows[i - 1].used_l;
     const curr = rows[i].used_l;
     if (curr < prev) {
-      // Counter reset on reboot: finalize previous segment and count curr as usage
       totalUsage += Math.max(0, segMax - segMin) + curr;
       segMin = curr;
       segMax = curr;
@@ -486,8 +623,6 @@ function usageByOperation(rows) {
     const isBathe = !!row.bath_on;
     const isClean = !!row.clean_on;
 
-    // Attribution priority rule: scheduled operations override auto-misting
-    // clean > bath > mist > other
     let op = 'other';
     if (isClean) {
       op = 'clean';
@@ -518,14 +653,14 @@ function usageByOperation(rows) {
   return result.sort((a, b) => a.date.localeCompare(b.date));
 }
 
-function getTodayWaterUsage() {
+function getTodayWaterUsage(accountId = 1) {
   const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
   const dNow = new Date(Date.now() + MANILA_OFFSET_MS);
   const todayMidnightUtc = Date.UTC(dNow.getUTCFullYear(), dNow.getUTCMonth(), dNow.getUTCDate()) - MANILA_OFFSET_MS;
   const todayDateStr = `${dNow.getUTCFullYear()}-${String(dNow.getUTCMonth() + 1).padStart(2, '0')}-${String(dNow.getUTCDate()).padStart(2, '0')}`;
 
-  const prevRow = db.prepare(`SELECT * FROM water_readings WHERE ts < ? ORDER BY ts DESC LIMIT 1`).get(todayMidnightUtc);
-  const rows = db.prepare(`SELECT * FROM water_readings WHERE ts >= ? ORDER BY ts ASC`).all(todayMidnightUtc);
+  const prevRow = db.prepare(`SELECT * FROM water_readings WHERE account_id = ? AND ts < ? ORDER BY ts DESC LIMIT 1`).get(accountId, todayMidnightUtc);
+  const rows = db.prepare(`SELECT * FROM water_readings WHERE account_id = ? AND ts >= ? ORDER BY ts ASC`).all(accountId, todayMidnightUtc);
   if (rows.length === 0) return 0;
 
   const allRows = prevRow ? [prevRow, ...rows] : rows;
@@ -534,13 +669,13 @@ function getTodayWaterUsage() {
   return todayEntry ? todayEntry.total : 0;
 }
 
-function weeklyWaterUsage(sinceMs) {
+function weeklyWaterUsage(sinceMs, accountId = 1) {
   const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
   let refTs = Date.now();
   if (sinceMs !== undefined && typeof sinceMs === 'number') {
-    const maxRow = db.prepare(`SELECT MAX(ts) AS max_ts FROM water_readings`).get();
+    const maxRow = db.prepare(`SELECT MAX(ts) AS max_ts FROM water_readings WHERE account_id = ?`).get(accountId);
     if (maxRow && maxRow.max_ts) {
       refTs = maxRow.max_ts;
     } else {
@@ -555,8 +690,8 @@ function weeklyWaterUsage(sinceMs) {
     ? Math.min(sinceMs, startMidnightUtc)
     : startMidnightUtc;
 
-  const prevRow = db.prepare(`SELECT * FROM water_readings WHERE ts < ? ORDER BY ts DESC LIMIT 1`).get(querySince);
-  const rows = db.prepare(`SELECT * FROM water_readings WHERE ts >= ? ORDER BY ts ASC`).all(querySince);
+  const prevRow = db.prepare(`SELECT * FROM water_readings WHERE account_id = ? AND ts < ? ORDER BY ts DESC LIMIT 1`).get(accountId, querySince);
+  const rows = db.prepare(`SELECT * FROM water_readings WHERE account_id = ? AND ts >= ? ORDER BY ts ASC`).all(accountId, querySince);
   const allRows = prevRow ? [prevRow, ...rows] : rows;
   const computedDays = usageByOperation(allRows);
   const dayByDate = new Map(computedDays.map(d => [d.date, d]));
@@ -587,7 +722,7 @@ function weeklyWaterUsage(sinceMs) {
   return last7Days;
 }
 
-function getWaterUsage(range = '7d') {
+function getWaterUsage(range = '7d', accountId = 1) {
   const MANILA_OFFSET_MS = 8 * 60 * 60 * 1000;
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const now = Date.now();
@@ -607,14 +742,13 @@ function getWaterUsage(range = '7d') {
     numDays = 30;
     sinceMs = todayMidnightUtc - 29 * 24 * 60 * 60 * 1000;
   } else {
-    // 'all'
     sinceMs = 0;
   }
 
   const prevRow = sinceMs > 0
-    ? db.prepare(`SELECT * FROM water_readings WHERE ts < ? ORDER BY ts DESC LIMIT 1`).get(sinceMs)
+    ? db.prepare(`SELECT * FROM water_readings WHERE account_id = ? AND ts < ? ORDER BY ts DESC LIMIT 1`).get(accountId, sinceMs)
     : null;
-  const rows = db.prepare(`SELECT * FROM water_readings WHERE ts >= ? ORDER BY ts ASC`).all(sinceMs);
+  const rows = db.prepare(`SELECT * FROM water_readings WHERE account_id = ? AND ts >= ? ORDER BY ts ASC`).all(accountId, sinceMs);
   const allRows = prevRow ? [prevRow, ...rows] : rows;
   const computedDays = usageByOperation(allRows);
   const dayByDate = new Map(computedDays.map(d => [d.date, d]));
@@ -665,7 +799,7 @@ function getWaterUsage(range = '7d') {
   };
 
   const todayEntry = dayByDate.get(todayDateStr) || days.find(d => d.date === todayDateStr);
-  const todayVal = todayEntry ? todayEntry.total : getTodayWaterUsage();
+  const todayVal = todayEntry ? todayEntry.total : getTodayWaterUsage(accountId);
   const todayBreakdown = todayEntry || {
     date: todayDateStr,
     day: dayNames[dNow.getUTCDay()],
@@ -686,21 +820,25 @@ function getWaterUsage(range = '7d') {
 }
 
 /* ── Schedules ──────────────────────────────────────────── */
-function listSchedules(type) {
-  const rows = db.prepare(`SELECT * FROM schedules WHERE type = ? ORDER BY time ASC`).all(type);
+function listSchedules(type, accountId = 1) {
+  if (type === 'all') {
+    const rows = db.prepare(`SELECT * FROM schedules WHERE account_id = ? ORDER BY time ASC`).all(accountId);
+    return rows.map(r => ({ ...r, days: JSON.parse(r.days), active: !!r.active }));
+  }
+  const rows = db.prepare(`SELECT * FROM schedules WHERE account_id = ? AND type = ? ORDER BY time ASC`).all(accountId, type);
   return rows.map(r => ({ ...r, days: JSON.parse(r.days), active: !!r.active }));
 }
 
-function createSchedule({ type, label, time, duration, days }) {
-  const stmt = db.prepare(`INSERT INTO schedules (type,label,time,duration,days,active) VALUES (?,?,?,?,?,1)`);
-  const info = stmt.run(type, label, time, duration, JSON.stringify(days));
+function createSchedule({ type, label, time, duration, days, accountId = 1 }) {
+  const stmt = db.prepare(`INSERT INTO schedules (account_id,type,label,time,duration,days,active) VALUES (?,?,?,?,?,?,1)`);
+  const info = stmt.run(accountId, type, label, time, duration, JSON.stringify(days));
   return db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(info.lastInsertRowid);
 }
 
-// Full update — supports editing label/time/duration/days/active,
-// not just toggling active like the old toggleSchedule-only flow did.
-function updateSchedule(id, { label, time, duration, days, active }) {
-  const existing = db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(id);
+function updateSchedule(id, { label, time, duration, days, active }, accountId = null) {
+  const existing = accountId != null
+    ? db.prepare(`SELECT * FROM schedules WHERE id = ? AND account_id = ?`).get(id, accountId)
+    : db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(id);
   if (!existing) return null;
 
   db.prepare(`
@@ -719,59 +857,66 @@ function updateSchedule(id, { label, time, duration, days, active }) {
   return db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(id);
 }
 
-function toggleSchedule(id, active) {
-  db.prepare(`UPDATE schedules SET active = ? WHERE id = ?`).run(active ? 1 : 0, id);
+function toggleSchedule(id, active, accountId = null) {
+  if (accountId != null) {
+    db.prepare(`UPDATE schedules SET active = ? WHERE id = ? AND account_id = ?`).run(active ? 1 : 0, id, accountId);
+  } else {
+    db.prepare(`UPDATE schedules SET active = ? WHERE id = ?`).run(active ? 1 : 0, id);
+  }
   return db.prepare(`SELECT * FROM schedules WHERE id = ?`).get(id);
 }
 
-function deleteSchedule(id) {
+function deleteSchedule(id, accountId = null) {
+  if (accountId != null) {
+    return db.prepare(`DELETE FROM schedules WHERE id = ? AND account_id = ?`).run(id, accountId);
+  }
   return db.prepare(`DELETE FROM schedules WHERE id = ?`).run(id);
 }
 
-function scheduleCount() {
-  return db.prepare(`SELECT COUNT(*) AS n FROM schedules`).get().n;
+function scheduleCount(accountId = 1) {
+  return db.prepare(`SELECT COUNT(*) AS n FROM schedules WHERE account_id = ?`).get(accountId).n;
 }
 
 /* ── Settings ───────────────────────────────────────────── */
-function getSetting(key, fallback) {
-  const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key);
+function getSetting(key, fallback, accountId = 1) {
+  const row = db.prepare(`SELECT value FROM settings WHERE account_id = ? AND key = ?`).get(accountId, key);
   return row ? row.value : fallback;
 }
 
-function setSetting(key, value) {
-  db.prepare(`INSERT INTO settings (key,value) VALUES (?,?)
-              ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, String(value));
+function setSetting(key, value, accountId = 1) {
+  db.prepare(`INSERT INTO settings (account_id,key,value) VALUES (?,?,?)
+              ON CONFLICT(account_id, key) DO UPDATE SET value = excluded.value`).run(accountId, key, String(value));
 }
 
-function getOperationDurations() {
-  const mistOnSec    = parseFloat(getSetting('mist_on_sec', '10'));
-  const mistPauseSec = parseFloat(getSetting('mist_pause_sec', '5'));
+function getOperationDurations(accountId = 1) {
+  const mistOnSec    = parseFloat(getSetting('mist_on_sec', '10', accountId));
+  const mistPauseSec = parseFloat(getSetting('mist_pause_sec', '5', accountId));
   return { mistOnSec, mistPauseSec };
 }
 
-function setOperationDurations({ mistOnSec, mistPauseSec }) {
-  if (mistOnSec != null)    setSetting('mist_on_sec', mistOnSec);
-  if (mistPauseSec != null) setSetting('mist_pause_sec', mistPauseSec);
-  return getOperationDurations();
+function setOperationDurations({ mistOnSec, mistPauseSec }, accountId = 1) {
+  if (mistOnSec != null)    setSetting('mist_on_sec', mistOnSec, accountId);
+  if (mistPauseSec != null) setSetting('mist_pause_sec', mistPauseSec, accountId);
+  return getOperationDurations(accountId);
 }
 
-function getTHIThresholds() {
-  const normalMax  = parseFloat(getSetting('thi_normal_max',  '74'));
-  const stressMax  = parseFloat(getSetting('thi_stress_max',  '78'));
-  const extremeMax = parseFloat(getSetting('thi_extreme_max', '83'));
+function getTHIThresholds(accountId = 1) {
+  const normalMax  = parseFloat(getSetting('thi_normal_max',  '74', accountId));
+  const stressMax  = parseFloat(getSetting('thi_stress_max',  '78', accountId));
+  const extremeMax = parseFloat(getSetting('thi_extreme_max', '83', accountId));
   return { normalMax, stressMax, extremeMax };
 }
 
-function setTHIThresholds({ normalMax, stressMax, extremeMax }) {
-  if (normalMax != null)  setSetting('thi_normal_max',  normalMax);
-  if (stressMax != null)  setSetting('thi_stress_max',  stressMax);
-  if (extremeMax != null) setSetting('thi_extreme_max', extremeMax);
-  return getTHIThresholds();
+function setTHIThresholds({ normalMax, stressMax, extremeMax }, accountId = 1) {
+  if (normalMax != null)  setSetting('thi_normal_max',  normalMax, accountId);
+  if (stressMax != null)  setSetting('thi_stress_max',  stressMax, accountId);
+  if (extremeMax != null) setSetting('thi_extreme_max', extremeMax, accountId);
+  return getTHIThresholds(accountId);
 }
 
 /* ── Diagnostics ────────────────────────────────────────── */
-function saveDiagnostics({ dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, sd_ok, details, ts }) {
-  const stmt = db.prepare(`INSERT INTO sensor_diagnostics (ts, dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, sd_ok, details) VALUES (?,?,?,?,?,?,?,?)`);
+function saveDiagnostics({ dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, sd_ok, details, ts, accountId = 1 }) {
+  const stmt = db.prepare(`INSERT INTO sensor_diagnostics (ts, dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, sd_ok, details, account_id) VALUES (?,?,?,?,?,?,?,?,?)`);
   return stmt.run(
     ts || Date.now(),
     dht_ok ? 1 : 0,
@@ -780,12 +925,13 @@ function saveDiagnostics({ dht_ok, rtc_ok, tank_ok, flow_ok, relay_ok, sd_ok, de
     flow_ok ? 1 : 0,
     relay_ok ? 1 : 0,
     sd_ok === null || sd_ok === undefined ? null : (sd_ok ? 1 : 0),
-    typeof details === 'object' ? JSON.stringify(details) : String(details || '')
+    typeof details === 'object' ? JSON.stringify(details) : String(details || ''),
+    accountId
   );
 }
 
-function latestDiagnostics() {
-  const row = db.prepare(`SELECT * FROM sensor_diagnostics ORDER BY ts DESC LIMIT 1`).get();
+function latestDiagnostics(accountId = 1) {
+  const row = db.prepare(`SELECT * FROM sensor_diagnostics WHERE account_id = ? ORDER BY ts DESC LIMIT 1`).get(accountId);
   if (!row) return null;
   let parsedDetails = {};
   try { parsedDetails = JSON.parse(row.details); } catch (e) { parsedDetails = { raw: row.details }; }
@@ -801,37 +947,36 @@ function latestDiagnostics() {
   };
 }
 
-function logActivity(type, msg, ts) {
+function logActivity(type, msg, ts, accountId = 1) {
   const stmt = db.prepare(`
-    INSERT INTO activity_log (ts, type, msg)
-    VALUES (?, ?, ?)
+    INSERT INTO activity_log (ts, type, msg, account_id)
+    VALUES (?, ?, ?, ?)
   `);
 
   return stmt.run(
     ts || Date.now(),
     type,
-    msg
+    msg,
+    accountId
   );
 }
 
-function recentActivity(limit = 50, sinceMs = 0) {
+function recentActivity(limit = 50, sinceMs = 0, accountId = 1) {
   return db.prepare(`
     SELECT * FROM activity_log
-    WHERE ts >= ?
+    WHERE account_id = ? AND ts >= ?
     ORDER BY ts DESC
     LIMIT ?
-  `).all(sinceMs, limit);
+  `).all(accountId, sinceMs, limit);
 }
 
 /* ── Offline Batch Readings ─────────────────────────────── */
 
-// Insert a batch of offline readings, skipping duplicates by id.
-// Returns { inserted, skipped, failed, accepted_ids }.
-function insertOfflineBatch(records) {
+function insertOfflineBatch(records, accountId = 1) {
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO offline_readings
-      (id, ts, temp, humidity, thi, thi_label, water_level, flow_lpm, water_used, pump_on, pump_reason, synced_at, source_ts_ms, rtc_valid, time_source, mist_on, bath_on, clean_on, mist_l, bath_l, clean_l, other_l)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, ts, temp, humidity, thi, thi_label, water_level, flow_lpm, water_used, pump_on, pump_reason, synced_at, source_ts_ms, rtc_valid, time_source, mist_on, bath_on, clean_on, mist_l, bath_l, clean_l, other_l, account_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const insertMany = db.transaction((rows) => {
@@ -845,8 +990,6 @@ function insertOfflineBatch(records) {
         continue;
       }
 
-      // Preserve the raw device timestamp separately. Unix dates are accepted
-      // only with a plausible, valid RTC; uptime is dated by server receipt.
       const sourceTs = typeof r.ts_ms    === 'number' ? r.ts_ms
                : typeof r.ts       === 'number' ? r.ts
                : typeof r.uptime_ms === 'number' ? r.uptime_ms
@@ -854,8 +997,6 @@ function insertOfflineBatch(records) {
       const receivedAt = Date.now();
       const clockValid = r.rtc_valid !== false && Number.isFinite(sourceTs)
         && sourceTs >= Date.UTC(2024, 0, 1) && sourceTs <= receivedAt + 5 * 60e3;
-      // millis() is uptime, never a Unix date. Keep it for diagnosis and date
-      // unclocked readings by receipt time; exact offline capture time is unknown.
       const ts = clockValid ? sourceTs : receivedAt;
 
       const temp        = typeof r.temp_c    === 'number' ? r.temp_c    : (typeof r.temp     === 'number' ? r.temp     : null);
@@ -876,7 +1017,7 @@ function insertOfflineBatch(records) {
       const other_l     = typeof r.other_l === 'number' ? r.other_l : (typeof r.other_liters === 'number' ? r.other_liters : 0);
 
       if (clockValid) {
-        const existing = db.prepare(`SELECT id FROM offline_readings WHERE ts = ?`).get(ts);
+        const existing = db.prepare(`SELECT id FROM offline_readings WHERE ts = ? AND account_id = ?`).get(ts, accountId);
         if (existing) {
           skipped++;
           accepted_ids.push(r.id);
@@ -890,38 +1031,35 @@ function insertOfflineBatch(records) {
         receivedAt, Number.isFinite(sourceTs) ? sourceTs : null,
         clockValid ? 1 : 0, clockValid ? 'device' : 'server_receipt',
         mist_on, bath_on, clean_on,
-        mist_l, bath_l, clean_l, other_l
+        mist_l, bath_l, clean_l, other_l,
+        accountId
       );
 
       if (info.changes > 0) {
         inserted++;
         accepted_ids.push(r.id);
 
-        // Also mirror into the main readings table if we have temp+humidity
         if (temp !== null && humidity !== null) {
           const calcTHI = (t, h) => parseFloat(
             (0.8 * t + (h / 100.0) * (t - 14.4) + 46.4).toFixed(1)
           );
           const thiVal = (thi !== null) ? thi : calcTHI(temp, humidity);
-          db.prepare(`INSERT OR IGNORE INTO readings (ts,temp,humidity,thi,device_id,src_id) VALUES (?,?,?,?,?,?)`)
-            .run(ts, temp, humidity, thiVal, 'esp32-offline', r.id);
+          db.prepare(`INSERT OR IGNORE INTO readings (ts,temp,humidity,thi,device_id,src_id,account_id) VALUES (?,?,?,?,?,?,?)`)
+            .run(ts, temp, humidity, thiVal, 'esp32-offline', r.id, accountId);
         }
 
-        // Mirror water data if available
         if (water_level !== null || flow_lpm !== null || water_used !== null) {
-          db.prepare(`INSERT OR IGNORE INTO water_readings (ts,level_pct,used_l,flow_lpm,device_id,mist_on,bath_on,clean_on,src_id,mist_l,bath_l,clean_l,other_l) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          db.prepare(`INSERT OR IGNORE INTO water_readings (ts,level_pct,used_l,flow_lpm,device_id,mist_on,bath_on,clean_on,src_id,mist_l,bath_l,clean_l,other_l,account_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
             .run(ts,
               water_level !== null ? water_level : 0,
               water_used  !== null ? water_used  : 0,
               flow_lpm    !== null ? flow_lpm    : 0,
               'esp32-offline',
               mist_on, bath_on, clean_on, r.id,
-              mist_l, bath_l, clean_l, other_l);
+              mist_l, bath_l, clean_l, other_l, accountId);
         }
 
       } else {
-        // Record already exists in offline_readings (idempotent retransmission).
-        // Still include in accepted_ids so client knows server has it and can advance progress.
         skipped++;
         accepted_ids.push(r.id);
       }
@@ -933,7 +1071,7 @@ function insertOfflineBatch(records) {
   try {
     const result = insertMany(records);
     if (result.inserted > 0) {
-      logActivity('Sensor', `Batch sync: ${result.inserted} reading(s) saved (${result.skipped} skipped)`);
+      logActivity('Sensor', `Batch sync: ${result.inserted} reading(s) saved (${result.skipped} skipped)`, null, accountId);
     }
     return { ...result, failed: 0 };
   } catch (err) {
@@ -941,13 +1079,13 @@ function insertOfflineBatch(records) {
   }
 }
 
-function pendingOfflineCount() {
-  const row = db.prepare(`SELECT COUNT(*) AS n FROM offline_readings`).get();
+function pendingOfflineCount(accountId = 1) {
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM offline_readings WHERE account_id = ?`).get(accountId);
   return row ? row.n : 0;
 }
 
-function latestSyncTs() {
-  const row = db.prepare(`SELECT MAX(synced_at) AS ts FROM offline_readings`).get();
+function latestSyncTs(accountId = 1) {
+  const row = db.prepare(`SELECT MAX(synced_at) AS ts FROM offline_readings WHERE account_id = ?`).get(accountId);
   return row ? row.ts : null;
 }
 
@@ -956,17 +1094,17 @@ function cleanupExpiredSessions() {
   db.prepare(`DELETE FROM sessions WHERE expires_at <= ?`).run(Date.now());
 }
 
-function saveSession(tokenHash, username, createdAt, expiresAt) {
+function saveSession(tokenHash, username, createdAt, expiresAt, accountId = 1, role = 'admin', displayName = '') {
   cleanupExpiredSessions();
   db.prepare(`
-    INSERT OR REPLACE INTO sessions (token_hash, username, created_at, expires_at)
-    VALUES (?, ?, ?, ?)
-  `).run(tokenHash, username, createdAt, expiresAt);
+    INSERT OR REPLACE INTO sessions (token_hash, username, created_at, expires_at, account_id, role, display_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(tokenHash, username, createdAt, expiresAt, accountId, role, displayName);
 }
 
 function getSession(tokenHash) {
   const row = db.prepare(`
-    SELECT token_hash, username, created_at, expires_at
+    SELECT token_hash, username, created_at, expires_at, account_id, role, display_name
     FROM sessions
     WHERE token_hash = ?
   `).get(tokenHash);
@@ -983,7 +1121,182 @@ function deleteSession(tokenHash) {
   db.prepare(`DELETE FROM sessions WHERE token_hash = ?`).run(tokenHash);
 }
 
+function deleteSessionsByAccount(accountId) {
+  if (!accountId) return;
+  db.prepare(`DELETE FROM sessions WHERE account_id = ?`).run(accountId);
+}
+
+
+/* ── Users & Multi-Account (Phase 1) ─────────────────────── */
+function createUser({ username, password, role = 'user', display_name = '' }) {
+  const cleanUsername = String(username || '').trim();
+  if (!cleanUsername) throw new Error('Username is required');
+  if (!password || String(password).length < 6) throw new Error('Password must be at least 6 characters');
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = crypto.scryptSync(String(password), salt, 32).toString('hex');
+  const userRole = role === 'admin' ? 'admin' : 'user';
+  const now = Date.now();
+  const displayName = display_name ? String(display_name).trim() : cleanUsername;
+
+  const stmt = db.prepare(`
+    INSERT INTO users (username, password_hash, salt, role, display_name, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+  const info = stmt.run(cleanUsername, passwordHash, salt, userRole, displayName, now);
+  seedAccountDefaults(info.lastInsertRowid);
+  return {
+    id: info.lastInsertRowid,
+    username: cleanUsername,
+    role: userRole,
+    display_name: displayName,
+    created_at: now
+  };
+}
+
+function getUserByUsername(username) {
+  if (!username) return null;
+  return db.prepare(`SELECT * FROM users WHERE username = ? COLLATE NOCASE`).get(String(username).trim());
+}
+
+function getUserById(id) {
+  if (!id) return null;
+  return db.prepare(`SELECT id, username, role, display_name, created_at FROM users WHERE id = ?`).get(id);
+}
+
+function verifyUserPassword(username, password) {
+  const user = getUserByUsername(username);
+  if (!user) return null;
+
+  try {
+    const testHash = crypto.scryptSync(String(password || ''), user.salt, 32);
+    const storedHash = Buffer.from(user.password_hash, 'hex');
+    if (testHash.length === storedHash.length && crypto.timingSafeEqual(testHash, storedHash)) {
+      return {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        display_name: user.display_name
+      };
+    }
+  } catch (_) {
+    return null;
+  }
+  return null;
+}
+
+function updateUserPassword(id, newPassword) {
+  if (!newPassword || String(newPassword).length < 6) throw new Error('Password must be at least 6 characters');
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = crypto.scryptSync(String(newPassword), salt, 32).toString('hex');
+  const res = db.prepare(`
+    UPDATE users SET password_hash = ?, salt = ? WHERE id = ?
+  `).run(passwordHash, salt, id);
+  return res.changes > 0;
+}
+
+function listUsers() {
+  return db.prepare(`SELECT id, username, role, display_name, created_at FROM users ORDER BY id ASC`).all();
+}
+
+function deleteUser(id) {
+  const res = db.prepare(`DELETE FROM users WHERE id = ?`).run(id);
+  return res.changes > 0;
+}
+
+
+/* ── Device Registry (Phase 3) ───────────────────────────── */
+function hashDeviceToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+function registerDevice({ accountId = 1, deviceId, deviceType = 'sensor', penName = '' }) {
+  const cleanDeviceId = String(deviceId || '').trim();
+  if (!cleanDeviceId) throw new Error('deviceId is required');
+
+  const rawToken = 'ios_dev_' + crypto.randomBytes(24).toString('hex');
+  const tokenHash = hashDeviceToken(rawToken);
+  const now = Date.now();
+
+  const stmt = db.prepare(`
+    INSERT INTO device_registry (account_id, device_id, device_type, pen_name, device_token, registered_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(account_id, device_id) DO UPDATE SET
+      device_type = excluded.device_type,
+      pen_name = excluded.pen_name,
+      device_token = excluded.device_token,
+      registered_at = excluded.registered_at
+  `);
+  stmt.run(accountId, cleanDeviceId, String(deviceType || 'sensor').trim(), String(penName || '').trim(), tokenHash, now);
+
+  const row = db.prepare(`SELECT id, account_id, device_id, device_type, pen_name, registered_at FROM device_registry WHERE account_id = ? AND device_id = ?`).get(accountId, cleanDeviceId);
+
+  return {
+    ...row,
+    device_token: rawToken
+  };
+}
+
+function getDeviceByToken(rawToken) {
+  if (!rawToken) return null;
+  const tokenHash = hashDeviceToken(rawToken);
+  return db.prepare(`
+    SELECT id, account_id, device_id, device_type, pen_name, registered_at
+    FROM device_registry
+    WHERE device_token = ?
+  `).get(tokenHash);
+}
+
+function getDevicesByAccount(accountId = 1) {
+  return db.prepare(`
+    SELECT id, account_id, device_id, device_type, pen_name, registered_at
+    FROM device_registry
+    WHERE account_id = ?
+    ORDER BY id ASC
+  `).all(accountId);
+}
+
+function getDeviceById(id, accountId = null) {
+  if (accountId != null) {
+    return db.prepare(`
+      SELECT id, account_id, device_id, device_type, pen_name, registered_at
+      FROM device_registry
+      WHERE id = ? AND account_id = ?
+    `).get(id, accountId);
+  }
+  return db.prepare(`
+    SELECT id, account_id, device_id, device_type, pen_name, registered_at
+    FROM device_registry
+    WHERE id = ?
+  `).get(id);
+}
+
+function rotateDeviceToken(id, accountId = null) {
+  const device = getDeviceById(id, accountId);
+  if (!device) return null;
+
+  const newRawToken = 'ios_dev_' + crypto.randomBytes(24).toString('hex');
+  const tokenHash = hashDeviceToken(newRawToken);
+
+  db.prepare(`UPDATE device_registry SET device_token = ? WHERE id = ?`).run(tokenHash, id);
+  return {
+    ...device,
+    device_token: newRawToken
+  };
+}
+
+function deleteDevice(id, accountId = null) {
+  if (accountId != null) {
+    const res = db.prepare(`DELETE FROM device_registry WHERE id = ? AND account_id = ?`).run(id, accountId);
+    return res.changes > 0;
+  }
+  const res = db.prepare(`DELETE FROM device_registry WHERE id = ?`).run(id);
+  return res.changes > 0;
+}
+
 module.exports = {
+  createUser, getUserByUsername, getUserById, verifyUserPassword, updateUserPassword, listUsers, deleteUser,
+  registerDevice, getDeviceByToken, getDevicesByAccount, getDeviceById, rotateDeviceToken, deleteDevice, seedAccountDefaults,
   db,
   insertReading, latestReading, readingsSince, reportSummary,
   getAggregatedReadings, rawReadingsIterator,
@@ -995,6 +1308,6 @@ module.exports = {
   logActivity, recentActivity,
   saveDiagnostics, latestDiagnostics,
   insertOfflineBatch, pendingOfflineCount, latestSyncTs,
-  saveSession, getSession, deleteSession, cleanupExpiredSessions,
+  saveSession, getSession, deleteSession, deleteSessionsByAccount, cleanupExpiredSessions,
   migrateRemoveMistSchedules,
 };

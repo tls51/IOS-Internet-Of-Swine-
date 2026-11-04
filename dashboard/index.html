@@ -19,7 +19,8 @@
         <h1 class="logo-title">IoS</h1>
         <p class="logo-sub">Internet of Swine · Admin Portal</p>
       </div>
-      <div class="card login-card">
+      <!-- Sign In Card -->
+      <div class="card login-card" id="signin-card">
         <div class="field-group">
           <label class="field-label">Username</label>
           <input id="inp-user" class="inp" type="text" placeholder="admin" />
@@ -30,6 +31,31 @@
         </div>
         <p id="login-err" class="login-err hidden"></p>
         <button id="btn-login" class="btn btn-primary btn-full">Sign In</button>
+        <div style="text-align:center; margin-top:16px;">
+          <span class="muted small">Don't have an account? </span>
+          <button id="btn-show-register" class="btn btn-outline btn-full" style="margin-top:8px;">Create New Farm Account</button>
+        </div>
+      </div>
+
+      <!-- Register Card -->
+      <div class="card login-card hidden" id="register-card">
+        <div class="field-group">
+          <label class="field-label">Username</label>
+          <input id="reg-user" class="inp" type="text" placeholder="e.g. green_farm" />
+        </div>
+        <div class="field-group">
+          <label class="field-label">Farm / Display Name</label>
+          <input id="reg-name" class="inp" type="text" placeholder="e.g. Green Valley Swine Farm" />
+        </div>
+        <div class="field-group">
+          <label class="field-label">Password</label>
+          <input id="reg-pass" class="inp" type="password" placeholder="min. 6 characters" />
+        </div>
+        <p id="register-err" class="login-err hidden"></p>
+        <button id="btn-register" class="btn btn-primary btn-full">Create Account</button>
+        <div style="text-align:center; margin-top:16px;">
+          <button id="btn-show-signin" class="btn btn-outline btn-full">Back to Sign In</button>
+        </div>
       </div>
       <p class="login-note">Dual-mode: Online &amp; Offline (ESP32 local hosting)</p>
     </div>
@@ -47,7 +73,7 @@
         <span class="pig-icon-sm"></span>
         <div>
           <div class="sidebar-title">IoS System</div>
-          <div class="sidebar-sub">Internet of Swine</div>
+          <div class="sidebar-sub" id="sidebar-username">Internet of Swine</div>
         </div>
       </div>
 
@@ -60,6 +86,7 @@
           <li><button class="nav-btn" data-page="clean"><span></span> Cleaning Schedule</button></li>
           <li><button class="nav-btn" data-page="auto"><span></span> Auto Systems</button></li>
           <li><button class="nav-btn" data-page="reports"><span></span> Reports</button></li>
+          <li data-admin-only class="hidden"><button class="nav-btn" data-page="users"><span>👥</span> User Accounts</button></li>
         </ul>
       </nav>
 
@@ -635,6 +662,20 @@
             </div>
           </div>
 
+          <!-- REGISTERED ESP32 DEVICES CARD -->
+          <div class="card mb-20" id="card-devices">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:10px;">
+              <div>
+                <div class="field-label" style="font-size:16px; font-weight:600;">My Registered ESP32 Devices</div>
+                <p class="muted small">Link and authenticate your hardware sensor and water nodes to this account.</p>
+              </div>
+              <button id="btn-open-register-device" class="btn btn-primary">+ Register Device</button>
+            </div>
+            <div id="devices-list-wrap">
+              <p class="muted small">Loading devices…</p>
+            </div>
+          </div>
+
           <div id="auto-sys-list"></div>
         </section>
 
@@ -666,6 +707,22 @@
           </div>
         </section>
 
+        <!-- USER ACCOUNTS (ADMIN ONLY) -->
+        <section id="page-users" class="page">
+          <div class="card mb-20">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:10px;">
+              <div>
+                <div class="field-label" style="font-size:16px; font-weight:600;">System User Accounts</div>
+                <p class="muted small">Manage user accounts, roles, and separate farm systems across the platform.</p>
+              </div>
+              <button id="btn-admin-add-user" class="btn btn-primary">+ Add New User</button>
+            </div>
+            <div id="users-table-container">
+              <p class="muted small">Loading users…</p>
+            </div>
+          </div>
+        </section>
+
       </main>
     </div><!-- /main-wrap -->
   </div><!-- /app-shell -->
@@ -694,6 +751,95 @@
         <button id="modal-save"   class="btn btn-primary flex-1">Add Schedule</button>
       </div>
       <p id="modal-error" role="alert" hidden style="color:var(--danger);margin-top:12px"></p>
+    </div>
+  </div>
+
+  <!-- ADD USER MODAL (ADMIN) -->
+  <div id="user-modal" class="modal-overlay hidden">
+    <div class="modal-box card">
+      <div class="modal-head">
+        <span class="modal-title">Create User Account</span>
+        <button id="user-modal-close" class="modal-close">×</button>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Username</label>
+        <input id="modal-user-username" class="inp" type="text" placeholder="e.g. farmer_john" />
+      </div>
+      <div class="field-group">
+        <label class="field-label">Display Name / Farm</label>
+        <input id="modal-user-display" class="inp" type="text" placeholder="e.g. John's Piggery" />
+      </div>
+      <div class="field-group">
+        <label class="field-label">Password</label>
+        <input id="modal-user-password" class="inp" type="password" placeholder="min. 6 characters" />
+      </div>
+      <div class="field-group">
+        <label class="field-label">Role</label>
+        <select id="modal-user-role" class="inp">
+          <option value="user">User (Standard Farmer)</option>
+          <option value="admin">Administrator</option>
+        </select>
+      </div>
+      <p id="user-modal-err" class="login-err hidden"></p>
+      <div class="modal-footer">
+        <button id="user-modal-cancel" class="btn btn-outline flex-1">Cancel</button>
+        <button id="user-modal-save" class="btn btn-primary flex-1">Create Account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- REGISTER DEVICE MODAL -->
+  <div id="device-modal" class="modal-overlay hidden">
+    <div class="modal-box card">
+      <div class="modal-head">
+        <span class="modal-title">Register ESP32 Device</span>
+        <button id="device-modal-close" class="modal-close">×</button>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Device Identifier (ID)</label>
+        <input id="modal-device-id" class="inp" type="text" placeholder="e.g. esp32_pen1_env" />
+        <span class="muted smaller">Unique ID for this device (letters, numbers, underscores, dashes)</span>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Device Type</label>
+        <select id="modal-device-type" class="inp">
+          <option value="sensor">Sensor Node (DHT22 / THI / Temp & Humidity)</option>
+          <option value="water">Water Node (Flow / Ultrasonic Tank / Water Mgmt)</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Pen / Barn Name</label>
+        <input id="modal-device-pen" class="inp" type="text" placeholder="e.g. Pen A - Breeding Sow" />
+      </div>
+      <p id="device-modal-err" class="login-err hidden"></p>
+      <div class="modal-footer">
+        <button id="device-modal-cancel" class="btn btn-outline flex-1">Cancel</button>
+        <button id="device-modal-save" class="btn btn-primary flex-1">Register Device</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- DEVICE TOKEN CREATED MODAL (One-Time Token View) -->
+  <div id="device-token-modal" class="modal-overlay hidden">
+    <div class="modal-box card">
+      <div class="modal-head">
+        <span class="modal-title">Device Token Generated</span>
+        <button id="device-token-close" class="modal-close">×</button>
+      </div>
+      <div style="background: rgba(245, 158, 11, 0.1); border-left: 4px solid var(--warn); padding: 12px; border-radius: 4px; margin-bottom: 14px;">
+        <strong style="color:var(--warn); font-size:13px;">Save this token now!</strong>
+        <p class="muted small" style="margin-top:4px;">For security, this token is hashed in the database and will <strong>never be shown again</strong>. Paste it into your ESP32's <code>secrets.h</code> as <code>AUTH_TOKEN</code>.</p>
+      </div>
+      <div class="field-group">
+        <label class="field-label">Device Token</label>
+        <div style="display:flex; gap:8px;">
+          <input id="modal-token-display" class="inp" type="text" readonly style="font-family:monospace; font-size:12px; background:var(--bg);" />
+          <button id="btn-copy-device-token" class="btn btn-outline" style="white-space:nowrap;">📋 Copy</button>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-device-token-done" class="btn btn-primary flex-1">Done</button>
+      </div>
     </div>
   </div>
 

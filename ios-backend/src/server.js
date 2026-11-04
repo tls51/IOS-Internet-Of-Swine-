@@ -30,25 +30,8 @@ function reportSince(range = '24h') {
 }
 const crypto = require('crypto');
 
-const ADMIN_USER = process.env.IOS_ADMIN_USER || 'admin';
-const ADMIN_PASSWORD = process.env.IOS_ADMIN_PASS || 'ios2024';
-const ADMIN_SALT = crypto.randomBytes(16);
-const ADMIN_PASSWORD_HASH = crypto.scryptSync(ADMIN_PASSWORD, ADMIN_SALT, 32);
-
 function verifyAdminCredentials(user, pass) {
-  const userBuf = Buffer.from(String(user || ''));
-  const adminUserBuf = Buffer.from(String(ADMIN_USER));
-  const userMatch = userBuf.length === adminUserBuf.length && crypto.timingSafeEqual(userBuf, adminUserBuf);
-
-  let passMatch = false;
-  try {
-    const passHash = crypto.scryptSync(String(pass || ''), ADMIN_SALT, 32);
-    passMatch = crypto.timingSafeEqual(ADMIN_PASSWORD_HASH, passHash);
-  } catch (_) {
-    passMatch = false;
-  }
-
-  return userMatch && passMatch;
+  return db.verifyUserPassword(user, pass);
 }
 const AUTH_TOKEN = process.env.IOS_AUTH_TOKEN || 'ios-control-secret-token';
 const SESSION_TTL_MS = 24 * 3600 * 1000; // 24 hours
@@ -56,28 +39,77 @@ const SESSION_TTL_MS = 24 * 3600 * 1000; // 24 hours
 let relayState = false;
 let manualPumpActive = false;
 
-/* Short-TTL status cache (PERF-01) */
-let statusCache = {
-  ts: 0,
-  data: null
-};
+/* Short-TTL status cache (PERF-01, Per-Account Cache) */
+const statusCache = new Map();
 const STATUS_CACHE_TTL_MS = 2000;
 
-function invalidateStatusCache() {
-  statusCache.ts = 0;
-  statusCache.data = null;
+function invalidateStatusCache(accountId) {
+  if (accountId != null) {
+    statusCache.delete(accountId);
+  } else {
+    statusCache.clear();
+  }
 }
 
 function hashToken(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
 
-function createSession(username = 'admin') {
+// Rate limiting for failed login attempts
+// Map: ip -> { count: number, firstAttemptAt: number, lockedUntil: number }
+const loginAttempts = new Map();
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes lockout
+const ATTEMPT_WINDOW_MS = 5 * 60 * 1000; // 5 minute tracking window
+
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip);
+  if (!entry) return null;
+
+  if (entry.lockedUntil && now < entry.lockedUntil) {
+    const remainingSec = Math.ceil((entry.lockedUntil - now) / 1000);
+    return 'Too many failed login attempts. Temporarily locked out. Please try again in ' + remainingSec + ' seconds.';
+  }
+
+  if (entry.lockedUntil && now >= entry.lockedUntil) {
+    loginAttempts.delete(ip);
+    return null;
+  }
+  if (now - entry.firstAttemptAt > ATTEMPT_WINDOW_MS) {
+    loginAttempts.delete(ip);
+    return null;
+  }
+
+  return null;
+}
+
+function recordFailedLogin(ip) {
+  const now = Date.now();
+  const entry = loginAttempts.get(ip) || { count: 0, firstAttemptAt: now, lockedUntil: 0 };
+  if (now - entry.firstAttemptAt > ATTEMPT_WINDOW_MS) {
+    entry.count = 1;
+    entry.firstAttemptAt = now;
+    entry.lockedUntil = 0;
+  } else {
+    entry.count += 1;
+  }
+
+  if (entry.count >= MAX_FAILED_ATTEMPTS) {
+    entry.lockedUntil = now + LOCKOUT_MS;
+  }
+  loginAttempts.set(ip, entry);
+}
+
+function recordSuccessfulLogin(ip) {
+  loginAttempts.delete(ip);
+}
+function createSession(username = 'admin', accountId = 1, role = 'admin', displayName = '') {
   const token = crypto.randomBytes(16).toString('hex');
   const now = Date.now();
   const expiresAt = now + SESSION_TTL_MS;
   const tokenHash = hashToken(token);
-  db.saveSession(tokenHash, username, now, expiresAt);
+  db.saveSession(tokenHash, username, now, expiresAt, accountId, role, displayName);
   return { token, expiresIn: Math.floor(SESSION_TTL_MS / 1000) };
 }
 
@@ -111,6 +143,9 @@ function getSessionTokenFromReq(req) {
   if (req.headers['x-auth-token']) {
     return req.headers['x-auth-token'];
   }
+  if (req.headers['x-device-token']) {
+    return req.headers['x-device-token'];
+  }
   if (req.headers.authorization) {
     const auth = req.headers.authorization;
     if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
@@ -118,22 +153,43 @@ function getSessionTokenFromReq(req) {
   return null;
 }
 
-function isAuthorized(req) {
+function getUserFromReq(req) {
   const token = getSessionTokenFromReq(req);
-  if (!token) return false;
-  if (isValidSession(token)) return true;
+  if (!token) return null;
+  const tokenHash = hashToken(token);
+  const session = db.getSession(tokenHash);
+  if (session && session.username) {
+    if (session.account_id && session.role) {
+      return {
+        id: session.account_id,
+        username: session.username,
+        role: session.role,
+        display_name: session.display_name || session.username
+      };
+    }
+    const user = db.getUserByUsername(session.username);
+    if (user) {
+      return { id: user.id, username: user.username, role: user.role, display_name: user.display_name };
+    }
+  }
   if (AUTH_TOKEN) {
     const tokenBuf = Buffer.from(String(token));
     const authBuf = Buffer.from(String(AUTH_TOKEN));
     if (tokenBuf.length === authBuf.length && crypto.timingSafeEqual(tokenBuf, authBuf)) {
-      return true;
+      return { id: 1, username: 'admin', role: 'admin', display_name: 'Administrator' };
     }
   }
-  return false;
+  return null;
+}
+
+function isAuthorized(req) {
+  return !!getUserFromReq(req);
 }
 
 function requireAuth(req, res, next) {
-  if (isAuthorized(req)) {
+  const user = getUserFromReq(req);
+  if (user) {
+    req.user = user;
     return next();
   }
   return res.status(401).json({
@@ -142,19 +198,110 @@ function requireAuth(req, res, next) {
   });
 }
 
+
+function getReqAccountId(req) {
+  if (req && req.user && req.user.id) return req.user.id;
+  if (req && req.device && req.device.account_id) return req.device.account_id;
+  const device = getDeviceFromReq(req);
+  if (device) {
+    req.device = device;
+    req.user = { id: device.account_id, username: null, role: 'device' };
+    return device.account_id;
+  }
+  const user = getUserFromReq(req);
+  if (user && user.id) {
+    req.user = user;
+    return user.id;
+  }
+  return 1;
+}
+
+
+function getDeviceFromReq(req) {
+  const token = getSessionTokenFromReq(req);
+  if (!token) return null;
+  const device = db.getDeviceByToken(token);
+  if (device) return device;
+  return null;
+}
+
+function requireDeviceAuth(req, res, next) {
+  const token = getSessionTokenFromReq(req);
+  if (!token) {
+    return res.status(401).json({ ok: false, error: 'Device token required' });
+  }
+
+  // 1. Registered device token
+  const device = db.getDeviceByToken(token);
+  if (device) {
+    req.device = device;
+    req.user = { id: device.account_id, username: null, role: 'device' };
+    return next();
+  }
+
+  // 2. Legacy global AUTH_TOKEN fallback
+  if (AUTH_TOKEN) {
+    const tokenBuf = Buffer.from(String(token));
+    const authBuf = Buffer.from(String(AUTH_TOKEN));
+    if (tokenBuf.length === authBuf.length && crypto.timingSafeEqual(tokenBuf, authBuf)) {
+      req.device = { id: null, account_id: 1, device_id: 'legacy-esp32', pen_name: 'Main' };
+      req.user = { id: 1, username: 'admin', role: 'device' };
+      return next();
+    }
+  }
+
+  // 3. Authenticated user session fallback
+  const user = getUserFromReq(req);
+  if (user) {
+    req.user = user;
+    return next();
+  }
+
+  return res.status(401).json({ ok: false, error: 'Unauthorized: Invalid device token' });
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'admin') {
+    return res.status(403).json({
+      ok: false,
+      error: 'Forbidden: Admin access required'
+    });
+  }
+  next();
+}
+
 app.get('/api/info', (req, res) => res.json({ mode: 'cloud', authRequired: true, reports: 'sqlite' }));
 
 app.post('/api/login', (req, res) => {
+  const clientIp = req.ip || req.socket.remoteAddress || '127.0.0.1';
+  const rateLimitMsg = checkLoginRateLimit(clientIp);
+  if (rateLimitMsg) {
+    return res.status(429).json({ ok: false, error: rateLimitMsg });
+  }
+
   const { username, password, user, pass } = req.body || {};
   const u = (username !== undefined ? username : user || '').trim();
   const p = (password !== undefined ? password : pass || '');
 
-  if (verifyAdminCredentials(u, p)) {
-    const { token, expiresIn } = createSession(u);
+  const verifiedUser = verifyAdminCredentials(u, p);
+  if (verifiedUser) {
+    recordSuccessfulLogin(clientIp);
+    const { token, expiresIn } = createSession(verifiedUser.username, verifiedUser.id, verifiedUser.role, verifiedUser.display_name);
     res.setHeader('Set-Cookie', `ios_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${expiresIn}`);
-    return res.json({ ok: true, token, expiresIn });
+    return res.json({
+      ok: true,
+      token,
+      expiresIn,
+      user: {
+        id: verifiedUser.id,
+        username: verifiedUser.username,
+        role: verifiedUser.role,
+        display_name: verifiedUser.display_name
+      }
+    });
   }
 
+  recordFailedLogin(clientIp);
   return res.status(401).json({
     ok: false,
     error: 'Invalid credentials'
@@ -169,10 +316,209 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.get('/api/session', (req, res) => {
-  if (isAuthorized(req)) {
-    return res.json({ ok: true, authenticated: true });
+  const user = getUserFromReq(req);
+  if (user) {
+    return res.json({ ok: true, authenticated: true, user });
   }
   return res.status(401).json({ ok: false, authenticated: false, error: 'Unauthorized: Invalid or expired session' });
+});
+
+app.get('/api/me', requireAuth, (req, res) => {
+  return res.json({ ok: true, user: req.user });
+});
+
+// Public self-service registration (farmers creating their own account)
+app.post('/api/register/public', (req, res) => {
+  const { username, password, display_name } = req.body || {};
+  const u = String(username || '').trim();
+  const p = String(password || '');
+  const r = 'user'; // Public signup is always standard 'user'
+  const d = display_name ? String(display_name).trim() : u;
+
+  if (!u || u.length < 3 || u.length > 32) {
+    return res.status(400).json({ ok: false, error: 'Username must be between 3 and 32 characters' });
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(u)) {
+    return res.status(400).json({ ok: false, error: 'Username may only contain letters, numbers, underscores, and dashes' });
+  }
+  if (!p || p.length < 6) {
+    return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
+  }
+
+  const existing = db.getUserByUsername(u);
+  if (existing) {
+    return res.status(409).json({ ok: false, error: 'Username already exists' });
+  }
+
+  try {
+    const newUser = db.createUser({ username: u, password: p, role: r, display_name: d });
+    db.logActivity('Info', 'New account registered: ' + newUser.username, null, newUser.id);
+    return res.status(201).json({
+      ok: true,
+      user: newUser
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Failed to create user' });
+  }
+});
+
+app.post('/api/register', requireAuth, requireAdmin, (req, res) => {
+  const { username, password, role, display_name } = req.body || {};
+  const u = String(username || '').trim();
+  const p = String(password || '');
+  const r = (role === 'admin' ? 'admin' : 'user');
+  const d = display_name ? String(display_name).trim() : u;
+
+  if (!u || u.length < 3 || u.length > 32) {
+    return res.status(400).json({ ok: false, error: 'Username must be between 3 and 32 characters' });
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(u)) {
+    return res.status(400).json({ ok: false, error: 'Username may only contain letters, numbers, underscores, and dashes' });
+  }
+  if (!p || p.length < 6) {
+    return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
+  }
+
+  const existing = db.getUserByUsername(u);
+  if (existing) {
+    return res.status(409).json({ ok: false, error: 'Username already exists' });
+  }
+
+  try {
+    const newUser = db.createUser({ username: u, password: p, role: r, display_name: d });
+    db.logActivity('Info', `New account created: ${newUser.username} (${newUser.role})`);
+    return res.status(201).json({
+      ok: true,
+      user: newUser
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Failed to create user' });
+  }
+});
+
+app.get('/api/users', requireAuth, requireAdmin, (req, res) => {
+  const users = db.listUsers();
+  return res.json({ ok: true, users });
+});
+
+app.delete('/api/users/:id', requireAuth, requireAdmin, (req, res) => {
+  const targetId = parseInt(req.params.id, 10);
+  if (isNaN(targetId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid user ID' });
+  }
+  if (req.user && req.user.id === targetId) {
+    return res.status(400).json({ ok: false, error: 'Cannot delete your own account' });
+  }
+  const deleted = db.deleteUser(targetId);
+  if (!deleted) {
+    return res.status(404).json({ ok: false, error: 'User not found' });
+  }
+  db.logActivity('Info', `Account deleted (id: ${targetId})`);
+  return res.json({ ok: true, message: 'User deleted' });
+});
+
+app.post('/api/users/:id/password', requireAuth, (req, res) => {
+  const targetId = parseInt(req.params.id, 10);
+  if (isNaN(targetId)) {
+    return res.status(400).json({ ok: false, error: 'Invalid user ID' });
+  }
+  if (req.user.role !== 'admin' && req.user.id !== targetId) {
+    return res.status(403).json({ ok: false, error: "Forbidden: Cannot change another user's password" });
+  }
+  const { password } = req.body || {};
+  if (!password || String(password).length < 6) {
+    return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
+  }
+  try {
+    const updated = db.updateUserPassword(targetId, String(password));
+    if (!updated) {
+      return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+    db.deleteSessionsByAccount(targetId);
+    db.logActivity('Info', `Password updated for user id: ${targetId}`);
+    return res.json({ ok: true, message: 'Password updated successfully' });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Failed to update password' });
+  }
+});
+
+app.post('/api/devices', requireAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
+  const { device_id, device_type, pen_name } = req.body || {};
+  const dId = String(device_id || '').trim();
+  if (!dId || dId.length < 2 || dId.length > 64) {
+    return res.status(400).json({ ok: false, error: 'device_id is required (2-64 characters)' });
+  }
+
+  try {
+    const registered = db.registerDevice({
+      accountId,
+      deviceId: dId,
+      deviceType: device_type || 'sensor',
+      penName: pen_name || ''
+    });
+    db.logActivity('Info', `New hardware device registered: ${dId} (${pen_name || 'Unassigned'})`, null, accountId);
+    return res.status(201).json({
+      ok: true,
+      device: {
+        id: registered.id,
+        account_id: registered.account_id,
+        device_id: registered.device_id,
+        device_type: registered.device_type,
+        pen_name: registered.pen_name,
+        registered_at: registered.registered_at
+      },
+      token: registered.device_token
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Failed to register device' });
+  }
+});
+
+app.get('/api/devices', requireAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
+  if (req.user && req.user.role === 'admin' && req.query.all === 'true') {
+    const allDevices = db.db.prepare('SELECT id, account_id, device_id, device_type, pen_name, registered_at FROM device_registry ORDER BY id ASC').all();
+    return res.json({ ok: true, devices: allDevices });
+  }
+  const devices = db.getDevicesByAccount(accountId);
+  return res.json({ ok: true, devices });
+});
+
+app.delete('/api/devices/:id', requireAuth, (req, res) => {
+  const targetId = parseInt(req.params.id, 10);
+  if (isNaN(targetId)) return res.status(400).json({ ok: false, error: 'Invalid device ID' });
+  const accountId = (req.user && req.user.role === 'admin') ? null : getReqAccountId(req);
+  const deleted = db.deleteDevice(targetId, accountId);
+  if (!deleted) {
+    return res.status(404).json({ ok: false, error: 'Device not found' });
+  }
+  db.logActivity('Info', `Device unregistered (id: ${targetId})`, null, getReqAccountId(req));
+  return res.json({ ok: true, message: 'Device deleted' });
+});
+
+app.post('/api/devices/:id/rotate-token', requireAuth, (req, res) => {
+  const targetId = parseInt(req.params.id, 10);
+  if (isNaN(targetId)) return res.status(400).json({ ok: false, error: 'Invalid device ID' });
+  const accountId = (req.user && req.user.role === 'admin') ? null : getReqAccountId(req);
+  const rotated = db.rotateDeviceToken(targetId, accountId);
+  if (!rotated) {
+    return res.status(404).json({ ok: false, error: 'Device not found' });
+  }
+  db.logActivity('Info', `Device token rotated for ${rotated.device_id}`, null, getReqAccountId(req));
+  return res.json({
+    ok: true,
+    token: rotated.device_token
+  });
+});
+
+app.get('/api/devices/verify', requireDeviceAuth, (req, res) => {
+  return res.json({
+    ok: true,
+    registered: true,
+    device: req.device,
+    account_id: req.user.id
+  });
 });
 
 app.post('/api/time', requireAuth, (req, res) => {
@@ -180,7 +526,10 @@ app.post('/api/time', requireAuth, (req, res) => {
   return res.json({ ok: true, epoch, rtcOk: true });
 });
 
-app.get('/api/reports/summary', requireAuth, (req, res) => res.json({ ...db.reportSummary(), source: 'sqlite', supportedRanges: Object.keys(REPORT_RANGES) }));
+app.get('/api/reports/summary', requireAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
+  res.json({ ...db.reportSummary(accountId), source: 'sqlite', supportedRanges: Object.keys(REPORT_RANGES) });
+});
 
 
 /* ============================================================
@@ -397,13 +746,9 @@ function isScheduleActiveNow(sched) {
    DHT22 + THI
    ============================================================ */
 
-app.post('/api/readings', (req, res) => {
-
-  const {
-    temp,
-    humidity,
-    device_id
-  } = req.body;
+app.post('/api/readings', requireDeviceAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
+  const { temp, humidity, device_id } = req.body;
 
   if (
     typeof temp !== 'number' ||
@@ -420,52 +765,38 @@ app.post('/api/readings', (req, res) => {
     temp,
     humidity,
     thi,
-    device_id
+    device_id,
+    accountId
   });
+  invalidateStatusCache(accountId);
 
 
   // Activity log
-  const thiThresholds =
-    db.getTHIThresholds();
+  const thiThresholds = db.getTHIThresholds(accountId);
 
   const status =
     thiLevel(thi, thiThresholds);
 
-  db.logActivity(
-    'Mist',
-    `DHT22 reading — Temp ${temp}°C, Humidity ${humidity}%, THI ${thi} (${status.label})`
-  );
+  db.logActivity('Mist', `DHT22 reading — Temp ${temp}°C, Humidity ${humidity}%, THI ${thi} (${status.label})`, null, accountId);
 
 
   // Temperature threshold
-  const threshold =
-    parseFloat(
-      db.getSetting('threshold', '32')
-    );
+  const threshold = parseFloat(db.getSetting('threshold', '32', accountId));
 
   if (temp > threshold) {
 
-    db.logActivity(
-      'Mist',
-      `Misting condition met — Temp ${temp}°C exceeded threshold ${threshold}°C`
-    );
+    db.logActivity('Mist', `Misting condition met — Temp ${temp}°C exceeded threshold ${threshold}°C`, null, accountId);
   }
 
 
   // THI alerts
   if (thi >= thiThresholds.extremeMax) {
 
-    db.logActivity(
-      'Alert',
-      `DANGER: THI ${thi} — immediate cooling required`
-    );
+    db.logActivity('Alert', `DANGER: THI ${thi} — immediate cooling required`, null, accountId);
 
   } else if (thi >= thiThresholds.stressMax) {
 
-    db.logActivity(
-      'Alert',
-      `WARNING: Extreme heat stress detected (THI ${thi})`
-    );
+    db.logActivity('Alert', `WARNING: Extreme heat stress detected (THI ${thi})`, null, accountId);
   }
 
 
@@ -481,8 +812,8 @@ app.post('/api/readings', (req, res) => {
    WATER TANK + FLOW
    ============================================================ */
 
-app.post('/api/water', (req, res) => {
-
+app.post('/api/water', requireDeviceAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
   const {
     level_pct,
     used_l,
@@ -498,7 +829,7 @@ app.post('/api/water', (req, res) => {
     other_l
   } = req.body;
 
-  const prev = db.latestWater();
+  const prev = db.latestWater(accountId);
 
 
   const hasLevel =
@@ -564,7 +895,8 @@ app.post('/api/water', (req, res) => {
     mist_l: typeof mist_l === 'number' ? mist_l : null,
     bath_l: typeof bath_l === 'number' ? bath_l : null,
     clean_l: typeof clean_l === 'number' ? clean_l : null,
-    other_l: typeof other_l === 'number' ? other_l : null
+    other_l: typeof other_l === 'number' ? other_l : null,
+    accountId
   });
 
 
@@ -575,13 +907,11 @@ app.post('/api/water', (req, res) => {
     (!prev || prev.level_pct >= 20)
   ) {
 
-    db.logActivity(
-      'Alert',
-      `LOW WATER: Tank level critical (${Math.round(finalLevel)}%)`
-    );
+    db.logActivity('Alert', `LOW WATER: Tank level critical (${Math.round(finalLevel)}%)`, null, accountId);
   }
 
 
+  invalidateStatusCache(accountId);
   res.status(201).json({
 
     ok: true,
@@ -600,38 +930,26 @@ app.post('/api/water', (req, res) => {
    ============================================================ */
 
 app.get('/api/status', (req, res) => {
+  const accountId = getReqAccountId(req);
   const now = Date.now();
-  if (statusCache.data && (now - statusCache.ts < STATUS_CACHE_TTL_MS)) {
-    return res.json(statusCache.data);
+  const cached = statusCache.get(accountId);
+  if (cached && (now - cached.ts < STATUS_CACHE_TTL_MS)) {
+    return res.json(cached.data);
   }
 
-  const reading =
-    db.latestReading();
-
-  const water =
-    db.latestWater();
-
-  const threshold =
-    parseFloat(
-      db.getSetting('threshold', '32')
-    );
-
-  const thiThresholds =
-    db.getTHIThresholds();
-
-  const operationDurations =
-    db.getOperationDurations();
+  const reading = db.latestReading(accountId);
+  const water = db.latestWater(accountId);
+  const threshold = parseFloat(db.getSetting('threshold', '32', accountId));
+  const thiThresholds = db.getTHIThresholds(accountId);
+  const operationDurations = db.getOperationDurations(accountId);
 
 
   /* ----------------------------------------------------------
      GET SCHEDULES FROM SQLITE DATABASE
      ---------------------------------------------------------- */
 
-  const bathSchedules =
-    db.listSchedules('bath');
-
-  const cleanSchedules =
-    db.listSchedules('clean');
+  const bathSchedules = db.listSchedules('bath', accountId);
+  const cleanSchedules = db.listSchedules('clean', accountId);
 
 
   /* ----------------------------------------------------------
@@ -735,8 +1053,7 @@ app.get('/api/status', (req, res) => {
      CURRENT SYSTEM STATES
      ---------------------------------------------------------- */
 
-  const diagnostics =
-    db.latestDiagnostics();
+  const diagnostics = db.latestDiagnostics(accountId);
 
   const sdDetails = (diagnostics && diagnostics.details && diagnostics.details.sd_info)
     ? diagnostics.details.sd_info
@@ -759,7 +1076,7 @@ app.get('/api/status', (req, res) => {
     );
 
   // Latest telemetry flags if under 60 s old, otherwise unknown/false
-  const telem = db.latestTelemetry ? db.latestTelemetry() : null;
+  const telem = db.latestTelemetry ? db.latestTelemetry(accountId) : null;
   const isTelemFresh = !!(telem && telem.ts && (now - telem.ts <= 60000));
 
   const mistActive = isTelemFresh ? (telem.mist_on != null ? !!telem.mist_on : false) : false;
@@ -795,10 +1112,10 @@ app.get('/api/status', (req, res) => {
     cleanActive ||
     (isTelemFresh && telem.pump_on != null ? !!telem.pump_on : false);
 
-  const waterUsedToday = db.getTodayWaterUsage ? db.getTodayWaterUsage() : 0;
+  const waterUsedToday = db.getTodayWaterUsage ? db.getTodayWaterUsage(accountId) : 0;
   const waterUsed = waterUsedToday;
   const waterUsedSinceBoot = water ? (water.used_l || 0) : 0;
-  const waterUsage = db.getWaterUsage ? db.getWaterUsage('7d') : null;
+  const waterUsage = db.getWaterUsage ? db.getWaterUsage('7d', accountId) : null;
 
 
   /* ----------------------------------------------------------
@@ -835,8 +1152,8 @@ app.get('/api/status', (req, res) => {
     sdSpiFrequencyHz: sdDetails ? (sdDetails.spiFrequencyHz || 0) : 0,
     backendOnline: true,
     pendingOfflineCount: sdDetails ? (sdDetails.pendingCount ?? sdDetails.pendingOfflineCount ?? 0) : 0,
-    syncedCount: db.pendingOfflineCount ? db.pendingOfflineCount() : (sdDetails ? (sdDetails.syncedCount || 0) : 0),
-    lastSyncTs: db.latestSyncTs ? db.latestSyncTs() : (sdDetails ? (sdDetails.lastSyncTs || null) : null),
+    syncedCount: db.pendingOfflineCount ? db.pendingOfflineCount(accountId) : (sdDetails ? (sdDetails.syncedCount || 0) : 0),
+    lastSyncTs: db.latestSyncTs ? db.latestSyncTs(accountId) : (sdDetails ? (sdDetails.lastSyncTs || null) : null),
     syncInProgress: sdDetails ? !!sdDetails.syncInProgress : false,
     sd: sdDetails || {
       ok: diagnostics ? diagnostics.sd_ok : null,
@@ -914,8 +1231,7 @@ app.get('/api/status', (req, res) => {
         : null
   };
 
-  statusCache.ts = Date.now();
-  statusCache.data = statusPayload;
+  statusCache.set(accountId, { ts: Date.now(), data: statusPayload });
   res.json(statusPayload);
 });
 
@@ -925,6 +1241,7 @@ app.get('/api/status', (req, res) => {
    ============================================================ */
 
 app.get('/api/readings/history', (req, res) => {
+  const accountId = getReqAccountId(req);
 
   const range =
     req.query.range || '24h';
@@ -935,11 +1252,11 @@ app.get('/api/readings/history', (req, res) => {
   const since =
     req.query.since ? Number(req.query.since) : (range === 'all' ? 0 : until - (REPORT_RANGES[range] || REPORT_RANGES['24h']));
 
-  const points =
-    db.getAggregatedReadings({
+  const points = db.getAggregatedReadings({
       range,
       sinceMs: since,
-      untilMs: until
+      untilMs: until,
+      accountId
     });
 
   res.json(points);
@@ -951,15 +1268,14 @@ app.get('/api/readings/history', (req, res) => {
    ============================================================ */
 
 app.get('/api/water/usage', requireAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
   const range = req.query.range || '7d';
-  res.json(db.getWaterUsage(range));
+  res.json(db.getWaterUsage(range, accountId));
 });
 
 app.get('/api/water/weekly', requireAuth, (req, res) => {
-
-  res.json(
-    db.weeklyWaterUsage()
-  );
+  const accountId = getReqAccountId(req);
+  res.json(db.weeklyWaterUsage(undefined, accountId));
 });
 
 app.get('/api/water/breakdown', requireAuth, (req, res) => {
@@ -969,7 +1285,8 @@ app.get('/api/water/breakdown', requireAuth, (req, res) => {
     return res.status(400).json({ ok: false, error: `range must be one of: ${validRanges.join(', ')}` });
   }
   const dbRange = range === 'today' ? '24h' : range;
-  const usage = db.getWaterUsage(dbRange);
+  const accountId = getReqAccountId(req);
+  const usage = db.getWaterUsage(dbRange, accountId);
   const totals = usage.totals || { mist: 0, bathe: 0, clean: 0, other: 0, total: 0 };
   if (range === 'today') {
     const todayEntry = usage.days && usage.days.length > 0
@@ -1012,12 +1329,9 @@ app.get('/api/water/breakdown', requireAuth, (req, res) => {
 */
 
 app.get('/api/schedules', (req, res) => {
-
-  const type =
-    req.query.type;
-
-  // The ESP32 polls this snapshot and caches it for operation without Node.
-  if (type === 'all') return res.json(['bath', 'clean'].flatMap(t => db.listSchedules(t)));
+  const accountId = getReqAccountId(req);
+  const type = req.query.type;
+  if (type === 'all') return res.json(['bath', 'clean'].flatMap(t => db.listSchedules(t, accountId)));
 
 
   if (
@@ -1032,9 +1346,7 @@ app.get('/api/schedules', (req, res) => {
   }
 
 
-  res.json(
-    db.listSchedules(type)
-  );
+  res.json(db.listSchedules(type, accountId));
 });
 
 
@@ -1075,33 +1387,31 @@ app.post('/api/schedules', requireAuth, (req, res) => {
     });
   }
 
-  if (db.scheduleCount() >= 20) {
+  const accountId = getReqAccountId(req);
+  if (db.scheduleCount(accountId) >= 20) {
     return res.status(409).json({ error: 'Maximum of 20 backend schedules reached. Delete an unused schedule first.' });
   }
 
 
-  const row =
-    db.createSchedule({
-
+  const row = db.createSchedule({
       type,
-
       label: parsed.value.label,
-
       time: parsed.value.time,
-
       duration: parsed.value.duration,
-
-      days: parsed.value.days
+      days: parsed.value.days,
+      accountId
     });
 
 
   const typeLabel = type === 'bath' ? 'Bath' : type === 'clean' ? 'Clean' : 'Mist';
   db.logActivity(
     typeLabel,
-    `New ${type} schedule created: "${row.label}" at ${row.time} for ${row.duration} min on ${JSON.parse(row.days).join(', ')}`
+    `New ${type} schedule created: "${row.label}" at ${row.time} for ${row.duration} min on ${JSON.parse(row.days).join(', ')}`,
+    null,
+    accountId
   );
 
-  invalidateStatusCache();
+  invalidateStatusCache(accountId);
 
   res.status(201).json({
 
@@ -1125,6 +1435,7 @@ app.post('/api/schedules', requireAuth, (req, res) => {
 */
 
 const handleUpdateSchedule = (req, res) => {
+  const accountId = getReqAccountId(req);
   const parsed = parseScheduleInput(req.body, { partial: true });
 
   if (!parsed.ok) {
@@ -1133,7 +1444,8 @@ const handleUpdateSchedule = (req, res) => {
     });
   }
 
-  const row = db.updateSchedule(req.params.id, parsed.value);
+  const targetAccountId = req.user && req.user.role === 'admin' ? null : accountId;
+  const row = db.updateSchedule(req.params.id, parsed.value, targetAccountId);
 
   if (!row) {
     return res.status(404).json({
@@ -1143,7 +1455,9 @@ const handleUpdateSchedule = (req, res) => {
 
   db.logActivity(
     row.type === 'bath' ? 'Bath' : 'Clean',
-    `Schedule "${row.label}" updated: ${row.time}, ${row.duration} min, ${JSON.parse(row.days).join(', ')}, ${row.active ? 'enabled' : 'disabled'}`
+    `Schedule "${row.label}" updated: ${row.time}, ${row.duration} min, ${JSON.parse(row.days).join(', ')}, ${row.active ? 'enabled' : 'disabled'}`,
+    null,
+    row.account_id || accountId
   );
 
   invalidateStatusCache();
@@ -1163,7 +1477,9 @@ app.put('/api/schedules/:id', requireAuth, handleUpdateSchedule);
 */
 
 app.delete('/api/schedules/:id', requireAuth, (req, res) => {
-  const result = db.deleteSchedule(req.params.id);
+  const accountId = getReqAccountId(req);
+  const targetAccountId = req.user && req.user.role === 'admin' ? null : accountId;
+  const result = db.deleteSchedule(req.params.id, targetAccountId);
   if (!result || result.changes === 0) {
     return res.status(404).json({ ok: false, error: 'Schedule not found' });
   }
@@ -1179,6 +1495,7 @@ app.delete('/api/schedules/:id', requireAuth, (req, res) => {
 */
 
 app.get('/api/schedules/debug', (req, res) => {
+  const accountId = getReqAccountId(req);
 
   const now = new Date();
 
@@ -1203,8 +1520,8 @@ app.get('/api/schedules/debug', (req, res) => {
     scheduleTimezone: BARN_TIMEZONE,
     today,
     nowMin,
-    bath: db.listSchedules('bath').map(annotate),
-    clean: db.listSchedules('clean').map(annotate)
+    bath: db.listSchedules('bath', accountId).map(annotate),
+    clean: db.listSchedules('clean', accountId).map(annotate)
   });
 });
 
@@ -1214,25 +1531,14 @@ app.get('/api/schedules/debug', (req, res) => {
    ============================================================ */
 
 app.get('/api/settings/threshold', (req, res) => {
-
-  res.json({
-
-    value:
-      parseFloat(
-        db.getSetting(
-          'threshold',
-          '32'
-        )
-      )
-  });
+  const accountId = getReqAccountId(req);
+  res.json({ value: parseFloat(db.getSetting('threshold', '32', accountId)) });
 });
 
 
 app.post('/api/settings/threshold', requireAuth, (req, res) => {
-
-  const {
-    value
-  } = req.body;
+  const accountId = getReqAccountId(req);
+  const { value } = req.body;
 
 
   if (
@@ -1248,16 +1554,8 @@ app.post('/api/settings/threshold', requireAuth, (req, res) => {
   }
 
 
-  db.setSetting(
-    'threshold',
-    value
-  );
-
-
-  db.logActivity(
-    'Info',
-    `Mist cooling threshold updated to ${value}°C`
-  );
+  db.setSetting('threshold', value, accountId);
+  db.logActivity('Info', `Mist cooling threshold updated to ${value}°C`, null, accountId);
 
   invalidateStatusCache();
 
@@ -1272,40 +1570,23 @@ app.post('/api/settings/threshold', requireAuth, (req, res) => {
    ============================================================ */
 
 app.get('/api/settings/durations', (req, res) => {
-
-  res.json(
-    db.getOperationDurations()
-  );
+  const accountId = getReqAccountId(req);
+  res.json(db.getOperationDurations(accountId));
 });
 
 
 app.post('/api/settings/durations', requireAuth, (req, res) => {
-
-  const {
-    mistOnSec,
-    mistPauseSec
-  } = req.body;
+  const accountId = getReqAccountId(req);
+  const { mistOnSec, mistPauseSec } = req.body;
 
 
-  const updated =
-    db.setOperationDurations({
-
-      mistOnSec:
-        typeof mistOnSec === 'number'
-          ? mistOnSec
-          : undefined,
-
-      mistPauseSec:
-        typeof mistPauseSec === 'number'
-          ? mistPauseSec
-          : undefined
-    });
+  const updated = db.setOperationDurations({
+      mistOnSec: typeof mistOnSec === 'number' ? mistOnSec : undefined,
+      mistPauseSec: typeof mistPauseSec === 'number' ? mistPauseSec : undefined
+    }, accountId);
 
 
-  db.logActivity(
-    'Info',
-    `Operation durations updated: Misting ${updated.mistOnSec} s ON / ${updated.mistPauseSec} s pause`
-  );
+  db.logActivity('Info', `Operation durations updated: Misting ${updated.mistOnSec} s ON / ${updated.mistPauseSec} s pause`, null, accountId);
 
   invalidateStatusCache();
 
@@ -1318,46 +1599,24 @@ app.post('/api/settings/durations', requireAuth, (req, res) => {
    ============================================================ */
 
 app.get('/api/settings/thi', (req, res) => {
-
-  res.json(
-    db.getTHIThresholds()
-  );
+  const accountId = getReqAccountId(req);
+  res.json(db.getTHIThresholds(accountId));
 });
 
 
 app.post('/api/settings/thi', requireAuth, (req, res) => {
-
-  const {
-    normalMax,
-    stressMax,
-    extremeMax
-  } = req.body;
+  const accountId = getReqAccountId(req);
+  const { normalMax, stressMax, extremeMax } = req.body;
 
 
-  const updated =
-    db.setTHIThresholds({
-
-      normalMax:
-        typeof normalMax === 'number'
-          ? normalMax
-          : undefined,
-
-      stressMax:
-        typeof stressMax === 'number'
-          ? stressMax
-          : undefined,
-
-      extremeMax:
-        typeof extremeMax === 'number'
-          ? extremeMax
-          : undefined
-    });
+  const updated = db.setTHIThresholds({
+      normalMax: typeof normalMax === 'number' ? normalMax : undefined,
+      stressMax: typeof stressMax === 'number' ? stressMax : undefined,
+      extremeMax: typeof extremeMax === 'number' ? extremeMax : undefined
+    }, accountId);
 
 
-  db.logActivity(
-    'Alert',
-    `THI thresholds updated: Normal<${updated.normalMax}, Stress<=${updated.stressMax}, Extreme<=${updated.extremeMax}`
-  );
+  db.logActivity('Alert', `THI thresholds updated: Normal<${updated.normalMax}, Stress<=${updated.stressMax}, Extreme<=${updated.extremeMax}`, null, accountId);
 
   invalidateStatusCache();
 
@@ -1370,6 +1629,7 @@ app.post('/api/settings/thi', requireAuth, (req, res) => {
    ============================================================ */
 
 app.get('/api/reports/export', requireAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
 
   const type =
     req.query.type;
@@ -1384,7 +1644,7 @@ app.get('/api/reports/export', requireAuth, (req, res) => {
     req.query.since ? Number(req.query.since) : (range === 'all' ? 0 : until - (REPORT_RANGES[range] || REPORT_RANGES['24h']));
 
   if (type === 'water') {
-    const report = db.getWaterUsage(range);
+    const report = db.getWaterUsage(range, accountId);
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader(
       'Content-Disposition',
@@ -1414,7 +1674,7 @@ app.get('/api/reports/export', requireAuth, (req, res) => {
   );
 
   if (resolution === 'bucket') {
-    const points = db.getAggregatedReadings({ range, sinceMs: since, untilMs: until });
+    const points = db.getAggregatedReadings({ range, sinceMs: since, untilMs: until, accountId });
     res.write('Timestamp,DateTime,Time,Label,Temperature_C,Temp_Min,Temp_Max,Humidity_Pct,THI,THI_Max,THI_Status,Readings_Count\r\n');
     for (const p of points) {
       const dt = new Date(p.ts).toISOString();
@@ -1426,7 +1686,7 @@ app.get('/api/reports/export', requireAuth, (req, res) => {
 
   // resolution === 'raw'
   res.write('Timestamp,DateTime,Temperature_C,Humidity_Pct,THI,THI_Status\r\n');
-  for (const r of db.rawReadingsIterator(since, until)) {
+  for (const r of db.rawReadingsIterator(since, until, accountId)) {
     const dt = new Date(r.ts).toISOString();
     const status = thiLevel(r.thi, thiThresholds).label;
     res.write(`${r.ts},"${dt}",${r.temp},${r.humidity},${r.thi},"${status}"\r\n`);
@@ -1440,6 +1700,7 @@ app.get('/api/reports/export', requireAuth, (req, res) => {
    ============================================================ */
 
 app.get('/api/activity', (req, res) => {
+  const accountId = getReqAccountId(req);
 
   const limit =
     Math.min(500, Math.max(1, parseInt(
@@ -1448,7 +1709,7 @@ app.get('/api/activity', (req, res) => {
 
 
   res.json(
-    db.recentActivity(limit, reportSince(req.query.range || 'all'))
+    db.recentActivity(limit, reportSince(req.query.range || 'all'), accountId)
   );
 });
 
@@ -1721,7 +1982,7 @@ app.post('/api/relay/status', (req, res) => {
    ============================================================ */
 
 app.post('/api/diagnostics', (req, res) => {
-
+  const accountId = getReqAccountId(req);
   const {
     dht_ok,
     rtc_ok,
@@ -1735,29 +1996,24 @@ app.post('/api/diagnostics', (req, res) => {
 
 
   db.saveDiagnostics({
-
     dht_ok,
-
     rtc_ok,
-
     tank_ok,
-
     flow_ok,
-
     relay_ok,
-
     sd_ok,
-
     details,
-
-    ts
+    ts,
+    accountId
   });
 
   const sdStr = sd_ok === true ? 'PASS' : (sd_ok === false ? 'FAIL' : 'UNKNOWN');
 
   db.logActivity(
     'Info',
-    `ESP32 hardware status update: DHT:${dht_ok ? 'PASS' : 'FAIL'}, RTC:${rtc_ok ? 'PASS' : 'FAIL'}, Tank:${tank_ok ? 'PASS' : 'FAIL'}, Flow:${flow_ok ? 'PASS' : 'FAIL'}, Relay:${relay_ok ? 'PASS' : 'FAIL'}, SD:${sdStr}`
+    `ESP32 hardware status update: DHT:${dht_ok ? 'PASS' : 'FAIL'}, RTC:${rtc_ok ? 'PASS' : 'FAIL'}, Tank:${tank_ok ? 'PASS' : 'FAIL'}, Flow:${flow_ok ? 'PASS' : 'FAIL'}, Relay:${relay_ok ? 'PASS' : 'FAIL'}, SD:${sdStr}`,
+    null,
+    accountId
   );
 
 
@@ -1766,13 +2022,14 @@ app.post('/api/diagnostics', (req, res) => {
     ok: true,
 
     diagnostics:
-      db.latestDiagnostics()
+      db.latestDiagnostics(accountId)
   });
 });
 
 
 app.get('/api/diagnostics', (req, res) => {
-  const latest = db.latestDiagnostics();
+  const accountId = getReqAccountId(req);
+  const latest = db.latestDiagnostics(accountId);
   if (!latest) {
     return res.json({
       ok: false,
@@ -1796,7 +2053,8 @@ app.get('/api/diagnostics', (req, res) => {
    Returns live/cached MicroSD status and details from diagnostics.
    ============================================================ */
 app.get('/api/sd/status', (req, res) => {
-  const diagnostics = db.latestDiagnostics();
+  const accountId = getReqAccountId(req);
+  const diagnostics = db.latestDiagnostics(accountId);
   const sdDetails = (diagnostics && diagnostics.details && diagnostics.details.sd_info)
     ? diagnostics.details.sd_info
     : null;
@@ -1812,8 +2070,8 @@ app.get('/api/sd/status', (req, res) => {
     sdSpiFrequencyHz: sdDetails ? (sdDetails.spiFrequencyHz || 0) : 0,
     backendOnline: true,
     pendingOfflineCount: sdDetails ? (sdDetails.pendingCount ?? sdDetails.pendingOfflineCount ?? 0) : 0,
-    syncedCount: db.pendingOfflineCount ? db.pendingOfflineCount() : (sdDetails ? (sdDetails.syncedCount || 0) : 0),
-    lastSyncTs: db.latestSyncTs ? db.latestSyncTs() : (sdDetails ? (sdDetails.lastSyncTs || 0) : 0),
+    syncedCount: db.pendingOfflineCount ? db.pendingOfflineCount(accountId) : (sdDetails ? (sdDetails.syncedCount || 0) : 0),
+    lastSyncTs: db.latestSyncTs ? db.latestSyncTs(accountId) : (sdDetails ? (sdDetails.lastSyncTs || 0) : 0),
     syncInProgress: sdDetails ? !!sdDetails.syncInProgress : false,
     cardType: sdDetails ? (sdDetails.cardType || 'Unavailable') : 'Unavailable',
     cardSizeBytes: sdDetails ? sdDetails.cardSizeBytes : null,
@@ -1841,7 +2099,8 @@ app.get('/api/sd/status', (req, res) => {
    so they appear in history charts.
    ============================================================ */
 
-app.post('/api/readings/batch', (req, res) => {
+app.post('/api/readings/batch', requireDeviceAuth, (req, res) => {
+  const accountId = getReqAccountId(req);
 
   const records = req.body;
 
@@ -1869,7 +2128,7 @@ app.post('/api/readings/batch', (req, res) => {
     });
   }
 
-  const result = db.insertOfflineBatch(records);
+  const result = db.insertOfflineBatch(records, accountId);
 
   if (result.failed > 0) return res.status(500).json({ ok: false, ...result });
 
@@ -1890,11 +2149,11 @@ app.post('/api/readings/batch', (req, res) => {
    ============================================================ */
 
 app.get('/api/offline/status', (req, res) => {
-
+  const accountId = getReqAccountId(req);
   res.json({
-    ok:           true,
-    totalSynced:  db.pendingOfflineCount(),
-    lastSyncTs:   db.latestSyncTs()
+    ok: true,
+    totalSynced: db.pendingOfflineCount(accountId),
+    lastSyncTs: db.latestSyncTs(accountId)
   });
 });
 

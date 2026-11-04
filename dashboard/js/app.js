@@ -210,6 +210,7 @@
     clean:     'Cleaning Schedule',
     auto:      'Automatic Systems',
     reports:   'Reports',
+    users:     'User Accounts',
   };
 
   function showPage(key) {
@@ -242,6 +243,8 @@
     PAGES.update(DATA.state, activePage);
     if (key === 'reports') DATA.refreshReports();
     if (key === 'water') DATA.refreshWaterUsage();
+    if (key === 'auto') loadDevicesList();
+    if (key === 'users') loadUsersList();
   }
 
   function initNav() {
@@ -527,6 +530,132 @@
     const appShell    = document.getElementById('app-shell');
     const errEl       = document.getElementById('login-err');
     const btnLogin    = document.getElementById('btn-login');
+    const signinCard      = document.getElementById('signin-card');
+    const registerCard    = document.getElementById('register-card');
+    const btnShowRegister = document.getElementById('btn-show-register');
+    const btnShowSignin   = document.getElementById('btn-show-signin');
+    const btnRegister     = document.getElementById('btn-register');
+    const regErrEl        = document.getElementById('register-err');
+
+    if (btnShowRegister && signinCard && registerCard) {
+      btnShowRegister.addEventListener('click', () => {
+        signinCard.classList.add('hidden');
+        registerCard.classList.remove('hidden');
+        if (regErrEl) regErrEl.classList.add('hidden');
+        const regUser = document.getElementById('reg-user');
+        if (regUser) regUser.focus();
+      });
+    }
+
+    if (btnShowSignin && signinCard && registerCard) {
+      btnShowSignin.addEventListener('click', () => {
+        registerCard.classList.add('hidden');
+        signinCard.classList.remove('hidden');
+        if (errEl) errEl.classList.add('hidden');
+        const inpUser = document.getElementById('inp-user');
+        if (inpUser) inpUser.focus();
+      });
+    }
+
+    async function tryRegister() {
+      const u = (document.getElementById('reg-user').value || '').trim();
+      const d = (document.getElementById('reg-name').value || '').trim();
+      const p = document.getElementById('reg-pass').value || '';
+
+      if (!u || !p) {
+        if (regErrEl) {
+          regErrEl.textContent = 'Please provide both username and password.';
+          regErrEl.classList.remove('hidden');
+        }
+        return;
+      }
+      if (u.length < 3) {
+        if (regErrEl) {
+          regErrEl.textContent = 'Username must be at least 3 characters.';
+          regErrEl.classList.remove('hidden');
+        }
+        return;
+      }
+      if (p.length < 6) {
+        if (regErrEl) {
+          regErrEl.textContent = 'Password must be at least 6 characters.';
+          regErrEl.classList.remove('hidden');
+        }
+        return;
+      }
+
+      btnRegister.disabled = true;
+      btnRegister.textContent = 'Creating Account…';
+      if (regErrEl) regErrEl.classList.add('hidden');
+
+      try {
+        const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+        const regRes = await fetch(API + '/api/register/public', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: u, display_name: d, password: p })
+        });
+        const regData = await regRes.json();
+        if (!regRes.ok || !regData.ok) {
+          throw new Error(regData.error || 'Failed to register account');
+        }
+
+        // Auto login on successful registration
+        const loginRes = await fetch(API + '/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ username: u, password: p })
+        });
+        const loginData = await loginRes.json();
+        if (loginRes.ok && loginData.ok) {
+          if (loginData.token) {
+            if (typeof setAuthToken === 'function') {
+              setAuthToken(loginData.token);
+            } else {
+              sessionStorage.setItem('ios_session_token', loginData.token);
+              localStorage.setItem('ios_session_token', loginData.token);
+            }
+          }
+          saveSession();
+          registerCard.classList.add('hidden');
+          signinCard.classList.remove('hidden');
+          loginScreen.classList.add('hidden');
+          appShell.classList.remove('hidden');
+          if (regErrEl) regErrEl.classList.add('hidden');
+          await boot();
+        } else {
+          registerCard.classList.add('hidden');
+          signinCard.classList.remove('hidden');
+          if (errEl) {
+            errEl.textContent = 'Account created! Please sign in with your credentials.';
+            errEl.classList.remove('hidden');
+          }
+          document.getElementById('inp-user').value = u;
+          document.getElementById('inp-pass').value = '';
+        }
+      } catch (err) {
+        if (regErrEl) {
+          regErrEl.textContent = err.message || 'Registration failed';
+          regErrEl.classList.remove('hidden');
+        }
+      } finally {
+        btnRegister.disabled = false;
+        btnRegister.textContent = 'Create Account';
+      }
+    }
+
+    if (btnRegister) {
+      btnRegister.addEventListener('click', tryRegister);
+    }
+    ['reg-user', 'reg-name', 'reg-pass'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.addEventListener('keydown', e => {
+          if (e.key === 'Enter') tryRegister();
+        });
+      }
+    });
 
     async function tryLogin() {
       const user = document.getElementById('inp-user').value.trim();
@@ -600,6 +729,13 @@
       } catch (_) {}
       sessionStorage.removeItem('ios_session_token');
       clearSession();
+      const sidebarUsername = document.getElementById('sidebar-username');
+      if (sidebarUsername) sidebarUsername.textContent = 'Internet of Swine';
+      document.querySelectorAll('[data-admin-only]').forEach(el => {
+        el.classList.add('hidden');
+        el.style.display = 'none';
+      });
+      DATA.state.currentUser = null;
       appShell.classList.add('hidden');
       loginScreen.classList.remove('hidden');
       document.getElementById('inp-user').value = '';
@@ -787,6 +923,36 @@
   /* ── Boot (called after login) ───────────────────────────── */
   async function boot() {
     await IOS_CONFIG.ready;
+
+    // Fetch and bind user identity
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+    try {
+      const meRes = await authFetch(API + '/api/me');
+      if (meRes.ok) {
+        const meData = await meRes.json();
+        if (meData.ok && meData.user) {
+          DATA.state.currentUser = meData.user;
+          const user = meData.user;
+          const sidebarUsername = document.getElementById('sidebar-username');
+          if (sidebarUsername) {
+            sidebarUsername.textContent = user.display_name || user.username;
+          }
+          const isAdmin = user.role === 'admin';
+          document.querySelectorAll('[data-admin-only]').forEach(el => {
+            if (isAdmin) {
+              el.classList.remove('hidden');
+              el.style.display = '';
+            } else {
+              el.classList.add('hidden');
+              el.style.display = 'none';
+            }
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Could not load /api/me:', e);
+    }
+
     if (boot.initialized) {
       DATA.start();
       showPage(savedPage());
@@ -795,6 +961,8 @@
     boot.initialized = true;
     startClock();
     initNav();
+    initDeviceControls();
+    initUserManagementControls();
     SCHEDULE.init();
     initThresholdSlider();
     initTHIThresholdControls();
@@ -812,6 +980,405 @@
     await DATA.refreshReports();
     showPage(savedPage());
     initTicker();
+  }
+
+  /* ── ESP32 Devices Management ────────────────────────────── */
+  async function loadDevicesList() {
+    const listWrap = document.getElementById('devices-list-wrap');
+    if (!listWrap) return;
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+
+    try {
+      const res = await authFetch(API + '/api/devices');
+      if (!res.ok) {
+        listWrap.innerHTML = '<p class="login-err">Unable to load devices.</p>';
+        return;
+      }
+      const data = await res.json();
+      const devices = data.devices || [];
+
+      if (devices.length === 0) {
+        listWrap.innerHTML = `
+          <div style="padding:16px 0; color:var(--muted); font-size:13px;">
+            No ESP32 devices registered yet. Click <strong>+ Register Device</strong> to link your sensor or water monitoring node.
+          </div>`;
+        return;
+      }
+
+      let html = `
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Device ID</th>
+                <th>Type</th>
+                <th>Pen / Barn</th>
+                <th>Created</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>`;
+
+      devices.forEach(dev => {
+        const typeBadge = dev.device_type === 'water'
+          ? '<span class="badge badge-blue">Water Node</span>'
+          : '<span class="badge badge-green">Sensor Node</span>';
+        const dateStr = dev.created_at ? new Date(dev.created_at * 1000).toLocaleDateString() : '—';
+        const pen = dev.pen_name ? escapeHtml(dev.pen_name) : '—';
+        const did = escapeHtml(dev.device_id);
+
+        html += `
+          <tr>
+            <td><strong>${did}</strong></td>
+            <td>${typeBadge}</td>
+            <td>${pen}</td>
+            <td class="muted">${dateStr}</td>
+            <td>
+              <button class="btn btn-outline btn-sm btn-rotate-token" data-id="${dev.id}" data-did="${did}" title="Rotate Token">🔑 Rotate Token</button>
+              <button class="btn-danger-sm btn-delete-device" data-id="${dev.id}" data-did="${did}" title="Delete Device" style="margin-left:6px;">✕ Delete</button>
+            </td>
+          </tr>`;
+      });
+
+      html += `
+            </tbody>
+          </table>
+        </div>`;
+
+      listWrap.innerHTML = html;
+
+      listWrap.querySelectorAll('.btn-rotate-token').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.id;
+          const did = btn.dataset.did;
+          if (!confirm('Rotate token for device "' + did + '"?\n\nThe previous token will stop working immediately. You will need to update secrets.h on the ESP32.')) return;
+
+          try {
+            const rotRes = await authFetch(API + '/api/devices/' + id + '/rotate-token', { method: 'POST' });
+            const rotData = await rotRes.json();
+            if (rotRes.ok && rotData.ok && rotData.token) {
+              showDeviceTokenModal(rotData.token);
+            } else {
+              alert(rotData.error || 'Failed to rotate token');
+            }
+          } catch (err) {
+            alert('Error rotating token: ' + err.message);
+          }
+        });
+      });
+
+      listWrap.querySelectorAll('.btn-delete-device').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.id;
+          const did = btn.dataset.did;
+          if (!confirm('Are you sure you want to delete device "' + did + '"?\nIt will no longer be authorized to post readings.')) return;
+
+          try {
+            const delRes = await authFetch(API + '/api/devices/' + id, { method: 'DELETE' });
+            const delData = await delRes.json();
+            if (delRes.ok && delData.ok) {
+              loadDevicesList();
+            } else {
+              alert(delData.error || 'Failed to delete device');
+            }
+          } catch (err) {
+            alert('Error deleting device: ' + err.message);
+          }
+        });
+      });
+
+    } catch (err) {
+      listWrap.innerHTML = '<p class="login-err">Error loading devices: ' + escapeHtml(err.message) + '</p>';
+    }
+  }
+
+  function showDeviceTokenModal(token) {
+    const modal = document.getElementById('device-token-modal');
+    const tokenInp = document.getElementById('modal-token-display');
+    const copyBtn = document.getElementById('btn-copy-device-token');
+    if (!modal || !tokenInp) return;
+
+    tokenInp.value = token;
+    if (copyBtn) copyBtn.textContent = '📋 Copy';
+    modal.classList.remove('hidden');
+  }
+
+  function initDeviceControls() {
+    const openBtn = document.getElementById('btn-open-register-device');
+    const modal = document.getElementById('device-modal');
+    const closeBtn = document.getElementById('device-modal-close');
+    const cancelBtn = document.getElementById('device-modal-cancel');
+    const saveBtn = document.getElementById('device-modal-save');
+    const errEl = document.getElementById('device-modal-err');
+
+    const tokenModal = document.getElementById('device-token-modal');
+    const tokenClose = document.getElementById('device-token-close');
+    const tokenDone = document.getElementById('btn-device-token-done');
+    const copyBtn = document.getElementById('btn-copy-device-token');
+
+    if (openBtn && modal) {
+      openBtn.addEventListener('click', () => {
+        document.getElementById('modal-device-id').value = '';
+        document.getElementById('modal-device-pen').value = '';
+        document.getElementById('modal-device-type').value = 'sensor';
+        if (errEl) errEl.classList.add('hidden');
+        modal.classList.remove('hidden');
+      });
+    }
+
+    [closeBtn, cancelBtn].forEach(b => {
+      if (b && modal) {
+        b.addEventListener('click', () => modal.classList.add('hidden'));
+      }
+    });
+
+    [tokenClose, tokenDone].forEach(b => {
+      if (b && tokenModal) {
+        b.addEventListener('click', () => tokenModal.classList.add('hidden'));
+      }
+    });
+
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        const tokenInp = document.getElementById('modal-token-display');
+        if (tokenInp && tokenInp.value) {
+          navigator.clipboard.writeText(tokenInp.value).then(() => {
+            copyBtn.textContent = '✓ Copied!';
+            setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 2000);
+          }).catch(() => {
+            tokenInp.select();
+            document.execCommand('copy');
+            copyBtn.textContent = '✓ Copied!';
+            setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 2000);
+          });
+        }
+      });
+    }
+
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        const did = (document.getElementById('modal-device-id').value || '').trim();
+        const type = document.getElementById('modal-device-type').value;
+        const pen = (document.getElementById('modal-device-pen').value || '').trim();
+
+        if (!did) {
+          if (errEl) {
+            errEl.textContent = 'Device Identifier is required.';
+            errEl.classList.remove('hidden');
+          }
+          return;
+        }
+
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Registering…';
+        if (errEl) errEl.classList.add('hidden');
+
+        try {
+          const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+          const res = await authFetch(API + '/api/devices', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_id: did, device_type: type, pen_name: pen })
+          });
+          const data = await res.json();
+          if (res.ok && data.ok) {
+            modal.classList.add('hidden');
+            loadDevicesList();
+            if (data.token) {
+              showDeviceTokenModal(data.token);
+            }
+          } else {
+            if (errEl) {
+              errEl.textContent = data.error || 'Failed to register device.';
+              errEl.classList.remove('hidden');
+            }
+          }
+        } catch (err) {
+          if (errEl) {
+            errEl.textContent = err.message || 'Error registering device.';
+            errEl.classList.remove('hidden');
+          }
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.textContent = 'Register Device';
+        }
+      });
+    }
+  }
+
+  /* ── User Accounts Management (Admin) ────────────────────── */
+  async function loadUsersList() {
+    const listWrap = document.getElementById('users-table-container');
+    if (!listWrap) return;
+    const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+
+    try {
+      const res = await authFetch(API + '/api/users');
+      if (!res.ok) {
+        listWrap.innerHTML = '<p class="login-err">Unable to load users. Administrator privileges required.</p>';
+        return;
+      }
+      const data = await res.json();
+      const users = data.users || [];
+      const currentUserId = DATA.state.currentUser ? DATA.state.currentUser.id : null;
+
+      if (users.length === 0) {
+        listWrap.innerHTML = '<p class="muted small">No accounts found.</p>';
+        return;
+      }
+
+      let html = `
+        <div class="table-responsive">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Display Name</th>
+                <th>Role</th>
+                <th>Created</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>`;
+
+      users.forEach(u => {
+        const roleBadge = u.role === 'admin'
+          ? '<span class="badge badge-orange">Administrator</span>'
+          : '<span class="badge badge-green">Standard User</span>';
+        const dateStr = u.created_at ? new Date(u.created_at * 1000).toLocaleDateString() : '—';
+        const dname = u.display_name ? escapeHtml(u.display_name) : '—';
+        const uname = escapeHtml(u.username);
+        const isSelf = currentUserId === u.id;
+
+        html += `
+          <tr>
+            <td><strong>${uname}</strong></td>
+            <td>${dname}</td>
+            <td>${roleBadge}</td>
+            <td class="muted">${dateStr}</td>
+            <td>
+              ${isSelf
+                ? '<span class="muted small">(Current User)</span>'
+                : '<button class="btn-danger-sm btn-delete-user" data-id="' + u.id + '" data-uname="' + uname + '">✕ Delete</button>'
+              }
+            </td>
+          </tr>`;
+      });
+
+      html += `
+            </tbody>
+          </table>
+        </div>`;
+
+      listWrap.innerHTML = html;
+
+      listWrap.querySelectorAll('.btn-delete-user').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const id = btn.dataset.id;
+          const uname = btn.dataset.uname;
+          if (!confirm('Are you sure you want to delete user "' + uname + '"?\nAll associated farm telemetry, schedules, and device linkages will be permanently deleted.')) return;
+
+          try {
+            const delRes = await authFetch(API + '/api/users/' + id, { method: 'DELETE' });
+            const delData = await delRes.json();
+            if (delRes.ok && delData.ok) {
+              loadUsersList();
+            } else {
+              alert(delData.error || 'Failed to delete user');
+            }
+          } catch (err) {
+            alert('Error deleting user: ' + err.message);
+          }
+        });
+      });
+
+    } catch (err) {
+      listWrap.innerHTML = '<p class="login-err">Error loading users: ' + escapeHtml(err.message) + '</p>';
+    }
+  }
+
+  function initUserManagementControls() {
+    const openBtn = document.getElementById('btn-admin-add-user');
+    const modal = document.getElementById('user-modal');
+    const closeBtn = document.getElementById('user-modal-close');
+    const cancelBtn = document.getElementById('user-modal-cancel');
+    const saveBtn = document.getElementById('user-modal-save');
+    const errEl = document.getElementById('user-modal-err');
+
+    if (openBtn && modal) {
+      openBtn.addEventListener('click', () => {
+        document.getElementById('modal-user-username').value = '';
+        document.getElementById('modal-user-display').value = '';
+        document.getElementById('modal-user-password').value = '';
+        document.getElementById('modal-user-role').value = 'user';
+        if (errEl) errEl.classList.add('hidden');
+        modal.classList.remove('hidden');
+      });
+    }
+
+    [closeBtn, cancelBtn].forEach(b => {
+      if (b && modal) {
+        b.addEventListener('click', () => modal.classList.add('hidden'));
+      }
+    });
+
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        const u = (document.getElementById('modal-user-username').value || '').trim();
+        const d = (document.getElementById('modal-user-display').value || '').trim();
+        const p = document.getElementById('modal-user-password').value || '';
+        const r = document.getElementById('modal-user-role').value || 'user';
+
+        if (!u || !p) {
+          if (errEl) {
+            errEl.textContent = 'Username and password are required.';
+            errEl.classList.remove('hidden');
+          }
+          return;
+        }
+
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'Creating…';
+        if (errEl) errEl.classList.add('hidden');
+
+        try {
+          const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
+          const res = await authFetch(API + '/api/register', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: u, display_name: d, password: p, role: r })
+          });
+          const data = await res.json();
+          if (res.ok && data.ok) {
+            modal.classList.add('hidden');
+            loadUsersList();
+          } else {
+            if (errEl) {
+              errEl.textContent = data.error || 'Failed to create user.';
+              errEl.classList.remove('hidden');
+            }
+          }
+        } catch (err) {
+          if (errEl) {
+            errEl.textContent = err.message || 'Error creating user.';
+            errEl.classList.remove('hidden');
+          }
+        } finally {
+          saveBtn.disabled = false;
+          saveBtn.textContent = 'Create Account';
+        }
+      });
+    }
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   /* ── Entry point ─────────────────────────────────────────── */
