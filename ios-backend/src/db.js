@@ -1226,9 +1226,18 @@ function bindDeviceByCredentials({ username, password, mac, penName = '' }) {
     throw err;
   }
 
+  // Look up device by MAC only (across all accounts)
   const existing = db.prepare('SELECT id, account_id, device_id, pen_name, device_token FROM device_registry WHERE device_id = ?').get(cleanMac);
 
   if (existing) {
+    // If device belongs to a DIFFERENT account, block re-bind — the other account must unlink first.
+    // If device belongs to THIS user's account, allow re-bind (refresh token, update pen name).
+    if (existing.account_id !== user.id) {
+      const err = new Error('This device is already linked to a different account. The existing account must unlink it before it can be re-registered.');
+      err.status = 409;
+      throw err;
+    }
+
     const rawToken = 'ios_dev_' + crypto.randomBytes(24).toString('hex');
     const tokenHash = hashDeviceToken(rawToken);
     const assignedPen = penName || existing.pen_name || 'Pen 1';
@@ -1268,6 +1277,14 @@ function bindDeviceByCredentials({ username, password, mac, penName = '' }) {
 function registerDevice({ accountId = 1, deviceId, deviceType = 'sensor', penName = '' }) {
   const cleanDeviceId = String(deviceId || '').trim();
   if (!cleanDeviceId) throw new Error('deviceId is required');
+
+  // Enforce global device ownership: a physical device can only belong to one account at a time
+  const existingAcrossAccounts = db.prepare('SELECT id, account_id, pen_name FROM device_registry WHERE device_id = ?').get(cleanDeviceId);
+  if (existingAcrossAccounts && existingAcrossAccounts.account_id !== accountId) {
+    const err = new Error('This device ID is already registered to a different account. Please unlink it from that account first.');
+    err.status = 409;
+    throw err;
+  }
 
   const rawToken = 'ios_dev_' + crypto.randomBytes(24).toString('hex');
   const tokenHash = hashDeviceToken(rawToken);

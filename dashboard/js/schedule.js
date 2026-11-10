@@ -36,7 +36,8 @@ const SCHEDULE = (() => {
 
   /* ── API helpers ─────────────────────────────────────────── */
   async function fetchSchedules(type) {
-    const res = await fetch(`${API}/api/schedules?type=${type}`, { credentials: 'include' });
+    const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
+    const res = await fetchFn(`${API}/api/schedules?type=${type}`, { credentials: 'include' });
     if (!res.ok) throw await responseError(res, `Could not load ${type} schedules`);
     return res.json();
   }

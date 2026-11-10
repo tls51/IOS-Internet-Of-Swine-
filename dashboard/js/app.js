@@ -211,7 +211,7 @@
     auto:      'Automatic Systems',
     reports:   'Reports',
     users:     'User Accounts',
-    settings:  'Device Settings',
+    settings:  'General Settings',
   };
 
   function showPage(key) {
@@ -286,6 +286,48 @@
       }, 150);
     });
   }
+
+  /* ── General Settings Sub-menu Tabs (Device vs Account) ──── */
+  function switchSettingsTab(tabName) {
+    const btnDev = document.getElementById('tab-btn-device-settings');
+    const btnAcc = document.getElementById('tab-btn-account-settings');
+    const subDev = document.getElementById('subpage-device-settings');
+    const subAcc = document.getElementById('subpage-account-settings');
+
+    if (tabName === 'account') {
+      if (btnDev) btnDev.classList.remove('active');
+      if (btnAcc) btnAcc.classList.add('active');
+      if (subDev) subDev.classList.add('hidden');
+      if (subAcc) subAcc.classList.remove('hidden');
+      loadCloudStatus();
+      loadPinStatus();
+    } else {
+      if (btnDev) btnDev.classList.add('active');
+      if (btnAcc) btnAcc.classList.remove('active');
+      if (subDev) subDev.classList.remove('hidden');
+      if (subAcc) subAcc.classList.add('hidden');
+      loadWifiStatus();
+      loadDeviceConfig();
+    }
+  }
+  window.switchSettingsTab = switchSettingsTab;
+
+  function initSettingsTabs() {
+    const btnDev = document.getElementById('tab-btn-device-settings');
+    const btnAcc = document.getElementById('tab-btn-account-settings');
+    if (btnDev) btnDev.addEventListener('click', () => switchSettingsTab('device'));
+    if (btnAcc) btnAcc.addEventListener('click', () => switchSettingsTab('account'));
+  }
+
+  function navigateToCloudSync() {
+    showPage('settings');
+    switchSettingsTab('account');
+    setTimeout(() => {
+      const card = document.getElementById('cloud-setup-card');
+      if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 120);
+  }
+  window.navigateToCloudSync = navigateToCloudSync;
 
   /* ── Threshold slider (editable — saves to backend) ─────── */
   function initThresholdSlider() {
@@ -629,7 +671,6 @@
               setAuthToken(loginData.token);
             } else {
               sessionStorage.setItem('ios_session_token', loginData.token);
-              localStorage.setItem('ios_session_token', loginData.token);
             }
           }
           saveSession();
@@ -700,12 +741,13 @@
 
         if (res.ok && data.ok) {
           if (data.token) {
-            // persist token durably so it survives page refresh
+            // Store token in sessionStorage only (tab-isolated, prevents cross-tab contamination).
+            // setAuthToken in config.js already handles this correctly.
             if (typeof setAuthToken === 'function') {
               setAuthToken(data.token);
             } else {
               sessionStorage.setItem('ios_session_token', data.token);
-              localStorage.setItem('ios_session_token', data.token);
+              // Do NOT write to localStorage — it leaks across tabs
             }
           }
           saveSession();
@@ -983,6 +1025,7 @@
     initCloudBindingControls();
     initUserManagementControls();
     initWifiControls();
+    initSettingsTabs();
     SCHEDULE.init();
     initThresholdSlider();
     initTHIThresholdControls();
@@ -2555,6 +2598,23 @@
         const API = (typeof IOS_CONFIG !== 'undefined') ? IOS_CONFIG.apiBase : '';
         try {
           await authFetch(API + '/api/device/unbind', { method: 'POST' });
+
+          // Also attempt to notify cloud server directly if backend URL is known
+          const urlInp = document.getElementById('inp-cloud-url');
+          const cloudUrl = (urlInp && urlInp.value) ? urlInp.value.trim() : '';
+          const macEl = document.getElementById('lbl-dev-mac');
+          const mac = (macEl && macEl.textContent) ? macEl.textContent.trim() : '';
+          if (cloudUrl && mac) {
+            try {
+              await fetch(cloudUrl + '/api/devices/unbind', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mac }),
+                signal: AbortSignal.timeout(3000)
+              });
+            } catch (_) {}
+          }
+
           NOTIFY.show('Device unlinked from cloud account.', 'info');
           await loadCloudStatus();
         } catch (_) {}
@@ -2595,6 +2655,11 @@
         }
       });
     }
+
+    const btnBannerCloud = document.getElementById('btn-banner-cloud-setup');
+    if (btnBannerCloud) {
+      btnBannerCloud.addEventListener('click', navigateToCloudSync);
+    }
   }
 
   /* ── Entry point ─────────────────────────────────────────── */
@@ -2613,16 +2678,17 @@
       const appShell    = document.getElementById('app-shell');
       if (loginScreen) loginScreen.classList.add('hidden');
       if (appShell) appShell.classList.remove('hidden');
+      document.documentElement.classList.add('skip-login-flash');
       saveSession();
 
-      // Show Configure Me banner if device is not paired
+      // Show "Link to Cloud Account" banner if device is not paired yet
       if (typeof IOS_CONFIG !== 'undefined' && IOS_CONFIG.paired === false) {
         const unpairedBanner = document.getElementById('unpaired-banner');
         if (unpairedBanner) {
           unpairedBanner.classList.remove('hidden');
           const btnCloud = document.getElementById('btn-banner-cloud-setup');
           if (btnCloud) {
-            btnCloud.addEventListener('click', () => showPage('settings'));
+            btnCloud.addEventListener('click', navigateToCloudSync);
           }
         }
       }
@@ -2674,6 +2740,9 @@
           }
         }
       }
+    } else {
+      // In cloud mode without active session, reveal login screen
+      document.documentElement.classList.remove('skip-login-flash');
     }
   });
 

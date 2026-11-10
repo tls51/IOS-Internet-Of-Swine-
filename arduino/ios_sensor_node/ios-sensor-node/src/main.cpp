@@ -1363,6 +1363,11 @@ bool sendTelemetryDirect(float temp, float hum, float thi,
         if (!success) Serial.println("ERROR: Backend did not acknowledge this reading.");
     } else {
         backendOnline = false;
+        if (code == 401 && nvsDeviceToken.length() > 0) {
+            Serial.println("[Cloud] Device unlinked on backend (HTTP 401). Clearing local pairing token.");
+            nvsDeviceToken = "";
+            saveDeviceConfig(nvsDeviceName, nvsPenName, nvsDeviceModel, nvsApSsid, nvsDeviceToken, nvsTimezoneOffsetSec);
+        }
         Serial.printf("Direct telemetry push failed (HTTP %d).\n", code);
     }
     client.end();
@@ -1909,6 +1914,11 @@ static void syncAccounting() {
     }
 
     if (code != 200 && code != 201) {
+        if (code == 401 && nvsDeviceToken.length() > 0) {
+            Serial.println("[Cloud] Device unlinked on backend during schedule sync (HTTP 401). Clearing token.");
+            nvsDeviceToken = "";
+            saveDeviceConfig(nvsDeviceName, nvsPenName, nvsDeviceModel, nvsApSsid, nvsDeviceToken, nvsTimezoneOffsetSec);
+        }
         scheduleDiag.lastPullOk = false;
         scheduleDiag.lastError = String("http_") + code;
         return;
@@ -3093,11 +3103,8 @@ void setupWiFi()
         }
     });
 
-    // Start ESP32 Access Point with NVS-configured SSID and password
+    // Start ESP32 Access Point with NVS-configured SSID and password (no captive portal DNS)
     WiFi.softAP(nvsApSsid.c_str(), nvsApPassword.c_str());
-
-    // Start Captive Portal DNS server (redirects all domains to AP IP)
-    dnsServer.start(53, "*", WiFi.softAPIP());
 
     // Connect to router if SSID is configured
     if (nvsWifiSsid.length() > 0) {
@@ -3108,8 +3115,11 @@ void setupWiFi()
         while (WiFi.status() != WL_CONNECTED && millis() - startTime < 15000) {
             delay(500);
         }
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("[WiFi] Connected to network.");
+        }
     } else {
-        Serial.println("[WiFi] No Wi-Fi SSID configured in NVS. Running in AP provisioning mode.");
+        Serial.println("[WiFi] No Wi-Fi SSID configured in NVS. Running in AP mode.");
     }
 }
 
@@ -4413,6 +4423,25 @@ void setupDeviceRoutes(AsyncWebServer &srv) {
             request->send(403, "application/json", "{\"ok\":false,\"error\":\"Security PIN required or incorrect\"}");
             return;
         }
+
+        char macBuf[24];
+        snprintf(macBuf, sizeof(macBuf), "%012llX", (unsigned long long)ESP.getEfuseMac());
+
+        // Notify cloud backend if connected to Wi-Fi so online dashboard unlinks immediately
+        if (nvsDeviceToken.length() > 0 && WiFi.status() == WL_CONNECTED && getBackendBaseUrl().length() > 0) {
+            BackendHttpClient client;
+            client.setTimeout(3000);
+            String unbindUrl = getBackendBaseUrl() + "/api/devices/unbind";
+            if (client.begin(unbindUrl)) {
+                client.addHeader("Content-Type", "application/json");
+                client.addHeader("X-Auth-Token", nvsDeviceToken.c_str());
+                String body = "{\"mac\":\"" + String(macBuf) + "\",\"token\":\"" + nvsDeviceToken + "\"}";
+                int code = client.POST(body);
+                Serial.printf("[Cloud] Notified backend to unbind device %s (HTTP %d)\n", macBuf, code);
+                client.end();
+            }
+        }
+
         nvsDeviceToken = "";
         saveDeviceConfig(nvsDeviceName, nvsPenName, nvsDeviceModel, nvsApSsid, nvsDeviceToken, nvsTimezoneOffsetSec);
         request->send(200, "application/json", "{\"ok\":true,\"message\":\"Device unlinked from cloud account.\"}");
@@ -4715,26 +4744,17 @@ void setupWebServer()
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
     DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS");
 
-    // Captive portal detection endpoints (Android, iOS/macOS, Windows, Firefox)
-    auto captiveRedirect = [](AsyncWebServerRequest *request) {
-        request->redirect("http://192.168.4.1/");
-    };
-    server.on("/generate_204", HTTP_GET, captiveRedirect);
-    server.on("/gen_204", HTTP_GET, captiveRedirect);
-    server.on("/hotspot-detect.html", HTTP_GET, captiveRedirect);
-    server.on("/canonical.html", HTTP_GET, captiveRedirect);
-    server.on("/ncsi.txt", HTTP_GET, captiveRedirect);
-    server.on("/connecttest.txt", HTTP_GET, captiveRedirect);
+    // Standard 204 handler for Android connectivity check (prevents captive portal popup)
+    server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(204);
+    });
+    server.on("/gen_204", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(204);
+    });
 
     server.onNotFound([](AsyncWebServerRequest *request) {
         if (request->method() == HTTP_OPTIONS) {
             request->send(204);
-            return;
-        }
-        // If device is querying an external domain via captive portal, redirect to AP root
-        String host = request->host();
-        if (host.length() > 0 && host != "192.168.4.1" && !host.startsWith("192.168.") && !host.startsWith("10.")) {
-            request->redirect("http://192.168.4.1/");
             return;
         }
         // If LittleFS index.html is missing, display friendly setup instructions instead of raw 404
@@ -5197,9 +5217,6 @@ void setup()
 
 void loop()
 {
-    // Process captive portal DNS queries
-    dnsServer.processNextRequest();
-
     // --------------------------------------------------------
     // WIFI RECONNECT
     // --------------------------------------------------------

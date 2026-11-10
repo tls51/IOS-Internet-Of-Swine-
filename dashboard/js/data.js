@@ -81,7 +81,8 @@ const DATA = (() => {
 
   /* ── Fetch helpers ──────────────────────────────────────── */
   async function getJSON(path) {
-    const res = await fetch(API + path);
+    const fetchFn = (typeof authFetch === 'function') ? authFetch : (window.authFetch || fetch);
+    const res = await fetchFn(API + path);
     if (!res.ok) throw new Error(`${path} -> HTTP ${res.status}`);
     return res.json();
   }

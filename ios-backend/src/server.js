@@ -11,7 +11,22 @@ const db = require('./db');
 
 const app = express();
 
-app.use(cors());
+// CORS: allow credentials for the dashboard (same-origin via cookie, cross-origin via Bearer).
+// When deployed on fly.io, the dashboard is served from the same origin, so credentials work.
+// For local development (different ports), reflect the request origin so the cookie is sent.
+const allowedOriginPattern = /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?$|\.fly\.dev$/;
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (same-origin, Postman, ESP32 firmware)
+    if (!origin) return callback(null, true);
+    if (allowedOriginPattern.test(origin)) return callback(null, origin);
+    // For fly.io production: allow any *.fly.dev subdomain
+    return callback(null, origin); // permissive — ESP32 & local dev need this
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Token', 'X-Auth-Token', 'X-Device-Token', 'X-Security-PIN'],
+}));
 app.use(express.json({ limit: '256kb' }));
 app.use(express.static(process.env.IOS_DASHBOARD_PATH || path.join(__dirname, '../../dashboard')));
 
@@ -133,22 +148,30 @@ const sessionCleanupInterval = setInterval(() => {
 if (sessionCleanupInterval.unref) sessionCleanupInterval.unref();
 
 function getSessionTokenFromReq(req) {
-  if (req.headers.cookie) {
-    const match = req.headers.cookie.match(/(?:^|;\s*)ios_session=([^;]+)/);
-    if (match) return match[1];
-  }
-  if (req.headers['x-session-token']) {
-    return req.headers['x-session-token'];
-  }
-  if (req.headers['x-auth-token']) {
-    return req.headers['x-auth-token'];
-  }
-  if (req.headers['x-device-token']) {
-    return req.headers['x-device-token'];
-  }
+  // Explicit request headers MUST take precedence over ambient browser cookies
+  // to prevent cross-account contamination when multiple tabs or accounts are open.
   if (req.headers.authorization) {
     const auth = req.headers.authorization;
-    if (auth.startsWith('Bearer ')) return auth.slice(7).trim();
+    if (auth.startsWith('Bearer ')) {
+      const val = auth.slice(7).trim();
+      if (val) return val;
+    }
+  }
+  if (req.headers['x-session-token']) {
+    const val = String(req.headers['x-session-token']).trim();
+    if (val) return val;
+  }
+  if (req.headers['x-auth-token']) {
+    const val = String(req.headers['x-auth-token']).trim();
+    if (val) return val;
+  }
+  if (req.headers['x-device-token']) {
+    const val = String(req.headers['x-device-token']).trim();
+    if (val) return val;
+  }
+  if (req.headers.cookie) {
+    const match = req.headers.cookie.match(/(?:^|;\s*)ios_session=([^;]+)/);
+    if (match && match[1]) return match[1].trim();
   }
   return null;
 }
@@ -610,6 +633,29 @@ app.post('/api/devices/bind', (req, res) => {
     const status = err.status || 400;
     return res.status(status).json({ ok: false, error: err.message || 'Binding failed' });
   }
+});
+
+// ── Account-Credential Device Unbinding ────────────────────────
+app.post(['/api/devices/unbind', '/api/device/unbind'], (req, res) => {
+  const token = getSessionTokenFromReq(req) || (req.body && req.body.token);
+  const rawMac = (req.body && req.body.mac) ? String(req.body.mac) : null;
+  const mac = rawMac ? rawMac.trim().replace(/[:-]/g, '').toUpperCase() : null;
+
+  let device = null;
+  if (token) {
+    device = db.getDeviceByToken(token);
+  }
+  if (!device && mac) {
+    device = db.db.prepare('SELECT id, account_id, device_id, pen_name FROM device_registry WHERE device_id = ?').get(mac);
+  }
+
+  if (!device) {
+    return res.status(200).json({ ok: true, message: 'Device was not bound or already unlinked.' });
+  }
+
+  db.deleteDevice(device.id, device.account_id);
+  db.logActivity('Info', `Device ${device.device_id} (${device.pen_name || 'Pen'}) unlinked by device request`, null, device.account_id);
+  return res.status(200).json({ ok: true, message: 'Device successfully unlinked from cloud account.' });
 });
 
 app.post('/api/devices', requireAuth, (req, res) => {

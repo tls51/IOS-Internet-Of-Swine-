@@ -24,24 +24,34 @@ const IOS_CONFIG = {
 const AUTH_STORAGE_KEY = 'ios_auth_token';
 const SESSION_STORAGE_KEY = 'ios_session_token';
 
+// On page load: clear any stale localStorage token to prevent cross-tab account contamination.
+// Each browser tab maintains its own sessionStorage; the cookie is the authoritative session.
+// localStorage tokens are NOT cleared on logout in other tabs, so we cannot trust them.
+(function _clearStaleLocalStorageToken() {
+  try {
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(AUTH_STORAGE_KEY);
+  } catch (_) {}
+})();
+
 function getAuthToken() {
-  // localStorage survives page refresh and tab close; sessionStorage is a live-session cache
-  return localStorage.getItem(SESSION_STORAGE_KEY)
-    || sessionStorage.getItem(SESSION_STORAGE_KEY)
-    || localStorage.getItem(AUTH_STORAGE_KEY)
-    || '';
+  // sessionStorage is tab-isolated — the token for THIS tab's login is authoritative.
+  // Never read from localStorage (shared across tabs = cross-account contamination risk).
+  return sessionStorage.getItem(SESSION_STORAGE_KEY) || '';
 }
 
 function setAuthToken(token) {
   if (token) {
     const t = token.trim();
-    localStorage.setItem(SESSION_STORAGE_KEY, t);   // durable across refreshes
-    sessionStorage.setItem(SESSION_STORAGE_KEY, t); // fast live-session access
-    localStorage.setItem(AUTH_STORAGE_KEY, t);      // backward compat key
+    // Only store in sessionStorage (tab-isolated). Do NOT use localStorage.
+    sessionStorage.setItem(SESSION_STORAGE_KEY, t);
   } else {
-    localStorage.removeItem(SESSION_STORAGE_KEY);
     sessionStorage.removeItem(SESSION_STORAGE_KEY);
-    localStorage.removeItem(AUTH_STORAGE_KEY);
+    // Also clear legacy localStorage entries if they exist
+    try {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+      localStorage.removeItem(AUTH_STORAGE_KEY);
+    } catch (_) {}
   }
 }
 
@@ -144,15 +154,10 @@ async function fetchHostMode() {
     IOS_CONFIG.authRequired = !!data.authRequired;
     IOS_CONFIG.paired = (data && data.paired !== undefined) ? !!data.paired : true;
     IOS_CONFIG.reportSource = IOS_CONFIG.mode;
-    if (data.backendUrl) {
-      try {
-        const health = await fetch(data.backendUrl + '/api/health', { signal: AbortSignal.timeout(3000) });
-        if (health.ok && (await health.json()).ok) {
-          IOS_CONFIG.reportApiBase = data.backendUrl;
-          IOS_CONFIG.reportSource = 'cloud';
-        }
-      } catch (_) { /* Standalone device history is still available. */ }
-    }
+    
+    // In device mode (accessing the ESP32), remain 100% offline and standalone.
+    // The ESP32 node synchronizes with the backend independently via background C++ tasks.
+    IOS_CONFIG.reportApiBase = '';
   } catch (err) {
     applyDataMode('device');
     IOS_CONFIG.authRequired = false;
